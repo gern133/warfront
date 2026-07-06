@@ -1,12 +1,10 @@
-export const MAP_W = 400;
-export const MAP_H = 400;
-export const CELLS = MAP_W * MAP_H;
 export const TICK_MS = 100;
 export const PORT = 8080;
 export const SPAWN_WAIT_S = 20; // время на выбор точки старта
 export const MAX_HUMANS = 100; // лимит людей в комнате
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
+export type MapType = 'random' | 'earth';
 
 export interface PlayerPub {
   id: number;
@@ -28,11 +26,12 @@ export interface AttackPub {
 
 export type ClientMsg =
   | { type: 'quick'; name: string } // быстрая игра — общая публичная комната
-  | { type: 'create'; name: string; difficulty: Difficulty }
+  | { type: 'create'; name: string; difficulty: Difficulty; map: MapType }
   | { type: 'joinLobby'; name: string; code: string }
   | { type: 'start' } // хост запускает игру в лобби
   | { type: 'spawn'; cell: number } // выбор точки старта
   | { type: 'respawn' } // реванш после смерти в той же комнате
+  | { type: 'leave' } // выход из комнаты в меню
   | { type: 'attack'; cell: number; ratio: number };
 
 export type ServerMsg =
@@ -41,14 +40,17 @@ export type ServerMsg =
       code: string;
       host: boolean;
       difficulty: Difficulty;
+      map: MapType;
       players: string[];
     }
   | {
       type: 'init';
       selfId: number;
       code: string;
-      terrain: number[];
-      owners: number[];
+      w: number;
+      h: number;
+      terrainRle: number[]; // RLE: [значение, длина, ...]
+      ownersRle: number[];
       players: PlayerPub[];
       spawnSeconds?: number; // сколько осталось на выбор спавна (фаза spawn)
     }

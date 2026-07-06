@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { PlayerPub, AttackPub, ServerMsg, PORT, Difficulty } from '../shared/protocol';
+import { PlayerPub, AttackPub, ServerMsg, PORT, Difficulty, MapType } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
 
@@ -10,13 +10,19 @@ interface LobbyInfo {
   code: string;
   host: boolean;
   difficulty: Difficulty;
+  map: MapType;
   players: string[];
 }
 
-const DIFF_LABELS: Record<Difficulty, string> = {
-  easy: 'Лёгкая — 50 ботов, из них 5 стран',
-  normal: 'Средняя — 70 ботов, из них 15 стран',
-  hard: 'Сложная — 90 ботов, из них 40 стран',
+const DIFF_LABELS: Record<Difficulty, { name: string; desc: string }> = {
+  easy: { name: 'Лёгкий', desc: '50 ботов · 5 стран' },
+  normal: { name: 'Средний', desc: '70 ботов · 15 стран' },
+  hard: { name: 'Тяжёлый', desc: '90 ботов · 40 стран' },
+};
+
+const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
+  random: { name: 'Случайный мир', desc: 'новые континенты каждый раунд' },
+  earth: { name: 'Земля', desc: 'реальные материки и острова' },
 };
 
 export default function App() {
@@ -25,6 +31,7 @@ export default function App() {
   const [name, setName] = useState(() => localStorage.getItem('wf-name') || '');
   const [joinCode, setJoinCode] = useState('');
   const [difficulty, setDifficulty] = useState<Difficulty>('normal');
+  const [mapType, setMapType] = useState<MapType>('random');
   const [lobby, setLobby] = useState<LobbyInfo | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [players, setPlayers] = useState<PlayerPub[]>([]);
@@ -76,7 +83,7 @@ export default function App() {
         setLobby(msg);
         setPhase('lobby');
       } else if (msg.type === 'init') {
-        gc.applyInit(msg.selfId, msg.terrain, msg.owners);
+        gc.applyInit(msg.selfId, msg.w, msg.h, msg.terrainRle, msg.ownersRle);
         gc.setPlayers(msg.players);
         setPlayers(msg.players);
         setRoomCode(msg.code);
@@ -122,8 +129,31 @@ export default function App() {
     return n;
   };
 
+  const leaveToMenu = () => {
+    sendMsg({ type: 'leave' });
+    gc.selfId = -1;
+    gc.setAttacks([]);
+    setPhase('menu');
+    setMenuView('main');
+    setLobby(null);
+    setSpawnLeft(null);
+    setWinner(null);
+  };
+
+  // Escape: из игры/лобби — в меню, в меню — назад к главному экрану
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (phaseRef.current === 'menu') setMenuView('main');
+      else leaveToMenu();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const quickPlay = () => sendMsg({ type: 'quick', name: cleanName() });
-  const createLobby = () => sendMsg({ type: 'create', name: cleanName(), difficulty });
+  const createLobby = () =>
+    sendMsg({ type: 'create', name: cleanName(), difficulty, map: mapType });
   const joinLobby = () =>
     sendMsg({ type: 'joinLobby', name: cleanName(), code: joinCode });
 
@@ -135,6 +165,9 @@ export default function App() {
   };
 
   const self = players.find((p) => p.id === gc.selfId);
+  const committed = attacks
+    .filter((a) => a.player === gc.selfId)
+    .reduce((s, a) => s + a.troops, 0);
   const board = players
     .filter((p) => p.alive && p.cells > 0)
     .sort((a, b) => b.cells - a.cells)
@@ -148,12 +181,19 @@ export default function App() {
       <canvas ref={miniRef} className="minimap" style={{ display: inGame ? 'block' : 'none' }} />
 
       {inGame && (
+        <button className="exit-btn" onClick={leaveToMenu} title="Esc — выход в меню">
+          ⎋ В меню
+        </button>
+      )}
+
+      {inGame && (
         <div className="panel leaderboard">
-          <div className="panel-title">
-            Лидеры {roomCode !== 'QUICK' && <span className="room-code">· {roomCode}</span>}
+          <div className="eyebrow">
+            Лидеры{roomCode !== 'QUICK' && <span className="room-code"> · {roomCode}</span>}
           </div>
-          {board.map((p) => (
+          {board.map((p, i) => (
             <div key={p.id} className={'lb-row' + (p.id === gc.selfId ? ' me' : '')}>
+              <span className="lb-rank">{i + 1}</span>
               <span className="dot" style={{ background: playerColorCSS(p.id) }} />
               <span className="lb-name">
                 {p.name}
@@ -167,26 +207,26 @@ export default function App() {
 
       {phase === 'spawn' && (
         <div className="spawn-banner">
-          🎯 Кликни по свободной земле — выбери точку старта
-          {spawnLeft !== null && spawnLeft > 0 && ` · ${spawnLeft} c`}
+          Кликните по свободной земле — выберите точку высадки
+          {spawnLeft !== null && spawnLeft > 0 && (
+            <span className="timer"> {spawnLeft}с</span>
+          )}
         </div>
       )}
       {phase === 'playing' && spawnLeft !== null && spawnLeft > 0 && (
-        <div className="spawn-banner">⏳ Ждём остальных игроков · {spawnLeft} c</div>
+        <div className="spawn-banner">
+          Ждём высадки остальных<span className="timer"> {spawnLeft}с</span>
+        </div>
       )}
 
       {phase === 'playing' && self && (
         <div className="panel hud">
           <div className="troops">
-            ⚔️ {self.troops.toLocaleString('ru')} / {self.maxTroops.toLocaleString('ru')}
-            {(() => {
-              const committed = attacks
-                .filter((a) => a.player === gc.selfId)
-                .reduce((s, a) => s + a.troops, 0);
-              return committed > 0 ? (
-                <span className="committed"> · в атаках {committed.toLocaleString('ru')}</span>
-              ) : null;
-            })()}
+            {self.troops.toLocaleString('ru')}
+            <span className="troops-max"> / {self.maxTroops.toLocaleString('ru')}</span>
+            {committed > 0 && (
+              <span className="committed"> ⚔ {committed.toLocaleString('ru')}</span>
+            )}
           </div>
           <div className="troop-bar">
             <div
@@ -198,7 +238,7 @@ export default function App() {
             />
           </div>
           <label className="ratio">
-            В атаку: {ratio}%
+            <span className="ratio-label">В атаку</span>
             <input
               type="range"
               min={5}
@@ -206,6 +246,7 @@ export default function App() {
               value={ratio}
               onChange={(e) => setRatio(+e.target.value)}
             />
+            <span className="ratio-val">{ratio}%</span>
           </label>
         </div>
       )}
@@ -213,43 +254,68 @@ export default function App() {
       {phase === 'menu' && (
         <div className="overlay">
           <div className="menu">
-            <h1>WARFRONT</h1>
-            <input
-              placeholder="Ваше имя"
-              value={name}
-              maxLength={16}
-              onChange={(e) => setName(e.target.value)}
-            />
+            <h1 className="title">Warfront</h1>
+            <div className="frontline" aria-hidden="true" />
+            <label className="field">
+              <span className="eyebrow">Позывной</span>
+              <input
+                placeholder="Ваше имя"
+                value={name}
+                maxLength={16}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
             {menuView === 'main' && (
               <>
-                <button onClick={quickPlay} disabled={!connected}>
-                  ⚡ Быстрая игра
+                <button className="primary" onClick={quickPlay} disabled={!connected}>
+                  В бой
                 </button>
                 <button className="secondary" onClick={() => setMenuView('create')} disabled={!connected}>
-                  🏰 Создать лобби
+                  Создать лобби
                 </button>
                 <button className="secondary" onClick={() => setMenuView('join')} disabled={!connected}>
-                  🔑 Войти по коду
+                  Войти по коду
                 </button>
                 {!connected && <p className="hint">Подключение к серверу…</p>}
               </>
             )}
             {menuView === 'create' && (
               <>
-                <div className="diff-list">
-                  {(Object.keys(DIFF_LABELS) as Difficulty[]).map((d) => (
-                    <label key={d} className={'diff' + (difficulty === d ? ' active' : '')}>
-                      <input
-                        type="radio"
-                        name="diff"
-                        checked={difficulty === d}
-                        onChange={() => setDifficulty(d)}
-                      />
-                      {DIFF_LABELS[d]}
-                    </label>
-                  ))}
+                <div className="field">
+                  <span className="eyebrow">Театр действий</span>
+                  <div className="opt-list">
+                    {(Object.keys(MAP_LABELS) as MapType[]).map((m) => (
+                      <label key={m} className={'opt' + (mapType === m ? ' active' : '')}>
+                        <input
+                          type="radio"
+                          name="map"
+                          checked={mapType === m}
+                          onChange={() => setMapType(m)}
+                        />
+                        <span className="opt-name">{MAP_LABELS[m].name}</span>
+                        <span className="opt-desc">{MAP_LABELS[m].desc}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-                <button onClick={createLobby} disabled={!connected}>
+                <div className="field">
+                  <span className="eyebrow">Уровень угрозы</span>
+                  <div className="opt-list">
+                    {(Object.keys(DIFF_LABELS) as Difficulty[]).map((d) => (
+                      <label key={d} className={'opt' + (difficulty === d ? ' active' : '')}>
+                        <input
+                          type="radio"
+                          name="diff"
+                          checked={difficulty === d}
+                          onChange={() => setDifficulty(d)}
+                        />
+                        <span className="opt-name">{DIFF_LABELS[d].name}</span>
+                        <span className="opt-desc">{DIFF_LABELS[d].desc}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <button className="primary" onClick={createLobby} disabled={!connected}>
                   Создать лобби
                 </button>
                 <button className="link" onClick={() => setMenuView('main')}>
@@ -259,14 +325,18 @@ export default function App() {
             )}
             {menuView === 'join' && (
               <>
-                <input
-                  placeholder="Код лобби"
-                  value={joinCode}
-                  maxLength={5}
-                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                  onKeyDown={(e) => e.key === 'Enter' && joinLobby()}
-                />
-                <button onClick={joinLobby} disabled={!connected || joinCode.length < 5}>
+                <label className="field">
+                  <span className="eyebrow">Шифр доступа</span>
+                  <input
+                    className="code-input"
+                    placeholder="•••••"
+                    value={joinCode}
+                    maxLength={5}
+                    onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => e.key === 'Enter' && joinLobby()}
+                  />
+                </label>
+                <button className="primary" onClick={joinLobby} disabled={!connected || joinCode.length < 5}>
                   Войти
                 </button>
                 <button className="link" onClick={() => setMenuView('main')}>
@@ -282,25 +352,33 @@ export default function App() {
       {phase === 'lobby' && lobby && (
         <div className="overlay">
           <div className="menu">
-            <h1>ЛОББИ</h1>
-            <div className="code-box" onClick={copyCode} title="Скопировать">
-              {lobby.code} {copied ? '✓' : '⧉'}
+            <h1 className="title">Лобби</h1>
+            <div className="frontline" aria-hidden="true" />
+            <div className="field">
+              <span className="eyebrow">Шифр доступа — отправьте союзникам</span>
+              <button className="code-box" onClick={copyCode}>
+                {lobby.code}
+                <span className="copy-mark">{copied ? '✓ скопировано' : 'копировать'}</span>
+              </button>
             </div>
-            <p className="hint">Отправь этот код друзьям</p>
+            <div className="lobby-meta">
+              {MAP_LABELS[lobby.map].name} · {DIFF_LABELS[lobby.difficulty].name.toLowerCase()} уровень
+            </div>
             <div className="lobby-players">
               {lobby.players.map((n, i) => (
                 <div key={i} className="lobby-player">
-                  👤 {n}
+                  {n}
                 </div>
               ))}
             </div>
-            <p className="hint">{DIFF_LABELS[lobby.difficulty]}</p>
             {lobby.host ? (
-              <button onClick={() => sendMsg({ type: 'start' })}>▶ Начать игру</button>
+              <button className="primary" onClick={() => sendMsg({ type: 'start' })}>
+                Начать игру
+              </button>
             ) : (
               <p className="hint">Ожидание хоста…</p>
             )}
-            <button className="link" onClick={() => location.reload()}>
+            <button className="link" onClick={leaveToMenu}>
               Покинуть лобби
             </button>
           </div>
@@ -310,17 +388,20 @@ export default function App() {
       {phase === 'dead' && (
         <div className="overlay">
           <div className="menu">
-            <h1>WARFRONT</h1>
-            <p className="dead-msg">Ваша империя пала! 💀</p>
-            <button onClick={() => sendMsg({ type: 'respawn' })}>Реванш</button>
-            <button className="link" onClick={() => location.reload()}>
+            <h1 className="title">Разбиты</h1>
+            <div className="frontline" aria-hidden="true" />
+            <p className="dead-msg">Ваша территория захвачена</p>
+            <button className="primary" onClick={() => sendMsg({ type: 'respawn' })}>
+              Реванш
+            </button>
+            <button className="link" onClick={leaveToMenu}>
               В меню
             </button>
           </div>
         </div>
       )}
 
-      {winner && <div className="winner">🏆 {winner} захватил мир! Новый раунд через 8 сек…</div>}
+      {winner && <div className="winner">🏆 {winner} — контроль над миром. Новый раунд через 8 с</div>}
     </div>
   );
 }

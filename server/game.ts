@@ -1,4 +1,5 @@
-import { MAP_W, MAP_H, CELLS, PlayerPub, AttackPub, Difficulty } from '../shared/protocol';
+import { PlayerPub, AttackPub, Difficulty, MapType } from '../shared/protocol';
+import { earthTerrain, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
 export interface Player {
   id: number;
@@ -22,6 +23,8 @@ interface Attack {
   rescanned: boolean; // полный пересбор фронта уже был после опустошения
 }
 
+const RANDOM_W = 560;
+const RANDOM_H = 560;
 const LAND_RATIO = 0.5;
 const SPAWN_TROOPS = 600;
 const NEUTRAL_COST = 1.4;
@@ -76,8 +79,12 @@ function weakNames(n: number): string[] {
 }
 
 export class Game {
-  terrain = new Uint8Array(CELLS); // 1 = суша, 0 = вода
-  owners = new Int16Array(CELLS); // 0 = нейтрально, иначе id игрока
+  readonly mapType: MapType;
+  readonly w: number;
+  readonly h: number;
+  readonly cells: number;
+  terrain: Uint8Array; // 1 = суша, 0 = вода
+  owners: Int16Array; // 0 = нейтрально, иначе id игрока
   players = new Map<number, Player>();
   attacks: Attack[] = [];
   changed = new Map<number, number>(); // cell -> новый владелец, копится за тик
@@ -87,7 +94,13 @@ export class Game {
   winnerId: number | null = null;
   private nextId = 1;
 
-  constructor() {
+  constructor(mapType: MapType = 'random') {
+    this.mapType = mapType;
+    this.w = mapType === 'earth' ? EARTH_W : RANDOM_W;
+    this.h = mapType === 'earth' ? EARTH_H : RANDOM_H;
+    this.cells = this.w * this.h;
+    this.terrain = new Uint8Array(this.cells);
+    this.owners = new Int16Array(this.cells);
     this.genTerrain();
   }
 
@@ -112,16 +125,22 @@ export class Game {
     }
   }
 
-  // Органичные континенты: случайные зёрна + рост фронтира (модель Эдена)
   private genTerrain() {
+    if (this.mapType === 'earth') {
+      this.terrain = earthTerrain();
+      this.landCount = 0;
+      for (let c = 0; c < this.cells; c++) if (this.terrain[c]) this.landCount++;
+      return;
+    }
+    // Случайные континенты: зёрна + рост фронтира (модель Эдена)
     this.landCount = 0;
-    const target = CELLS * LAND_RATIO;
+    const target = this.cells * LAND_RATIO;
     const frontier: number[] = [];
     const margin = 0.1;
     for (let s = 0; s < 14; s++) {
-      const x = Math.floor(MAP_W * (margin + Math.random() * (1 - 2 * margin)));
-      const y = Math.floor(MAP_H * (margin + Math.random() * (1 - 2 * margin)));
-      const c = y * MAP_W + x;
+      const x = Math.floor(this.w * (margin + Math.random() * (1 - 2 * margin)));
+      const y = Math.floor(this.h * (margin + Math.random() * (1 - 2 * margin)));
+      const c = y * this.w + x;
       if (!this.terrain[c]) {
         this.terrain[c] = 1;
         this.landCount++;
@@ -145,14 +164,31 @@ export class Game {
       this.landCount++;
       frontier.push(n);
     }
+    // типы местности: плавные градиенты через многослойный шум
+    const ox = Math.random() * 500;
+    const oy = Math.random() * 500;
+    for (let c = 0; c < this.cells; c++) {
+      if (!this.terrain[c]) continue;
+      const x = c % this.w;
+      const y = (c / this.w) | 0;
+      const polar = Math.min(y, this.h - 1 - y) / this.h;
+      const snow = smoothstep(0.11, 0.03, polar) + (fbm(x / 22 + ox, y / 22 + oy) - 0.5) * 0.55;
+      if (snow > 0.55) {
+        this.terrain[c] = 4; // снег
+      } else if (fbm(x / 40 + ox * 2, y / 40 + oy) > 0.63) {
+        this.terrain[c] = 3; // камень
+      } else if (fbm(x / 48 + oy * 2, y / 48 + ox) < 0.37) {
+        this.terrain[c] = 2; // песок
+      }
+    }
   }
 
   private forNeighbors(c: number, fn: (n: number) => void) {
-    const x = c % MAP_W;
+    const x = c % this.w;
     if (x > 0) fn(c - 1);
-    if (x < MAP_W - 1) fn(c + 1);
-    if (c >= MAP_W) fn(c - MAP_W);
-    if (c < CELLS - MAP_W) fn(c + MAP_W);
+    if (x < this.w - 1) fn(c + 1);
+    if (c >= this.w) fn(c - this.w);
+    if (c < this.cells - this.w) fn(c + this.w);
   }
 
   addPlayer(
@@ -177,26 +213,35 @@ export class Game {
     return p;
   }
 
-  // Игрок кликнул точку старта. true = успех
-  trySpawn(playerId: number, cell: number): boolean {
-    const p = this.players.get(playerId);
-    if (!p?.alive || p.spawned) return false;
-    if (cell < 0 || cell >= CELLS || !this.terrain[cell] || this.owners[cell] !== 0) {
-      return false;
-    }
-    const cx = cell % MAP_W;
-    const cy = (cell / MAP_W) | 0;
-    // не слишком близко к чужим владениям
-    const clearance = 5;
+  // Можно ли высадиться в клетку: суша, не занята людьми, вокруг нет людей.
+  // allowBots — разрешает вырезать плацдарм из территории ботов
+  private canPlace(cell: number, clearance: number, allowBots: boolean): boolean {
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
+    const o = this.owners[cell];
+    if (o !== 0 && !(allowBots && this.players.get(o)?.bot)) return false;
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
     for (let dy = -clearance; dy <= clearance; dy++) {
       for (let dx = -clearance; dx <= clearance; dx++) {
         const x = cx + dx;
         const y = cy + dy;
-        if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
-        if (this.owners[y * MAP_W + x] !== 0) return false;
+        if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
+        const oo = this.owners[y * this.w + x];
+        if (oo === 0) continue;
+        if (!allowBots) return false;
+        const op = this.players.get(oo);
+        if (op && !op.bot) return false; // рядом человек — нельзя
       }
     }
-    this.claimDisk(cx, cy, p.id);
+    return true;
+  }
+
+  // Игрок кликнул точку старта. true = успех
+  trySpawn(playerId: number, cell: number): boolean {
+    const p = this.players.get(playerId);
+    if (!p?.alive || p.spawned) return false;
+    if (!this.canPlace(cell, 5, true)) return false;
+    this.claimDisk(cell % this.w, (cell / this.w) | 0, p.id, true);
     p.spawned = true;
     p.troops = SPAWN_TROOPS;
     return true;
@@ -204,37 +249,29 @@ export class Game {
 
   // Случайный спавн: для ботов и для людей, не успевших выбрать за таймер
   spawnRandom(p: Player) {
-    for (let attempt = 0; attempt < 3000; attempt++) {
-      const c = (Math.random() * CELLS) | 0;
-      if (!this.terrain[c] || this.owners[c] !== 0) continue;
-      const cx = c % MAP_W;
-      const cy = (c / MAP_W) | 0;
-      const clearance = attempt < 1500 ? 7 : 4;
-      let ok = true;
-      for (let dy = -clearance; dy <= clearance && ok; dy++) {
-        for (let dx = -clearance; dx <= clearance && ok; dx++) {
-          const x = cx + dx;
-          const y = cy + dy;
-          if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
-          if (this.owners[y * MAP_W + x] !== 0) ok = false;
-        }
-      }
-      if (!ok) continue;
-      this.claimDisk(cx, cy, p.id);
+    for (let attempt = 0; attempt < 6000; attempt++) {
+      const c = (Math.random() * this.cells) | 0;
+      // сначала ищем чистое место, потом теснее, в крайнем случае — по ботам
+      const clearance = attempt < 2000 ? 7 : 4;
+      const allowBots = attempt >= 4000;
+      if (!this.canPlace(c, clearance, allowBots)) continue;
+      this.claimDisk(c % this.w, (c / this.w) | 0, p.id, allowBots);
       p.spawned = true;
       return;
     }
   }
 
-  private claimDisk(cx: number, cy: number, id: number) {
+  private claimDisk(cx: number, cy: number, id: number, takeBots = false) {
     for (let dy = -3; dy <= 3; dy++) {
       for (let dx = -3; dx <= 3; dx++) {
         if (dx * dx + dy * dy > 9) continue;
         const x = cx + dx;
         const y = cy + dy;
-        if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
-        const n = y * MAP_W + x;
-        if (this.terrain[n] && this.owners[n] === 0) this.setOwner(n, id);
+        if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
+        const n = y * this.w + x;
+        if (!this.terrain[n]) continue;
+        const o = this.owners[n];
+        if (o === 0 || (takeBots && this.players.get(o)?.bot)) this.setOwner(n, id);
       }
     }
   }
@@ -242,7 +279,7 @@ export class Game {
   removePlayer(id: number) {
     const p = this.players.get(id);
     if (!p) return;
-    for (let c = 0; c < CELLS; c++) {
+    for (let c = 0; c < this.cells; c++) {
       if (this.owners[c] === id) this.setOwner(c, 0);
     }
     this.attacks = this.attacks.filter((a) => a.player !== id);
@@ -275,7 +312,7 @@ export class Game {
   }
 
   launchAttackCell(playerId: number, cell: number, ratio: number) {
-    if (cell < 0 || cell >= CELLS || !this.terrain[cell]) return;
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return;
     const targetOwner = this.owners[cell];
     if (targetOwner === playerId) return;
     const p = this.players.get(playerId);
@@ -350,7 +387,7 @@ export class Game {
 
   private buildFrontier(a: Attack) {
     a.frontier.clear();
-    for (let c = 0; c < CELLS; c++) {
+    for (let c = 0; c < this.cells; c++) {
       if (this.owners[c] !== a.target || !this.terrain[c]) continue;
       let adj = false;
       this.forNeighbors(c, (n) => {
@@ -410,6 +447,12 @@ export class Game {
       const density = enemy.cells > 0 ? enemy.troops / enemy.cells : 0;
       cost = 2.5 + density * 0.5;
     }
+    // остаток меньше цены одной клетки — атака выдохлась, вернуть войска,
+    // иначе 1-2 юнита зависают в статусе атаки навсегда
+    if (a.troops < cost) {
+      this.refund(a, attacker);
+      return;
+    }
     let quota = Math.max(1, Math.ceil(a.frontier.size * WAVE_SPEED));
     for (let own = 4; own >= 1 && quota > 0; own--) {
       const list = buckets[own];
@@ -436,8 +479,11 @@ export class Game {
     p.thinkAt = this.tickNo + (p.strong ? 18 : 25) + ((Math.random() * (p.strong ? 30 : 50)) | 0);
     const readiness = p.strong ? 0.25 : 0.4;
     if (p.troops < p.maxTroops * readiness || p.troops < 150) return;
+    // на больших картах сканируем выборочно — ботам хватает грубой оценки соседей
+    const stride = Math.max(1, Math.floor(this.cells / 120000));
+    const start = (Math.random() * stride) | 0;
     const counts = new Map<number, number>();
-    for (let c = 0; c < CELLS; c++) {
+    for (let c = start; c < this.cells; c += stride) {
       if (this.owners[c] !== p.id) continue;
       this.forNeighbors(c, (n) => {
         if (this.terrain[n] && this.owners[n] !== p.id) {

@@ -11,8 +11,18 @@ import {
   ClientMsg,
   ServerMsg,
   Difficulty,
+  MapType,
 } from '../shared/protocol';
 import { Game } from './game';
+import { earthTerrain } from './earthmap';
+import { rleEncode } from '../shared/rle';
+
+// прогреваем кэш карты Земли на старте, чтобы первое лобби не ждало генерацию
+{
+  const t0 = Date.now();
+  earthTerrain();
+  console.log(`Карта Земли сгенерирована за ${Date.now() - t0} мс`);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', 'dist');
@@ -56,6 +66,7 @@ interface Room {
   phase: RoomPhase;
   spawnTicks: number; // тиков осталось на выбор спавна
   difficulty: Difficulty;
+  map: MapType;
   isPublic: boolean;
   resetTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -78,15 +89,16 @@ function genCode(): string {
   }
 }
 
-function makeRoom(code: string, difficulty: Difficulty, isPublic: boolean): Room {
+function makeRoom(code: string, difficulty: Difficulty, map: MapType, isPublic: boolean): Room {
   const room: Room = {
     code,
-    game: new Game(),
+    game: new Game(map),
     clients: new Set(),
     host: null,
     phase: 'lobby',
     spawnTicks: 0,
     difficulty,
+    map,
     isPublic,
     resetTimer: null,
   };
@@ -94,7 +106,7 @@ function makeRoom(code: string, difficulty: Difficulty, isPublic: boolean): Room
   return room;
 }
 
-const publicRoom = makeRoom('QUICK', 'normal', true);
+const publicRoom = makeRoom('QUICK', 'normal', 'random', true);
 publicRoom.phase = 'running';
 publicRoom.game.addBots('normal');
 
@@ -107,8 +119,10 @@ function sendInit(ws: WebSocket, st: CState, room: Room) {
     type: 'init',
     selfId: st.playerId ?? -1,
     code: room.code,
-    terrain: Array.from(room.game.terrain),
-    owners: Array.from(room.game.owners),
+    w: room.game.w,
+    h: room.game.h,
+    terrainRle: rleEncode(room.game.terrain),
+    ownersRle: rleEncode(room.game.owners),
     players: room.game.playersPub(),
     ...(room.phase === 'spawn'
       ? { spawnSeconds: Math.ceil((room.spawnTicks * TICK_MS) / 1000) }
@@ -124,6 +138,7 @@ function broadcastLobby(room: Room) {
       code: room.code,
       host: ws === room.host,
       difficulty: room.difficulty,
+      map: room.map,
       players: roster,
     });
   }
@@ -144,6 +159,14 @@ function leaveRoom(ws: WebSocket, st: CState) {
       room.host = room.clients.values().next().value ?? null;
       if (room.phase === 'lobby') broadcastLobby(room);
     }
+  } else if (room.clients.size === 0) {
+    // последний человек ушёл из быстрой игры — свежий мир для следующего
+    if (room.resetTimer) {
+      clearTimeout(room.resetTimer);
+      room.resetTimer = null;
+    }
+    room.game.reset();
+    room.game.addBots(room.difficulty);
   }
 }
 
@@ -216,7 +239,8 @@ wss.on('connection', (ws) => {
         const diff: Difficulty = ['easy', 'normal', 'hard'].includes(msg.difficulty)
           ? msg.difficulty
           : 'normal';
-        const room = makeRoom(genCode(), diff, false);
+        const map: MapType = msg.map === 'earth' ? 'earth' : 'random';
+        const room = makeRoom(genCode(), diff, map, false);
         room.host = ws;
         room.clients.add(ws);
         st.room = room;
@@ -268,6 +292,10 @@ wss.on('connection', (ws) => {
         room.game.launchAttackCell(st.playerId, msg.cell | 0, +msg.ratio);
         break;
       }
+      case 'leave': {
+        leaveRoom(ws, st);
+        break;
+      }
     }
   });
 
@@ -312,6 +340,8 @@ function checkSpawnPhase(room: Room) {
 setInterval(() => {
   for (const room of rooms.values()) {
     if (room.phase === 'lobby') continue;
+    // публичная комната без людей заморожена — боты не съедают карту впустую
+    if (room.isPublic && room.clients.size === 0) continue;
     const game = room.game;
 
     if (room.phase === 'running') game.tick();
