@@ -40,10 +40,6 @@ const LAKES: Ring[] = [
   [[-79.5, 43.6], [-76.5, 43.9], [-76.3, 43.3], [-79, 43.2]],
   // Каспий
   [[50, 47], [52.5, 46.5], [54, 44], [53.5, 42], [54, 40.5], [53, 37.5], [50, 36.8], [48.5, 38.5], [49.5, 41], [47.5, 43.5]],
-  // Арал
-  [[58, 46], [61, 46], [61, 44], [58, 44]],
-  // Байкал
-  [[104, 52], [106, 53.5], [109, 55], [110, 55.5], [108.5, 54], [105.5, 52], [104, 51.5]],
 ];
 
 // Биомные зоны — эллипсы с плавным затуханием влияния к краям:
@@ -117,32 +113,54 @@ function zoneScore(zones: Zone[], lon: number, lat: number): number {
   return best;
 }
 
-// Сканлайн-заливка: для каждой строки широты находим пересечения всех рёбер,
-// сортируем и заливаем между парами (чёт-нечет). Дырки колец учитываются сами.
+// «Разворачиваем» кольцо в непрерывные долготы: убираем прыжки через 180-й
+// меридиан, добавляя ±360. Так кольцо становится замкнутым в плоскости, и
+// заливка по строке всегда даёт чётное число пересечений (без полос).
+function unwrapRing(ring: Ring): Ring {
+  const out: Ring = [[ring[0][0], ring[0][1]]];
+  let prev = ring[0][0];
+  for (let i = 1; i < ring.length; i++) {
+    let lon = ring[i][0];
+    while (lon - prev > 180) lon -= 360;
+    while (lon - prev < -180) lon += 360;
+    out.push([lon, ring[i][1]]);
+    prev = lon;
+  }
+  return out;
+}
+
+// Сканлайн-заливка настоящими береговыми линиями. Долготы пар могут выходить
+// за [-180,180] (для колец у 180-го меридиана) — заливаем с заворотом по краю.
 function rasterize(rings: Ring[], w: number, h: number, mask: Uint8Array, value: number) {
-  interface Edge { y0: number; y1: number; x1: number; ya: number; x2: number; yb: number }
+  interface Edge { ya: number; yb: number; xa: number; xb: number }
   const edges: Edge[] = [];
-  for (const ring of rings) {
+  for (const raw of rings) {
+    const ring = unwrapRing(raw);
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
       const [xa, ya] = ring[i];
       const [xb, yb] = ring[j];
-      if (ya === yb) continue;
-      edges.push({ y0: Math.min(ya, yb), y1: Math.max(ya, yb), x1: xa, ya, x2: xb, yb });
+      if (ya !== yb) edges.push({ xa, ya, xb, yb });
     }
   }
-  const xs: number[] = [];
+  const lons: number[] = [];
   for (let y = 0; y < h; y++) {
     const lat = rowLat(y, h);
-    xs.length = 0;
+    lons.length = 0;
     for (const e of edges) {
-      if (lat <= e.y0 || lat > e.y1) continue;
-      xs.push(e.x1 + ((lat - e.ya) / (e.yb - e.ya)) * (e.x2 - e.x1));
+      const lo = Math.min(e.ya, e.yb);
+      const hi = Math.max(e.ya, e.yb);
+      if (lat <= lo || lat > hi) continue;
+      lons.push(e.xa + ((lat - e.ya) / (e.yb - e.ya)) * (e.xb - e.xa));
     }
-    xs.sort((a, b) => a - b);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      const px0 = Math.max(0, Math.ceil(((xs[k] + 180) / 360) * w - 0.5));
-      const px1 = Math.min(w - 1, Math.floor(((xs[k + 1] + 180) / 360) * w - 0.5));
-      for (let px = px0; px <= px1; px++) mask[y * w + px] = value;
+    lons.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < lons.length; k += 2) {
+      // диапазон долгот [lons[k], lons[k+1]] в пиксели, с заворотом по модулю w
+      const p0 = Math.ceil(((lons[k] + 180) / 360) * w - 0.5);
+      const p1 = Math.floor(((lons[k + 1] + 180) / 360) * w - 0.5);
+      for (let p = p0; p <= p1; p++) {
+        const px = ((p % w) + w) % w;
+        mask[y * w + px] = value;
+      }
     }
   }
 }
@@ -168,20 +186,11 @@ export function earthTerrain(): Uint8Array {
   rasterize(allRings, w, h, mask, 1);
   rasterize(LAKES, w, h, mask, 0); // озёра — вода
 
-  // Антарктида в данных не замкнута: ниже 78°ю — сплошной ледник до нижнего
-  // края, а колонны от берега (ниже 70°ю) дотягиваем до него, не трогая моря
-  const y70 = latRow(-70, h);
-  const y78 = latRow(-78, h);
-  for (let y = y78; y < h; y++) {
+  // Антарктида в данных обрывается у полюса — гарантируем сплошной ледник
+  // ниже 82°ю до нижнего края карты (берег севернее рисует сам полигон)
+  const y82 = latRow(-82, h);
+  for (let y = Math.max(0, y82); y < h; y++) {
     for (let x = 0; x < w; x++) mask[y * w + x] = 1;
-  }
-  for (let x = 0; x < w; x++) {
-    for (let y = y70; y < y78; y++) {
-      if (mask[y * w + x]) {
-        for (let yy = y; yy < y78; yy++) mask[yy * w + x] = 1;
-        break;
-      }
-    }
   }
 
   // убираем пиксельные острова: компоненты меньше 8 клеток — в воду
