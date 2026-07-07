@@ -236,7 +236,7 @@ wss.on('connection', (ws) => {
       case 'create': {
         leaveRoom(ws, st);
         st.name = cleanName(msg.name);
-        const diff: Difficulty = ['easy', 'normal', 'hard'].includes(msg.difficulty)
+        const diff: Difficulty = ['easy', 'normal', 'hard', 'insane'].includes(msg.difficulty)
           ? msg.difficulty
           : 'normal';
         const map: MapType = msg.map === 'earth' ? 'earth' : 'random';
@@ -290,6 +290,19 @@ wss.on('connection', (ws) => {
         const room = st.room;
         if (!room || room.phase !== 'running' || st.playerId === null) return;
         room.game.launchAttackCell(st.playerId, msg.cell | 0, +msg.ratio);
+        break;
+      }
+      case 'invade': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const ok = room.game.launchInvasion(st.playerId, msg.cell | 0, +msg.ratio);
+        if (!ok) send(ws, { type: 'error', message: 'Нет морского пути к этой цели' });
+        break;
+      }
+      case 'recall': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        room.game.recallBoat(st.playerId, msg.boatId | 0);
         break;
       }
       case 'leave': {
@@ -365,6 +378,7 @@ setInterval(() => {
       changes,
       players: game.playersPub(),
       attacks: game.attacksPub(),
+      boats: game.boatsPub(),
     } satisfies ServerMsg);
     for (const ws of room.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(update);

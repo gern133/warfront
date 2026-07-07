@@ -1,5 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { PlayerPub, AttackPub, ServerMsg, PORT, Difficulty, MapType } from '../shared/protocol';
+import { memo, useEffect, useRef, useState } from 'react';
+import {
+  PlayerPub,
+  AttackPub,
+  BoatPub,
+  ServerMsg,
+  PORT,
+  Difficulty,
+  MapType,
+} from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
 
@@ -14,10 +22,13 @@ interface LobbyInfo {
   players: string[];
 }
 
+// Ботов всегда 300 (275 пассивного «корма» + 25 стран); сложность меняет силу
+// стран относительно игрока
 const DIFF_LABELS: Record<Difficulty, { name: string; desc: string }> = {
-  easy: { name: 'Лёгкий', desc: '50 ботов · 5 стран' },
-  normal: { name: 'Средний', desc: '70 ботов · 15 стран' },
-  hard: { name: 'Тяжёлый', desc: '90 ботов · 40 стран' },
+  easy: { name: 'Лёгкий', desc: 'страны слабее вас' },
+  normal: { name: 'Средний', desc: 'страны как вы' },
+  hard: { name: 'Тяжёлый', desc: 'страны на 20% сильнее' },
+  insane: { name: 'Безумный', desc: 'страны на 50% сильнее' },
 };
 
 const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
@@ -36,12 +47,14 @@ export default function App() {
   const [roomCode, setRoomCode] = useState('');
   const [players, setPlayers] = useState<PlayerPub[]>([]);
   const [attacks, setAttacks] = useState<AttackPub[]>([]);
+  const [boats, setBoats] = useState<BoatPub[]>([]);
   const [spawnLeft, setSpawnLeft] = useState<number | null>(null);
   const [winner, setWinner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [ratio, setRatio] = useState(30);
   const [connected, setConnected] = useState(false);
+  const [invadeMenu, setInvadeMenu] = useState<{ cell: number; x: number; y: number } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -49,6 +62,14 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const ratioRef = useRef(ratio);
   const phaseRef = useRef(phase);
+  const troopHistory = useRef<number[]>([]); // история войск для графика прироста
+  const liveTroops = useRef(0); // актуальные войска (обновляются каждый тик)
+  const [shownTroops, setShownTroops] = useState(0); // отображаемое значение (реже)
+  const [fps, setFps] = useState(0);
+  const [growthView, setGrowthView] = useState<{ rate: number; points: number[] }>({
+    rate: 0,
+    points: [],
+  });
   ratioRef.current = ratio;
   phaseRef.current = phase;
 
@@ -61,11 +82,18 @@ export default function App() {
     const detach = gc.attach(canvasRef.current!);
     const detachMini = gc.attachMinimap(miniRef.current!);
     gc.onCellClick = (cell) => {
+      setInvadeMenu(null);
       if (phaseRef.current === 'spawn') {
         sendMsg({ type: 'spawn', cell });
       } else if (phaseRef.current === 'playing') {
         sendMsg({ type: 'attack', cell, ratio: ratioRef.current / 100 });
       }
+    };
+    // правый клик / два пальца по суше — меню морского вторжения
+    gc.onCellRightClick = (cell, sx, sy) => {
+      if (phaseRef.current !== 'playing') return;
+      if (!gc.terrain[cell] || gc.owners[cell] === gc.selfId) return;
+      setInvadeMenu({ cell, x: sx, y: sy });
     };
 
     // через https-туннель (cloudflared/ngrok) — wss на том же хосте
@@ -93,13 +121,26 @@ export default function App() {
         gc.applyUpdate(msg.changes);
         gc.setPlayers(msg.players);
         gc.setAttacks(msg.attacks);
+        gc.setBoats(msg.boats);
         setPlayers(msg.players);
         setAttacks(msg.attacks);
+        setBoats(msg.boats);
+        // копим историю войск для графика прироста (последние ~12 с при 100мс)
+        if (gc.selfId > 0) {
+          const me = msg.players.find((p) => p.id === gc.selfId);
+          if (me) {
+            liveTroops.current = me.troops;
+            const h = troopHistory.current;
+            h.push(me.troops);
+            if (h.length > 120) h.shift();
+          }
+        }
       } else if (msg.type === 'spawned') {
         setPhase('playing');
       } else if (msg.type === 'roundStart') {
         setSpawnLeft(null);
       } else if (msg.type === 'dead') {
+        troopHistory.current = [];
         setPhase('dead');
       } else if (msg.type === 'winner') {
         setWinner(msg.name);
@@ -123,6 +164,19 @@ export default function App() {
     return () => clearTimeout(t);
   }, [spawnLeft]);
 
+  // счётчики и график обновляем визуально раз в 1с — оптимизация,
+  // чтобы числа не мельтешили каждый тик
+  useEffect(() => {
+    const iv = setInterval(() => {
+      setShownTroops(liveTroops.current);
+      setFps(gc.fps);
+      const h = troopHistory.current;
+      const rate = h.length > 30 ? Math.round((h[h.length - 1] - h[h.length - 31]) / 3) : 0;
+      setGrowthView({ rate, points: h.slice() });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, []);
+
   const cleanName = () => {
     const n = name.trim() || 'Аноним';
     localStorage.setItem('wf-name', n);
@@ -138,6 +192,7 @@ export default function App() {
     setLobby(null);
     setSpawnLeft(null);
     setWinner(null);
+    troopHistory.current = [];
   };
 
   // Escape: из игры/лобби — в меню, в меню — назад к главному экрану
@@ -168,6 +223,10 @@ export default function App() {
   const committed = attacks
     .filter((a) => a.player === gc.selfId)
     .reduce((s, a) => s + a.troops, 0);
+  const nameOf = (id: number) => players.find((p) => p.id === id)?.name ?? '?';
+  // мои десанты (куда плыву) и вражеские (кто плывёт ко мне)
+  const myBoats = boats.filter((b) => b.player === gc.selfId);
+  const incoming = boats.filter((b) => b.target === gc.selfId);
   const board = players
     .filter((p) => p.alive && p.cells > 0)
     .sort((a, b) => b.cells - a.cells)
@@ -179,6 +238,8 @@ export default function App() {
     <div className="app">
       <canvas ref={canvasRef} className="map" />
       <canvas ref={miniRef} className="minimap" style={{ display: inGame ? 'block' : 'none' }} />
+
+      <div className="fps" title="Кадров в секунду">{fps} FPS</div>
 
       {inGame && (
         <button className="exit-btn" onClick={leaveToMenu} title="Esc — выход в меню">
@@ -220,14 +281,55 @@ export default function App() {
       )}
 
       {phase === 'playing' && self && (
-        <div className="panel hud">
-          <div className="troops">
-            {self.troops.toLocaleString('ru')}
-            <span className="troops-max"> / {self.maxTroops.toLocaleString('ru')}</span>
-            {committed > 0 && (
-              <span className="committed"> ⚔ {committed.toLocaleString('ru')}</span>
-            )}
-          </div>
+        <div className="hud-stack">
+          {incoming.length > 0 && (
+            <div className="incoming">
+              {incoming.map((b) => (
+                <button
+                  key={b.id}
+                  className="incoming-row"
+                  onClick={() => gc.focusOn(b.path[0] ?? b.x, b.path[1] ?? b.y)}
+                  title="Показать агрессора"
+                >
+                  <span className="inc-dot" style={{ background: playerColorCSS(b.player) }} />
+                  <span className="inc-text">
+                    🚢 <b>{b.troops.toLocaleString('ru')}</b> плывёт от {nameOf(b.player)}
+                  </span>
+                  <span className="inc-focus">⌖</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {myBoats.length > 0 && (
+            <div className="myboats">
+              {myBoats.map((b) => (
+                <span key={b.id} className="myboat">
+                  🚢 {b.troops.toLocaleString('ru')} → {nameOf(b.target) === '?' ? 'берег' : nameOf(b.target)}
+                  <button
+                    className="myboat-recall"
+                    title="Отозвать десант"
+                    onClick={() => sendMsg({ type: 'recall', boatId: b.id })}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="panel hud">
+            <Sparkline
+              data={growthView.points}
+              max={self.maxTroops}
+              color={playerColorCSS(self.id)}
+              rate={growthView.rate}
+            />
+            <div className="troops">
+              {shownTroops.toLocaleString('ru')}
+              <span className="troops-max"> / {self.maxTroops.toLocaleString('ru')}</span>
+              {committed > 0 && (
+                <span className="committed"> ⚔ {committed.toLocaleString('ru')}</span>
+              )}
+            </div>
           <div className="troop-bar">
             <div
               className="troop-fill"
@@ -248,6 +350,7 @@ export default function App() {
             />
             <span className="ratio-val">{ratio}%</span>
           </label>
+          </div>
         </div>
       )}
 
@@ -401,7 +504,79 @@ export default function App() {
         </div>
       )}
 
+      {invadeMenu && (
+        <>
+          <div className="menu-scrim" onClick={() => setInvadeMenu(null)} />
+          <div
+            className="ctx-menu"
+            style={{
+              left: Math.min(invadeMenu.x, window.innerWidth - 220),
+              top: Math.min(invadeMenu.y, window.innerHeight - 120),
+            }}
+          >
+            <div className="ctx-title">
+              Цель:{' '}
+              {gc.owners[invadeMenu.cell] === 0
+                ? 'нейтральный берег'
+                : nameOf(gc.owners[invadeMenu.cell])}
+            </div>
+            <button
+              className="ctx-btn"
+              onClick={() => {
+                sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
+                setInvadeMenu(null);
+              }}
+            >
+              🚢 Морское вторжение · {ratio}%
+            </button>
+            <button className="ctx-cancel" onClick={() => setInvadeMenu(null)}>
+              Отмена
+            </button>
+          </div>
+        </>
+      )}
+
       {winner && <div className="winner">🏆 {winner} — контроль над миром. Новый раунд через 8 с</div>}
     </div>
   );
 }
+
+// График роста войск: залитая область истории + метка прироста в секунду.
+// memo — перерисовывается только при смене снимка данных (раз в 0.5с).
+const Sparkline = memo(function Sparkline({
+  data,
+  max,
+  color,
+  rate,
+}: {
+  data: number[];
+  max: number;
+  color: string;
+  rate: number;
+}) {
+  const W = 200;
+  const H = 40;
+  const n = data.length;
+  const top = Math.max(max, ...(n ? data : [1]), 1);
+  const pts =
+    n > 1
+      ? data.map((v, i) => `${(i / (n - 1)) * W},${H - (v / top) * H}`).join(' ')
+      : '';
+  return (
+    <div className="growth">
+      <span className="growth-label">Прирост войск</span>
+      <svg className="growth-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        {pts && (
+          <>
+            <polyline points={`0,${H} ${pts} ${W},${H}`} fill={color} opacity="0.18" />
+            <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" />
+          </>
+        )}
+      </svg>
+      <span className="growth-rate" style={{ color: rate >= 0 ? '#7dd18b' : '#ff6a55' }}>
+        {rate >= 0 ? '+' : ''}
+        {rate.toLocaleString('ru')}/с
+      </span>
+    </div>
+  );
+});

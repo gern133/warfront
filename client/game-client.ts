@@ -1,9 +1,14 @@
-import { PlayerPub, AttackPub } from '../shared/protocol';
-import { playerColorRGB } from '../shared/color';
+import { PlayerPub, AttackPub, BoatPub } from '../shared/protocol';
+import { playerColorRGB, playerColorCSS } from '../shared/color';
 import { rleDecode } from '../shared/rle';
 
 const WATER: [number, number, number] = [58, 96, 140];
 const WAR: [number, number, number] = [225, 36, 26]; // линия фронта
+// метки стран/людей показываем, когда приблизились вдвое от обзорного зума;
+// «корм» — только если он огромный или приближение очень сильное
+const LABEL_ZOOM_MUL = 2;
+const FOOD_LABEL_MUL = 5;
+const FOOD_LABEL_CELLS = 4000;
 // цвета нейтральной местности по типу почвы — как на классических картах мира
 const TERRAIN: Record<number, [number, number, number]> = {
   1: [168, 190, 138], // трава
@@ -23,8 +28,10 @@ export class GameClient {
   terrain = new Uint8Array(0);
   owners = new Int16Array(0);
   selfId = -1;
+  fps = 0;
 
   onCellClick: ((cell: number) => void) | null = null;
+  onCellRightClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
 
   private img: ImageData | null = null;
   private off = document.createElement('canvas');
@@ -32,11 +39,13 @@ export class GameClient {
   private dirty = true;
 
   private players: PlayerPub[] = [];
+  private playersTick = 0; // троттлинг отображаемых армий на карте (раз в 1с)
   private labels = new Map<number, { x: number; y: number }>();
   private miniCanvas: HTMLCanvasElement | null = null;
   private miniCtx: CanvasRenderingContext2D | null = null;
 
   private attacks: AttackPub[] = [];
+  private boats: BoatPub[] = [];
   private warSet = new Set<number>(); // с кем воюем: атакуем мы или атакуют нас
   private warLabels: { x: number; y: number; lines: string[] }[] = [];
   // сглаженные цвета нейтральной земли (переходы биомов), статичны за раунд
@@ -126,11 +135,14 @@ export class GameClient {
     this.dirty = true;
   }
 
-  // Центроиды территорий — точки, где рисуем имена игроков.
-  // На больших картах пересчитываем раз в полсекунды
+  // Центроиды территорий — точки, где рисуем имена игроков. Пересчёт редкий
+  // (раз в ~2с) и только когда карта приближена настолько, что метки видны
   setPlayers(players: PlayerPub[]) {
-    this.players = players;
-    if (this.labelTick++ % 5 !== 0) return;
+    // отображаемые имена и армии на карте (в т.ч. у ботов и стран) обновляем
+    // визуально раз в 1с — иначе числа мельтешат каждый тик
+    if (this.playersTick++ % 10 === 0) this.players = players;
+    if (!this.labelsVisible()) return; // отдалено — метки не рисуются
+    if (this.labelTick++ % 20 !== 0) return;
     const acc = new Map<number, { sx: number; sy: number; n: number }>();
     for (let c = 0; c < this.cells; c++) {
       const o = this.owners[c];
@@ -150,6 +162,18 @@ export class GameClient {
     }
   }
 
+  setBoats(boats: BoatPub[]) {
+    this.boats = boats;
+  }
+
+  // Центрируем камеру на клетке (фокус на агрессоре), с приближением
+  focusOn(cx: number, cy: number) {
+    this.zoom = Math.max(this.zoom, this.minZoom() * 3, 5);
+    this.panX = window.innerWidth / 2 - cx * this.zoom;
+    this.panY = window.innerHeight / 2 - cy * this.zoom;
+    this.clampPan();
+  }
+
   setAttacks(attacks: AttackPub[]) {
     this.attacks = attacks;
     const nw = new Set<number>();
@@ -163,7 +187,10 @@ export class GameClient {
       nw.size !== this.warSet.size || [...nw].some((id) => !this.warSet.has(id));
     this.warSet = nw;
     if (changed) this.repaintAll(); // война началась/кончилась — перекрасить фронт
-    if (changed || this.warTick++ % 3 === 0) this.computeWarLabels();
+    // счётчики фронта пересчитываем редко и только когда они видны
+    if (this.labelsVisible() && (changed || this.warTick++ % 10 === 0)) {
+      this.computeWarLabels();
+    }
   }
 
   // Точки у линии фронта, где рисуем выделенные войска
@@ -268,10 +295,15 @@ export class GameClient {
     return Math.min(window.innerWidth / this.w, window.innerHeight / this.h) * 0.8;
   }
 
-  // Стартовый вид: карта целиком по размеру экрана
+  // Метки видны, когда приблизились вдвое от обзорного (минимального) зума
+  private labelsVisible() {
+    return this.zoom >= this.minZoom() * LABEL_ZOOM_MUL;
+  }
+
+  // Стартовый вид: максимальный обзор всей карты с запасом (для выбора спавна)
   private fitView() {
     if (!this.w) return;
-    const z = Math.min(window.innerWidth / this.w, window.innerHeight / this.h) * 0.97;
+    const z = this.minZoom();
     this.zoom = z;
     this.panX = (window.innerWidth - this.w * z) / 2;
     this.panY = (window.innerHeight - this.h * z) / 2;
@@ -293,8 +325,15 @@ export class GameClient {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    // при отдалении названия стран и счётчики скрыты — рисуем только лодки
+    const showLabels = this.labelsVisible();
+    const foodZoom = this.minZoom() * FOOD_LABEL_MUL;
+    if (showLabels)
     for (const p of this.players) {
       if (!p.alive || p.cells === 0) continue;
+      // корм подписываем лишь когда он огромен или карта сильно приближена
+      const isFood = p.bot && !p.strong;
+      if (isFood && p.cells < FOOD_LABEL_CELLS && this.zoom < foodZoom) continue;
       const l = this.labels.get(p.id);
       if (!l) continue;
       let size = Math.sqrt(p.cells) * this.zoom * 0.22;
@@ -317,7 +356,88 @@ export class GameClient {
         ctx.fillText(troops, sx, ty);
       }
     }
-    // выделенные войска у линии фронта
+    // морские десанты: след и кружок из одной параметризации по дистанции —
+    // линия идёт точно за лодкой по той же волнистой траектории
+    const WOB_AMP = 10;
+    const WOB_FREQ = 0.08;
+    for (const b of this.boats) {
+      const pts = b.path.length / 2;
+      if (pts < 2) continue;
+      const col = playerColorCSS(b.player);
+      const hostile = b.target === this.selfId;
+      // накопленная длина проредённого маршрута
+      const cum = [0];
+      for (let i = 1; i < pts; i++) {
+        cum.push(
+          cum[i - 1] +
+            Math.hypot(b.path[i * 2] - b.path[(i - 1) * 2], b.path[i * 2 + 1] - b.path[(i - 1) * 2 + 1])
+        );
+      }
+      const total = cum[pts - 1] || 1;
+      // базовая точка маршрута на дистанции d (без покачивания)
+      const baseAt = (d: number): [number, number] => {
+        d = Math.max(0, Math.min(total, d));
+        let s = 0;
+        while (s < pts - 2 && cum[s + 1] < d) s++;
+        const segLen = cum[s + 1] - cum[s] || 1;
+        const t = (d - cum[s]) / segLen;
+        return [
+          b.path[s * 2] + (b.path[(s + 1) * 2] - b.path[s * 2]) * t,
+          b.path[s * 2 + 1] + (b.path[(s + 1) * 2 + 1] - b.path[s * 2 + 1]) * t,
+        ];
+      };
+      // точка с покачиванием: нормаль берём по «окну» (сглаженное направление,
+      // не скачет на изломах), амплитуду гасим к обоим концам маршрута
+      const pointAt = (d: number): [number, number] => {
+        const [px, py] = baseAt(d);
+        const [ax, ay] = baseAt(d - 8);
+        const [bx2, by2] = baseAt(d + 8);
+        const len = Math.hypot(bx2 - ax, by2 - ay) || 1;
+        const nx = -(by2 - ay) / len;
+        const ny = (bx2 - ax) / len;
+        const taper = Math.sin(Math.PI * Math.max(0, Math.min(1, d / total)));
+        const wob = Math.sin(d * WOB_FREQ) * WOB_AMP * taper;
+        return [px + nx * wob, py + ny * wob];
+      };
+      const done = b.prog * total;
+      const scr = (p: [number, number]) => [this.panX + p[0] * this.zoom, this.panY + p[1] * this.zoom];
+      // след — сплошная линия от старта до текущей позиции
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = hostile ? 'rgba(255,77,51,0.85)' : col;
+      ctx.beginPath();
+      const step = Math.max(2, total / 60);
+      let first = true;
+      for (let d = 0; d <= done; d += step) {
+        const [px, py] = scr(pointAt(d));
+        if (first) {
+          ctx.moveTo(px, py);
+          first = false;
+        } else ctx.lineTo(px, py);
+      }
+      const [bx, by] = scr(pointAt(done));
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+      const rad = Math.max(5, Math.min(11, this.zoom * 1.6));
+      ctx.beginPath();
+      ctx.arc(bx, by, rad, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = hostile ? '#ff4d33' : 'rgba(0,0,0,0.6)';
+      ctx.stroke();
+      const label = fmtTroops(b.troops);
+      const fs = Math.max(10, rad * 1.3);
+      ctx.font = `700 ${fs}px 'IBM Plex Mono', monospace`;
+      ctx.lineWidth = Math.max(2, fs / 5);
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillStyle = '#fff';
+      ctx.strokeText(label, bx, by - rad - fs * 0.7);
+      ctx.fillText(label, bx, by - rad - fs * 0.7);
+    }
+
+    // выделенные войска у линии фронта — тоже скрыты при отдалении
+    if (showLabels)
     for (const wl of this.warLabels) {
       const size = Math.min(16, Math.max(11, this.zoom * 3));
       const sx = this.panX + wl.x * this.zoom;
@@ -406,7 +526,17 @@ export class GameClient {
     window.addEventListener('resize', resize);
     this.fitView();
 
+    let frames = 0;
+    let lastFps = performance.now();
     const loop = () => {
+      // замер FPS раз в ~0.5с
+      frames++;
+      const t = performance.now();
+      if (t - lastFps >= 500) {
+        this.fps = Math.round((frames * 1000) / (t - lastFps));
+        frames = 0;
+        lastFps = t;
+      }
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = '#05070d';
@@ -429,9 +559,20 @@ export class GameClient {
     raf = requestAnimationFrame(loop);
 
     const onDown = (e: PointerEvent) => {
+      if (e.button === 2) return; // правый клик — контекстное меню, не пан/атака
       down = { x: e.clientX, y: e.clientY };
       panning = false;
       canvas.setPointerCapture(e.pointerId);
+    };
+    // правый клик / два пальца на тачпаде → морское вторжение
+    const onContext = (e: MouseEvent) => {
+      e.preventDefault();
+      if (!this.w) return;
+      const cx = Math.floor((e.clientX - this.panX) / this.zoom);
+      const cy = Math.floor((e.clientY - this.panY) / this.zoom);
+      if (cx >= 0 && cy >= 0 && cx < this.w && cy < this.h) {
+        this.onCellRightClick?.(cy * this.w + cx, e.clientX, e.clientY);
+      }
     };
     const onMove = (e: PointerEvent) => {
       if (!down) return;
@@ -468,6 +609,7 @@ export class GameClient {
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerup', onUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('contextmenu', onContext);
 
     return () => {
       cancelAnimationFrame(raf);
@@ -476,6 +618,7 @@ export class GameClient {
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerup', onUp);
       canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('contextmenu', onContext);
     };
   }
 }

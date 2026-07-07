@@ -3,7 +3,7 @@ export const PORT = 8080;
 export const SPAWN_WAIT_S = 20; // время на выбор точки старта
 export const MAX_HUMANS = 100; // лимит людей в комнате
 
-export type Difficulty = 'easy' | 'normal' | 'hard';
+export type Difficulty = 'easy' | 'normal' | 'hard' | 'insane';
 export type MapType = 'random' | 'earth';
 
 export interface PlayerPub {
@@ -24,6 +24,18 @@ export interface AttackPub {
   troops: number;
 }
 
+// Морской десант в пути: кружок плывёт по маршруту path (обходит сушу)
+export interface BoatPub {
+  id: number;
+  player: number;
+  target: number; // 0 = нейтральный берег
+  troops: number;
+  x: number; // текущая позиция (в клетках, с покачиванием)
+  y: number;
+  path: number[]; // маршрут: [x0,y0,x1,y1,...] в клетках (проредённый)
+  prog: number; // 0..1 — доля пройденного пути (для следа)
+}
+
 export type ClientMsg =
   | { type: 'quick'; name: string } // быстрая игра — общая публичная комната
   | { type: 'create'; name: string; difficulty: Difficulty; map: MapType }
@@ -32,7 +44,9 @@ export type ClientMsg =
   | { type: 'spawn'; cell: number } // выбор точки старта
   | { type: 'respawn' } // реванш после смерти в той же комнате
   | { type: 'leave' } // выход из комнаты в меню
-  | { type: 'attack'; cell: number; ratio: number };
+  | { type: 'attack'; cell: number; ratio: number } // сухопутная атака (ЛКМ)
+  | { type: 'invade'; cell: number; ratio: number } // морское вторжение (ПКМ)
+  | { type: 'recall'; boatId: number }; // отозвать десант
 
 export type ServerMsg =
   | {
@@ -54,7 +68,13 @@ export type ServerMsg =
       players: PlayerPub[];
       spawnSeconds?: number; // сколько осталось на выбор спавна (фаза spawn)
     }
-  | { type: 'update'; changes: number[]; players: PlayerPub[]; attacks: AttackPub[] }
+  | {
+      type: 'update';
+      changes: number[];
+      players: PlayerPub[];
+      attacks: AttackPub[];
+      boats: BoatPub[];
+    }
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла
   | { type: 'dead' }
