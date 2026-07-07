@@ -1,4 +1,21 @@
-import { PlayerPub, AttackPub, BoatPub, Difficulty, MapType } from '../shared/protocol';
+import {
+  PlayerPub,
+  AttackPub,
+  BoatPub,
+  BuildingPub,
+  BuildingType,
+  Difficulty,
+  MapType,
+  START_MONEY,
+  hqCost,
+  HQ_RADIUS,
+  HQ_BUILD_TICKS,
+  HQ_FUSE_TICKS,
+  HQ_EXPLODE_RADIUS,
+  MAX_HQ_LEVEL,
+  hqUpgradeCost,
+  hqUpgradeTicks,
+} from '../shared/protocol';
 import { earthTerrain, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
 export interface Player {
@@ -14,7 +31,21 @@ export interface Player {
   passive: boolean; // слабые боты-«корм»: только расширяются в нейтраль
   growthMul: number;
   maxMul: number; // множитель потолка войск (у корма втрое меньше)
+  money: number;
   thinkAt: number;
+  spawnTick: number; // когда игрок высадился (для раннего буста роста)
+}
+
+interface Building {
+  id: number;
+  owner: number;
+  cell: number;
+  type: BuildingType;
+  readyTick: number; // тик, на котором постройка завершится
+  level: number; // 1 обычный, 2 взрыв по области, 3 усиленный
+  fuseTick: number; // тик взрыва после захвата (0 = не тикает)
+  upStart: number; // тик начала апгрейда (0 = не улучшается)
+  upEnd: number; // тик завершения апгрейда
 }
 
 interface Attack {
@@ -139,6 +170,12 @@ export class Game {
   cellsOf = new Map<number, number[]>();
   attacks: Attack[] = [];
   boats: Boat[] = [];
+  buildings: Building[] = [];
+  private nextBuildingId = 1;
+  // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
+  // пересобирается только при изменении зданий — в бою это O(1) чтение
+  fortField: Int16Array;
+  private fortDirty = true;
   landId: Int16Array; // id связного материка для каждой клетки суши (-1 = вода)
   difficulty: Difficulty = 'normal';
   // грубая водная сетка для поиска морских путей (обход островов)
@@ -162,6 +199,7 @@ export class Game {
     this.terrain = new Uint8Array(this.cells);
     this.owners = new Int16Array(this.cells);
     this.landId = new Int16Array(this.cells);
+    this.fortField = new Int16Array(this.cells);
     this.genTerrain();
     this.computeLandIds();
     this.buildWaterGrid();
@@ -174,6 +212,9 @@ export class Game {
     this.cellsOf.clear();
     this.attacks = [];
     this.boats = [];
+    this.buildings = [];
+    this.fortField.fill(0);
+    this.fortDirty = true;
     this.changed.clear();
     this.deaths = [];
     this.winnerId = null;
@@ -397,7 +438,9 @@ export class Game {
       passive: opts.passive ?? false,
       growthMul: opts.growthMul ?? 1,
       maxMul: opts.maxMul ?? 1,
+      money: START_MONEY,
       thinkAt: this.tickNo + 20 + ((Math.random() * 30) | 0),
+      spawnTick: this.tickNo,
     };
     this.players.set(p.id, p);
     this.cellsOf.set(p.id, []);
@@ -446,9 +489,13 @@ export class Game {
     const p = this.players.get(playerId);
     if (!p?.alive || p.spawned) return false;
     if (!this.canPlace(cell, 5, true)) return false;
-    this.claimDisk(cell % this.w, (cell / this.w) | 0, p.id, true);
+    // плацдарм радиуса 4 (отбираем нейтраль и ботов), полные войска с ранним
+    // запасом — чтобы высадка на забитой карте не съедалась мгновенно
+    this.claimDisk(cell % this.w, (cell / this.w) | 0, p.id, true, 4);
     p.spawned = true;
-    p.troops = SPAWN_TROOPS;
+    p.spawnTick = this.tickNo;
+    p.thinkAt = this.tickNo + 5; // расширяться начинаем сразу, без застоя
+    p.troops = (150 + p.cells * 12) * p.maxMul + 1500;
     return true;
   }
 
@@ -462,14 +509,17 @@ export class Game {
       if (!this.canPlace(c, clearance, allowBots)) continue;
       this.claimDisk(c % this.w, (c / this.w) | 0, p.id, allowBots);
       p.spawned = true;
+      p.spawnTick = this.tickNo;
+      p.thinkAt = this.tickNo + 5; // расширяться начинаем сразу
       return;
     }
   }
 
-  private claimDisk(cx: number, cy: number, id: number, takeBots = false) {
-    for (let dy = -3; dy <= 3; dy++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        if (dx * dx + dy * dy > 9) continue;
+  private claimDisk(cx: number, cy: number, id: number, takeBots = false, radius = 3) {
+    const r2 = radius * radius;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > r2) continue;
         const x = cx + dx;
         const y = cy + dy;
         if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
@@ -489,6 +539,8 @@ export class Game {
     }
     this.attacks = this.attacks.filter((a) => a.player !== id);
     this.boats = this.boats.filter((b) => b.player !== id);
+    this.buildings = this.buildings.filter((b) => b.owner !== id);
+    this.fortDirty = true;
     this.cellsOf.delete(id);
     this.players.delete(id);
   }
@@ -500,7 +552,7 @@ export class Game {
       const p = this.players.get(prev);
       if (p) {
         p.cells--;
-        if (p.cells <= 0 && p.alive && p.spawned) this.kill(p);
+        if (p.cells <= 0 && p.alive && p.spawned) this.kill(p, owner);
       }
     }
     if (owner > 0) {
@@ -513,12 +565,19 @@ export class Game {
     this.changed.set(c, owner);
   }
 
-  private kill(p: Player) {
+  private kill(p: Player, killerId = 0) {
     p.alive = false;
     p.troops = 0;
     this.deaths.push(p.id);
     this.attacks = this.attacks.filter((a) => a.player !== p.id);
     this.boats = this.boats.filter((b) => b.player !== p.id);
+    // казна павшего достаётся тому, кто захватил его последнюю клетку
+    const killer = killerId > 0 ? this.players.get(killerId) : undefined;
+    if (killer?.alive) killer.money += p.money;
+    p.money = 0;
+    // здания НЕ сносим тут: их клетки уже захвачены, и checkBuildings корректно
+    // взорвёт щит (обычный мгновенно, прокачанный через фитиль)
+    this.fortDirty = true;
   }
 
   // Сухопутная атака (ЛКМ): наступление по суше от общей границы
@@ -708,6 +767,166 @@ export class Game {
     this.launchAttackOwner(b.player, target, Math.floor(b.troops * 0.6));
   }
 
+  // Разрешено ли строить в клетке: своя суша и НЕ граница (все соседи — свои),
+  // и там ещё нет здания. Клиент по этой же логике красит предпросмотр.
+  canBuildAt(playerId: number, cell: number): boolean {
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
+    if (this.owners[cell] !== playerId) return false;
+    let border = false;
+    this.forNeighbors(cell, (n) => {
+      if (this.owners[n] !== playerId) border = true;
+    });
+    if (border) return false;
+    return !this.buildings.some((b) => b.cell === cell);
+  }
+
+  private hqCount(playerId: number): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.owner === playerId && b.type === 'hq') n++;
+    return n;
+  }
+
+  // Постройка здания. Возвращает код ошибки или null при успехе.
+  build(playerId: number, bt: BuildingType, cell: number): string | null {
+    const p = this.players.get(playerId);
+    if (!p?.alive || !p.spawned) return 'Нельзя строить';
+    if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
+    const cost = hqCost(this.hqCount(playerId));
+    if (p.money < cost) return 'Недостаточно денег';
+    p.money -= cost;
+    this.buildings.push({
+      id: this.nextBuildingId++,
+      owner: playerId,
+      cell,
+      type: bt,
+      readyTick: this.tickNo + HQ_BUILD_TICKS,
+      level: 1,
+      fuseTick: 0,
+      upStart: 0,
+      upEnd: 0,
+    });
+    // укрепление появится, когда постройка завершится (см. tick)
+    return null;
+  }
+
+  // Прокачка штаба (занимает время): 2 ур. — взрыв по области, 3 ур. — усиленный
+  upgrade(playerId: number, cell: number): string | null {
+    const p = this.players.get(playerId);
+    if (!p?.alive) return 'Нельзя';
+    const b = this.buildings.find((x) => x.cell === cell && x.owner === playerId);
+    if (!b) return 'Здесь нет вашего здания';
+    if (this.tickNo < b.readyTick) return 'Ещё строится';
+    if (b.upEnd > 0) return 'Уже улучшается';
+    if (b.level >= MAX_HQ_LEVEL) return 'Максимальный уровень';
+    const toLevel = b.level + 1;
+    const cost = hqUpgradeCost(toLevel);
+    if (p.money < cost) return 'Недостаточно денег';
+    p.money -= cost;
+    b.upStart = this.tickNo;
+    b.upEnd = this.tickNo + hqUpgradeTicks(toLevel);
+    return null;
+  }
+
+  // Захват/фитиль/взрыв щитов. Вызывается каждый тик (зданий немного).
+  private checkBuildings() {
+    const remove: Building[] = [];
+    for (const b of this.buildings) {
+      if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
+      // завершение апгрейда
+      if (b.upEnd > 0 && this.tickNo >= b.upEnd) {
+        b.level++;
+        b.upStart = 0;
+        b.upEnd = 0;
+      }
+      const captured = this.owners[b.cell] !== b.owner;
+      if (!captured) {
+        // клетка снова у владельца — отбили, фитиль сбрасывается, всё как было
+        if (b.fuseTick > 0) {
+          b.fuseTick = 0;
+          this.fortDirty = true;
+        }
+        continue;
+      }
+      if (b.level < 2) {
+        remove.push(b); // обычный щит — взрывается мгновенно (просто сносится)
+        continue;
+      }
+      // прокачанный: 10с фитиль, потом взрыв с уроном по области
+      if (b.fuseTick === 0) {
+        b.fuseTick = this.tickNo + HQ_FUSE_TICKS;
+        this.fortDirty = true; // укрепление гаснет при захвате
+      } else if (this.tickNo >= b.fuseTick) {
+        this.explode(b.cell, b.level);
+        remove.push(b);
+      }
+    }
+    if (remove.length) {
+      this.buildings = this.buildings.filter((b) => !remove.includes(b));
+      this.fortDirty = true;
+    }
+  }
+
+  // Взрыв прокачанного щита: обнуляет территорию вокруг (урон по области) и
+  // отнимает у каждого задетого игрока долю армии, равную доле уничтоженной
+  // территории от его общей
+  private explode(cell: number, level: number) {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const R = level >= 3 ? HQ_EXPLODE_RADIUS * 2 : HQ_EXPLODE_RADIUS; // 3 ур. — вдвое больше
+    const R2 = R * R;
+    const inBlast: number[] = [];
+    const lost = new Map<number, number>(); // владелец -> сколько клеток теряет
+    for (let dy = -R; dy <= R; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= this.h) continue;
+      for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dy * dy > R2) continue;
+        const x = cx + dx;
+        if (x < 0 || x >= this.w) continue;
+        const n = y * this.w + x;
+        const o = this.owners[n];
+        if (this.terrain[n] && o !== 0) {
+          inBlast.push(n);
+          lost.set(o, (lost.get(o) || 0) + 1);
+        }
+      }
+    }
+    // урон по армии: 3 ур. — 25% от текущих войск, иначе доля уничтоженной
+    // территории от всей (считаем до обнуления клеток)
+    for (const [owner, n] of lost) {
+      const p = this.players.get(owner);
+      if (p && p.cells > 0) {
+        const frac = level >= 3 ? 0.25 : n / p.cells;
+        p.troops = Math.max(0, p.troops - p.troops * frac);
+      }
+    }
+    for (const n of inBlast) this.setOwner(n, 0);
+  }
+
+  // Пересбор поля укреплений: каждый штаб штампует диск своего владельца.
+  // Дёшево и делается только при изменении зданий.
+  private rebuildFort() {
+    this.fortField.fill(0);
+    const R = HQ_RADIUS;
+    const R2 = R * R;
+    for (const b of this.buildings) {
+      if (this.tickNo < b.readyTick) continue; // ещё строится — не укрепляет
+      const cx = b.cell % this.w;
+      const cy = (b.cell / this.w) | 0;
+      for (let dy = -R; dy <= R; dy++) {
+        const y = cy + dy;
+        if (y < 0 || y >= this.h) continue;
+        for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dy * dy > R2) continue;
+          const x = cx + dx;
+          if (x < 0 || x >= this.w) continue;
+          this.fortField[y * this.w + x] = b.owner;
+        }
+      }
+    }
+    this.fortDirty = false;
+  }
+
   launchAttackOwner(playerId: number, targetOwner: number, troops: number) {
     const p = this.players.get(playerId);
     if (!p?.alive) return;
@@ -729,13 +948,20 @@ export class Game {
 
   tick() {
     this.tickNo++;
+    // здание завершилось на этом тике — пересобрать поле укреплений
+    for (const b of this.buildings) if (b.readyTick === this.tickNo) this.fortDirty = true;
+    this.checkBuildings(); // захват/фитиль/взрыв щитов
+    if (this.fortDirty) this.rebuildFort();
     for (const p of this.players.values()) {
       if (!p.alive || !p.spawned) continue;
-      p.maxTroops = (150 + p.cells * 12) * p.maxMul;
+      // ранний фактор: 1 на старте → 0 через 45с
+      const early = Math.max(0, 1 - (this.tickNo - p.spawnTick) / 450);
+      // в начале даём запас потолка, чтобы армия росла сразу (а не только
+      // территория); к 45с запас исчезает, но реальный потолок уже больше
+      p.maxTroops = (150 + p.cells * 12) * p.maxMul + early * 1500;
       // базовый прирост как в рабочем балансе (пропорционален армии)
       const base = Math.max(0.5, p.troops * 0.006 * p.growthMul);
       // логистическое торможение: до 70% максимума — полный рост, дальше плавно
-      // затухает почти до нуля у потолка
       const frac = p.maxTroops > 0 ? p.troops / p.maxTroops : 1;
       const taper =
         frac <= GROWTH_SLOW_FROM
@@ -743,14 +969,18 @@ export class Game {
           : Math.max(0.03, 1 - ((frac - GROWTH_SLOW_FROM) / (1 - GROWTH_SLOW_FROM)) * 0.97);
       // при малой армии набираем быстрее: <10% лимита — ×2, 10–30% — ×1.5
       const boost = frac < 0.1 ? 2 : frac < 0.3 ? 1.5 : 1;
-      p.troops = Math.min(p.maxTroops, p.troops + base * taper * boost);
+      // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает
+      const growth = (base * (1 + early) + early * 20) * taper * boost;
+      p.troops = Math.min(p.maxTroops, p.troops + growth);
+      // пассивный доход денег — на копейки, от размера территории
+      p.money += 0.5 + p.cells * 0.08;
       if (p.bot) {
         if (this.tickNo >= p.thinkAt) this.botThink(p);
       } else if (this.tickNo >= p.thinkAt) {
         // человек: автоматически расширяется в свободную нейтраль за счёт
-        // излишка войск — территория и потолок растут сами, без кликов
-        p.thinkAt = this.tickNo + 15;
-        if (p.troops > p.maxTroops * 0.55 && this.hasNeutralBorder(p.id)) {
+        // излишка войск, чтобы территория и потолок росли без кликов
+        p.thinkAt = this.tickNo + (early > 0 ? 10 : 15);
+        if (p.troops > p.maxTroops * 0.5 && this.hasNeutralBorder(p.id)) {
           this.launchAttackOwner(p.id, 0, Math.floor(p.troops * 0.15));
         }
       }
@@ -864,37 +1094,46 @@ export class Game {
     a.rescanned = false;
 
     // Оборона в 2 раза эффективнее: чтобы убить 1 защитника, гибнут 2
-    // нападающих. Захват вражеской клетки стоит атакующему (1 + 2·плотность)
-    // войск, защитник теряет плотность (свой гарнизон). Скорость наступления
-    // пропорциональна перевесу атакующих над обороной.
-    let cost = NEUTRAL_COST;
-    let enemyLoss = 0;
+    // нападающих. Захват вражеской клетки стоит атакующему (1 + 2·плотность),
+    // защитник теряет плотность (свой гарнизон). На укреплённых штабом клетках
+    // — 5:1 (стоимость 1 + 5·плотность). Скорость пропорциональна перевесу.
+    let baseCost = NEUTRAL_COST; // цена клетки без штрафа обороны
+    let density = 0;
     let waveScale = 1;
     if (enemy) {
-      const density = enemy.cells > 0 ? enemy.troops / enemy.cells : 0;
-      cost = 1 + 2 * density;
-      enemyLoss = density;
+      density = enemy.cells > 0 ? enemy.troops / enemy.cells : 0;
+      baseCost = 1 + 2 * density;
       if (enemy.troops > 0) {
         waveScale = Math.min(6, Math.max(0.2, a.troops / enemy.troops));
       }
     }
-    // остаток меньше цены одной клетки — наступление выдохлось, вернуть войска
-    if (a.troops < cost) {
+    const fortCost = 1 + 5 * density; // цена на укреплённой клетке
+    // остаток меньше даже обычной цены — наступление выдохлось, вернуть войска
+    if (a.troops < baseCost) {
       this.refund(a, attacker);
       return;
     }
     let quota = Math.max(1, Math.ceil(a.frontier.size * WAVE_SPEED * waveScale));
     for (let own = 4; own >= 1 && quota > 0; own--) {
       const list = buckets[own];
-      while (list.length && quota > 0 && a.troops >= cost) {
+      while (list.length && quota > 0) {
         const i = (Math.random() * list.length) | 0;
         const c = list[i];
+        // укреплена ли эта клетка штабом её владельца (цели)
+        const fortified = enemy && this.fortField[c] === a.target;
+        const cellCost = fortified ? fortCost : baseCost;
+        if (a.troops < cellCost) {
+          // не по карману именно эта клетка — пропускаем её в этом тике
+          if (a.troops < baseCost) break;
+          list.splice(i, 1);
+          continue;
+        }
         list[i] = list[list.length - 1];
         list.pop();
         a.frontier.delete(c);
         this.setOwner(c, a.player);
-        a.troops -= cost;
-        if (enemy) enemy.troops = Math.max(0, enemy.troops - enemyLoss);
+        a.troops -= cellCost;
+        if (enemy) enemy.troops = Math.max(0, enemy.troops - density);
         quota--;
         // расширяем фронт на соседей захваченной клетки
         this.forNeighbors(c, (n) => {
@@ -956,6 +1195,23 @@ export class Game {
       alive: p.alive,
       bot: p.bot,
       strong: p.strong,
+      money: Math.floor(p.money),
+    }));
+  }
+
+  buildingsPub(): BuildingPub[] {
+    return this.buildings.map((b) => ({
+      id: b.id,
+      owner: b.owner,
+      cell: b.cell,
+      type: b.type,
+      progress: Math.max(0, Math.min(1, 1 - (b.readyTick - this.tickNo) / HQ_BUILD_TICKS)),
+      level: b.level,
+      fuse: b.fuseTick > 0 ? Math.max(0, (b.fuseTick - this.tickNo) / 10) : 0,
+      upProgress:
+        b.upEnd > b.upStart
+          ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
+          : 0,
     }));
   }
 

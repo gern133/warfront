@@ -283,6 +283,17 @@ wss.on('connection', (ws) => {
       case 'respawn': {
         const room = st.room;
         if (!room || room.phase !== 'running' || st.playerId !== null) return;
+        // если игрок в комнате один — реванш создаёт новый мир (свежая карта +
+        // боты); если игроков несколько, общий мир не трогаем
+        if (room.clients.size <= 1) {
+          if (room.resetTimer) {
+            clearTimeout(room.resetTimer);
+            room.resetTimer = null;
+          }
+          room.game.reset();
+          room.game.addBots(room.difficulty);
+        }
+        // затем игрок выбирает точку высадки вручную
         enterGame(ws, st, room);
         break;
       }
@@ -303,6 +314,20 @@ wss.on('connection', (ws) => {
         const room = st.room;
         if (!room || room.phase !== 'running' || st.playerId === null) return;
         room.game.recallBoat(st.playerId, msg.boatId | 0);
+        break;
+      }
+      case 'build': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const err = room.game.build(st.playerId, msg.bt, msg.cell | 0);
+        if (err) send(ws, { type: 'error', message: err });
+        break;
+      }
+      case 'upgrade': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const err = room.game.upgrade(st.playerId, msg.cell | 0);
+        if (err) send(ws, { type: 'error', message: err });
         break;
       }
       case 'leave': {
@@ -379,6 +404,7 @@ setInterval(() => {
       players: game.playersPub(),
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
+      buildings: game.buildingsPub(),
     } satisfies ServerMsg);
     for (const ws of room.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(update);

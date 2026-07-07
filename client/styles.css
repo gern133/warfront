@@ -155,6 +155,18 @@ button {
   filter: brightness(1.12);
 }
 
+.ctx-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: grayscale(0.6);
+}
+
+.ctx-note {
+  font-size: 12px;
+  color: var(--khaki);
+  padding: 2px 2px 4px;
+}
+
 .ctx-cancel {
   padding: 7px;
   border: none;
@@ -246,9 +258,9 @@ button {
 .hud-stack {
   position: absolute;
   left: 50%;
-  bottom: 20px;
+  bottom: 16px;
   transform: translateX(-50%);
-  width: min(440px, calc(100vw - 32px));
+  width: min(560px, calc(100vw - 24px));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -256,6 +268,21 @@ button {
 
 .hud {
   position: static;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.build-hint {
+  align-self: center;
+  background: rgba(40, 60, 30, 0.92);
+  border: 1px solid var(--khaki);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  animation: pulse 1.6s ease-in-out infinite;
 }
 
 /* входящие морские десанты — над блоком войск, клик фокусит на агрессоре */
@@ -345,82 +372,76 @@ button {
   color: #fff;
 }
 
-/* график прироста войск */
-.growth {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+/* верхняя строка HUD: прирост | армия | золото */
+.hud-top {
+  display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
 }
 
-.growth-label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-  color: var(--ink-dim);
-  white-space: nowrap;
-}
-
-.growth-svg {
-  width: 100%;
-  height: 34px;
-  display: block;
-}
-
-.growth-rate {
+.growth-chip {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 13px;
   font-weight: 700;
+  color: #7dd18b;
+  background: rgba(125, 209, 139, 0.12);
+  border: 1px solid rgba(125, 209, 139, 0.4);
+  border-radius: 6px;
+  padding: 6px 10px;
   white-space: nowrap;
 }
 
-.troops {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 17px;
-  font-weight: 700;
-  text-align: center;
-}
-
-.troops-max {
-  color: var(--ink-dim);
-  font-weight: 500;
-}
-
-.committed {
-  color: var(--signal);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.troop-bar {
-  height: 5px;
-  background: rgba(233, 237, 227, 0.1);
-  border-radius: 2px;
-  margin: 10px 0 12px;
+.troop-wrap {
+  position: relative;
+  flex: 1;
+  height: 30px;
+  border-radius: 6px;
+  background: rgba(233, 237, 227, 0.08);
+  border: 1px solid var(--edge);
   overflow: hidden;
 }
 
 .troop-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 0.1s linear;
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 6px 0 0 6px;
+  opacity: 0.55;
+  transition: width 0.3s linear;
+}
+
+.troop-nums {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.committed {
+  color: var(--signal);
+  font-size: 12px;
+}
+
+.gold-chip {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #f2c94c;
+  background: rgba(242, 201, 76, 0.12);
+  border: 1px solid rgba(242, 201, 76, 0.5);
+  border-radius: 6px;
+  padding: 6px 10px;
+  white-space: nowrap;
 }
 
 .ratio {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.ratio-label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--ink-dim);
-  white-space: nowrap;
 }
 
 .ratio input {
@@ -432,8 +453,77 @@ button {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 13px;
   font-weight: 700;
-  width: 42px;
-  text-align: right;
+  color: var(--ink);
+  white-space: nowrap;
+  min-width: 92px;
+}
+
+/* панель зданий/вооружений */
+.toolbar {
+  display: flex;
+  gap: 5px;
+}
+
+.tool {
+  position: relative;
+  flex: 1;
+  aspect-ratio: 1;
+  min-width: 0;
+  background: rgba(233, 237, 227, 0.05);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.tool:not(.disabled):hover {
+  border-color: var(--khaki);
+}
+
+.tool.selected {
+  border-color: var(--signal);
+  background: rgba(255, 77, 51, 0.14);
+}
+
+.tool.disabled {
+  opacity: 0.4;
+  cursor: default;
+  filter: grayscale(1);
+}
+
+.tool-icon {
+  font-size: 20px;
+}
+
+.tool-key {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  color: var(--ink-dim);
+}
+
+.tool-count {
+  position: absolute;
+  bottom: 2px;
+  right: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.tool-cost {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 8px;
+  color: #f2c94c;
 }
 
 /* --- баннеры --- */

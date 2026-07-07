@@ -15,7 +15,48 @@ export interface PlayerPub {
   alive: boolean;
   bot: boolean;
   strong: boolean;
+  money: number;
 }
+
+export const START_MONEY = 40000;
+
+// Здания. Пока только штаб обороны; список расширяемый.
+export type BuildingType = 'hq';
+
+export interface BuildingPub {
+  id: number;
+  owner: number;
+  cell: number;
+  type: BuildingType;
+  progress: number; // 0..1 — прогресс постройки (1 = достроено)
+  level: number; // 1 обычный, 2 взрыв по области, 3 усиленный взрыв
+  fuse: number; // секунд до взрыва после захвата (0 = не тикает)
+  upProgress: number; // 0..1 — прогресс апгрейда (0 = не улучшается)
+}
+
+// Время постройки штаба обороны (тики; 50 = 5 секунд при 100мс)
+export const HQ_BUILD_TICKS = 50;
+// Прокачанный штаб при захвате взрывается через 10с с уроном по области
+export const HQ_FUSE_TICKS = 100;
+export const HQ_EXPLODE_RADIUS = 12;
+export const MAX_HQ_LEVEL = 3;
+
+// Апгрейд: цена и время (тики) для перехода на уровень (2 или 3)
+export function hqUpgradeCost(toLevel: number): number {
+  return toLevel === 2 ? 60000 : 120000;
+}
+export function hqUpgradeTicks(toLevel: number): number {
+  return toLevel === 2 ? 50 : 100; // 5с до 2 ур., 10с до 3 ур.
+}
+
+// Цена штаба обороны растёт с каждой постройкой; потолок — 150к
+const HQ_COSTS = [40000, 75000, 100000, 125000, 150000];
+export function hqCost(owned: number): number {
+  return HQ_COSTS[Math.min(owned, HQ_COSTS.length - 1)];
+}
+
+// Радиус защиты штаба (клетки): в этой зоне атака на владельца идёт 5:1
+export const HQ_RADIUS = 16;
 
 // Активная атака: сколько войск выделено против кого
 export interface AttackPub {
@@ -46,7 +87,9 @@ export type ClientMsg =
   | { type: 'leave' } // выход из комнаты в меню
   | { type: 'attack'; cell: number; ratio: number } // сухопутная атака (ЛКМ)
   | { type: 'invade'; cell: number; ratio: number } // морское вторжение (ПКМ)
-  | { type: 'recall'; boatId: number }; // отозвать десант
+  | { type: 'recall'; boatId: number } // отозвать десант
+  | { type: 'build'; bt: BuildingType; cell: number } // построить здание
+  | { type: 'upgrade'; cell: number }; // прокачать здание
 
 export type ServerMsg =
   | {
@@ -74,6 +117,7 @@ export type ServerMsg =
       players: PlayerPub[];
       attacks: AttackPub[];
       boats: BoatPub[];
+      buildings: BuildingPub[];
     }
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла

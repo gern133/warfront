@@ -1,6 +1,16 @@
-import { PlayerPub, AttackPub, BoatPub } from '../shared/protocol';
+import {
+  PlayerPub,
+  AttackPub,
+  BoatPub,
+  BuildingPub,
+  BuildingType,
+  HQ_RADIUS,
+  HQ_EXPLODE_RADIUS,
+} from '../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../shared/color';
 import { rleDecode } from '../shared/rle';
+
+const FORT_BORDER: [number, number, number] = [222, 214, 196]; // каменная граница
 
 const WATER: [number, number, number] = [58, 96, 140];
 const WAR: [number, number, number] = [225, 36, 26]; // линия фронта
@@ -30,8 +40,17 @@ export class GameClient {
   selfId = -1;
   fps = 0;
 
-  onCellClick: ((cell: number) => void) | null = null;
+  onCellClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
   onCellRightClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
+  onBuild: ((cell: number) => void) | null = null;
+
+  // режим постройки: тип здания или null; клетка под курсором для предпросмотра
+  buildMode: BuildingType | null = null;
+  private hoverCell = -1;
+  private buildings: BuildingPub[] = [];
+  private fortField = new Int16Array(0); // владелец штаба на клетку (укрепления)
+  private buildingsSig = '';
+  private flashes: { cell: number; t0: number; big: boolean }[] = []; // вспышки взрыва
 
   private img: ImageData | null = null;
   private off = document.createElement('canvas');
@@ -56,6 +75,18 @@ export class GameClient {
   private zoom = 3;
   private panX = 0;
   private panY = 0;
+
+  // плавная анимация камеры (автозум к спавну)
+  private anim: {
+    t0: number;
+    dur: number;
+    fromX: number;
+    fromY: number;
+    fromZ: number;
+    toX: number;
+    toY: number;
+    toZ: number;
+  } | null = null;
 
   constructor() {
     this.offCtx = this.off.getContext('2d')!;
@@ -82,6 +113,9 @@ export class GameClient {
     if (selfId > 0) this.selfId = selfId;
     this.warSet.clear();
     this.warLabels = [];
+    this.buildings = [];
+    this.buildingsSig = '';
+    this.fortField = new Int16Array(this.cells);
     this.buildNeutralColors();
     this.repaintAll();
     this.fitView();
@@ -166,12 +200,108 @@ export class GameClient {
     this.boats = boats;
   }
 
+  setBuildings(buildings: BuildingPub[]) {
+    const next = buildings ?? [];
+    // исчезнувшее здание = взрыв → вспышка (крупная у прокачанного)
+    if (this.buildings.length) {
+      const nextIds = new Set(next.map((b) => b.id));
+      for (const ob of this.buildings) {
+        if (!nextIds.has(ob.id)) {
+          this.flashes.push({ cell: ob.cell, t0: performance.now(), big: ob.level >= 2 });
+        }
+      }
+    }
+    this.buildings = next;
+    // пересобираем поле укреплений и перекрашиваем при изменении зданий или
+    // завершении постройки (укрепление активно только у достроенных)
+    const sig = this.buildings.map((b) => `${b.id}:${b.cell}:${b.progress >= 1 ? 1 : 0}`).join(',');
+    if (sig !== this.buildingsSig) {
+      this.buildingsSig = sig;
+      this.rebuildFort();
+      this.repaintAll();
+    }
+  }
+
+  private rebuildFort() {
+    if (this.fortField.length !== this.cells) this.fortField = new Int16Array(this.cells);
+    else this.fortField.fill(0);
+    const R = HQ_RADIUS;
+    const R2 = R * R;
+    for (const b of this.buildings) {
+      if (b.progress < 1) continue; // ещё строится — не укрепляет
+      const cx = b.cell % this.w;
+      const cy = (b.cell / this.w) | 0;
+      for (let dy = -R; dy <= R; dy++) {
+        const y = cy + dy;
+        if (y < 0 || y >= this.h) continue;
+        for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dy * dy > R2) continue;
+          const x = cx + dx;
+          if (x < 0 || x >= this.w) continue;
+          this.fortField[y * this.w + x] = b.owner;
+        }
+      }
+    }
+  }
+
+  buildingAt(cell: number): BuildingPub | undefined {
+    return this.buildings.find((b) => b.cell === cell);
+  }
+
+  // Можно ли строить в клетке (та же логика, что на сервере) — для предпросмотра
+  canBuildAt(cell: number): boolean {
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
+    if (this.owners[cell] !== this.selfId) return false;
+    const x = cell % this.w;
+    if (x > 0 && this.owners[cell - 1] !== this.selfId) return false;
+    if (x < this.w - 1 && this.owners[cell + 1] !== this.selfId) return false;
+    if (cell >= this.w && this.owners[cell - this.w] !== this.selfId) return false;
+    if (cell < this.cells - this.w && this.owners[cell + this.w] !== this.selfId) return false;
+    return !this.buildings.some((b) => b.cell === cell);
+  }
+
   // Центрируем камеру на клетке (фокус на агрессоре), с приближением
   focusOn(cx: number, cy: number) {
+    this.anim = null;
     this.zoom = Math.max(this.zoom, this.minZoom() * 3, 5);
     this.panX = window.innerWidth / 2 - cx * this.zoom;
     this.panY = window.innerHeight / 2 - cy * this.zoom;
     this.clampPan();
+  }
+
+  // Плавный автозум к своей территории (вызывается при старте игры).
+  // Возвращает true, если территория найдена и анимация запущена.
+  focusSelfSmooth(): boolean {
+    if (!this.w || this.selfId <= 0) return false;
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (let c = 0; c < this.cells; c++) {
+      if (this.owners[c] === this.selfId) {
+        sx += c % this.w;
+        sy += (c / this.w) | 0;
+        n++;
+      }
+    }
+    if (!n) return false;
+    const cx = sx / n;
+    const cy = sy / n;
+    // целевой зум: вплотную к своей территории (обзор ~70 клеток)
+    const span = Math.min(window.innerWidth, window.innerHeight);
+    const toZ = Math.max(this.minZoom(), Math.min(30, span / 70));
+    const toX = window.innerWidth / 2 - cx * toZ;
+    const toY = window.innerHeight / 2 - cy * toZ;
+    this.anim = {
+      t0: performance.now(),
+      dur: 900,
+      fromX: this.panX,
+      fromY: this.panY,
+      fromZ: this.zoom,
+      toX,
+      toY,
+      toZ,
+    };
+    return true;
   }
 
   setAttacks(attacks: AttackPub[]) {
@@ -260,17 +390,21 @@ export class GameClient {
         r = this.neutralRGB[c * 3];
         g = this.neutralRGB[c * 3 + 1];
         b = this.neutralRGB[c * 3 + 2];
+      } else if (this.isBorder(c, o) && this.fortField[c] === o) {
+        // укреплённая штабом граница — камень; приоритет даже под атакой,
+        // чтобы было видно, что щит работает
+        [r, g, b] = FORT_BORDER;
       } else if (o === this.selfId && this.warSet.size && this.neighborInWar(c)) {
         [r, g, b] = WAR; // наша сторона фронта
       } else if (this.warSet.has(o) && this.neighborIs(c, this.selfId)) {
         [r, g, b] = WAR; // сторона противника
+      } else if (this.isBorder(c, o)) {
+        [r, g, b] = playerColorRGB(o);
+        r = (r * 0.55) | 0;
+        g = (g * 0.55) | 0;
+        b = (b * 0.55) | 0;
       } else {
         [r, g, b] = playerColorRGB(o);
-        if (this.isBorder(c, o)) {
-          r = (r * 0.55) | 0;
-          g = (g * 0.55) | 0;
-          b = (b * 0.55) | 0;
-        }
       }
     }
     d[i] = r;
@@ -454,6 +588,117 @@ export class GameClient {
     }
   }
 
+  // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
+  private drawBuildings(ctx: CanvasRenderingContext2D, dpr: number) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const r = Math.max(5, Math.min(16, this.zoom * 2.2));
+    const now = performance.now();
+    for (const b of this.buildings) {
+      const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
+      const building = b.progress < 1;
+      const upgrading = b.upProgress > 0 && b.upProgress < 1;
+      ctx.globalAlpha = building ? 0.55 : 1; // строящийся — приглушён
+      ctx.fillStyle = '#0e1a2b';
+      // цвет обводки по уровню: 1 — свой цвет, 2 — золото, 3 — оранжево-красный
+      ctx.strokeStyle = b.level >= 3 ? '#ff7a2a' : b.level >= 2 ? '#f2c94c' : playerColorCSS(b.owner);
+      ctx.lineWidth = b.level >= 2 ? 3 : 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      // у 3-го уровня — двойное кольцо
+      if (b.level >= 3) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.font = `${r * 1.2}px sans-serif`;
+      ctx.fillText(b.level >= 2 ? '🛡️' : '🛡', sx, sy + 1);
+      ctx.globalAlpha = 1;
+      // прогресс-бар постройки/апгрейда над зданием
+      if (building || upgrading) {
+        const prog = building ? b.progress : b.upProgress;
+        const bw = r * 2.4;
+        const bh = Math.max(3, r * 0.35);
+        const bx = sx - bw / 2;
+        const by = sy - r - bh - 3 - (b.level >= 3 ? 3 : 0);
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = building ? '#f2c94c' : '#4dd2ff'; // апгрейд — голубой
+        ctx.fillRect(bx, by, bw * prog, bh);
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, by, bw, bh);
+      } else if (b.fuse > 0) {
+        // захвачен прокачанный — красный пульсирующий фитиль с таймером
+        const pulse = 0.5 + 0.5 * Math.sin(now * 0.012);
+        ctx.globalAlpha = 0.5 + 0.5 * pulse;
+        ctx.strokeStyle = '#ff3b2f';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        const fs = Math.max(11, r);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#ff6a55';
+        ctx.strokeText(Math.ceil(b.fuse) + 'с', sx, sy - r - fs * 0.7);
+        ctx.fillText(Math.ceil(b.fuse) + 'с', sx, sy - r - fs * 0.7);
+      }
+    }
+    // вспышки взрыва (расширяющийся круг, ~0.6с)
+    this.flashes = this.flashes.filter((f) => now - f.t0 < 600);
+    for (const f of this.flashes) {
+      const p = (now - f.t0) / 600;
+      const sx = this.panX + (f.cell % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((f.cell / this.w | 0) + 0.5) * this.zoom;
+      const maxR = (f.big ? HQ_EXPLODE_RADIUS : r / this.zoom + 2) * this.zoom;
+      ctx.globalAlpha = (1 - p) * 0.8;
+      ctx.beginPath();
+      ctx.arc(sx, sy, maxR * (0.3 + p * 0.7), 0, Math.PI * 2);
+      ctx.fillStyle = f.big ? 'rgba(255,120,40,0.5)' : 'rgba(255,180,60,0.5)';
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#ff8a2a';
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // предпросмотр под курсором
+    if (this.buildMode && this.hoverCell >= 0) {
+      const ok = this.canBuildAt(this.hoverCell);
+      const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
+      // зона покрытия штаба — полупрозрачная плёнка радиуса HQ_RADIUS
+      const rangePx = HQ_RADIUS * this.zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rangePx, 0, Math.PI * 2);
+      ctx.fillStyle = ok ? 'rgba(110,224,138,0.18)' : 'rgba(150,150,150,0.18)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = ok ? 'rgba(110,224,138,0.8)' : 'rgba(160,160,160,0.7)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = ok ? 'rgba(120,220,140,0.35)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#6ee08a' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `${r * 1.2}px sans-serif`;
+      ctx.globalAlpha = ok ? 1 : 0.5;
+      ctx.fillText('🛡', sx, sy + 1);
+      ctx.globalAlpha = 1;
+    }
+  }
+
   private drawMinimap() {
     if (!this.miniCtx || !this.w) return;
     this.miniCtx.drawImage(this.off, 0, 0);
@@ -537,6 +782,16 @@ export class GameClient {
         frames = 0;
         lastFps = t;
       }
+      // плавный автозум камеры
+      if (this.anim) {
+        const p = Math.min(1, (t - this.anim.t0) / this.anim.dur);
+        const e = 1 - Math.pow(1 - p, 3); // easeOutCubic
+        this.zoom = this.anim.fromZ + (this.anim.toZ - this.anim.fromZ) * e;
+        this.panX = this.anim.fromX + (this.anim.toX - this.anim.fromX) * e;
+        this.panY = this.anim.fromY + (this.anim.toY - this.anim.fromY) * e;
+        this.clampPan();
+        if (p >= 1) this.anim = null;
+      }
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = '#05070d';
@@ -552,6 +807,7 @@ export class GameClient {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(this.off, 0, 0);
         this.drawNames(ctx, dpr);
+        this.drawBuildings(ctx, dpr);
         this.drawMinimap();
       }
       raf = requestAnimationFrame(loop);
@@ -560,6 +816,7 @@ export class GameClient {
 
     const onDown = (e: PointerEvent) => {
       if (e.button === 2) return; // правый клик — контекстное меню, не пан/атака
+      this.anim = null; // пользователь взял управление — стоп автозум
       down = { x: e.clientX, y: e.clientY };
       panning = false;
       canvas.setPointerCapture(e.pointerId);
@@ -574,7 +831,14 @@ export class GameClient {
         this.onCellRightClick?.(cy * this.w + cx, e.clientX, e.clientY);
       }
     };
+    const cellUnder = (e: { clientX: number; clientY: number }) => {
+      const cx = Math.floor((e.clientX - this.panX) / this.zoom);
+      const cy = Math.floor((e.clientY - this.panY) / this.zoom);
+      if (cx < 0 || cy < 0 || cx >= this.w || cy >= this.h) return -1;
+      return cy * this.w + cx;
+    };
     const onMove = (e: PointerEvent) => {
+      if (this.buildMode) this.hoverCell = cellUnder(e); // предпросмотр здания
       if (!down) return;
       if (panning || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
         panning = true;
@@ -585,10 +849,10 @@ export class GameClient {
     };
     const onUp = (e: PointerEvent) => {
       if (down && !panning && this.w) {
-        const cx = Math.floor((e.clientX - this.panX) / this.zoom);
-        const cy = Math.floor((e.clientY - this.panY) / this.zoom);
-        if (cx >= 0 && cy >= 0 && cx < this.w && cy < this.h) {
-          this.onCellClick?.(cy * this.w + cx);
+        const cell = cellUnder(e);
+        if (cell >= 0) {
+          if (this.buildMode) this.onBuild?.(cell); // ставим здание
+          else this.onCellClick?.(cell, e.clientX, e.clientY);
         }
       }
       down = null;
@@ -596,6 +860,7 @@ export class GameClient {
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      this.anim = null; // ручной зум отменяет автозум
       const k = Math.exp(-e.deltaY * 0.0012);
       const nz = Math.min(60, Math.max(this.minZoom(), this.zoom * k));
       const kk = nz / this.zoom;

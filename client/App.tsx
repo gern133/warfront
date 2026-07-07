@@ -1,12 +1,17 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   PlayerPub,
   AttackPub,
   BoatPub,
+  BuildingPub,
+  BuildingType,
   ServerMsg,
   PORT,
   Difficulty,
   MapType,
+  hqCost,
+  hqUpgradeCost,
+  MAX_HQ_LEVEL,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
@@ -36,6 +41,27 @@ const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
   earth: { name: 'Земля', desc: 'реальные материки и острова' },
 };
 
+// компактный формат чисел: 1234 → 1.2K, 1200000 → 1.2M
+function fmtK(n: number): string {
+  if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(2).replace(/\.?0+$/, '') + 'K';
+  return String(Math.floor(n));
+}
+
+// панель зданий/вооружений (1–0); активен только штаб обороны, остальные — позже
+const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
+  { icon: '🏢', bt: null, name: 'Город' },
+  { icon: '🏭', bt: null, name: 'Завод' },
+  { icon: '⚓', bt: null, name: 'Порт' },
+  { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
+  { icon: '🎯', bt: null, name: 'Ракета' },
+  { icon: '📡', bt: null, name: 'Радар' },
+  { icon: '🚢', bt: null, name: 'Флот' },
+  { icon: '☢️', bt: null, name: 'Ядерка' },
+  { icon: '💥', bt: null, name: 'Удар' },
+  { icon: '💣', bt: null, name: 'Бомба' },
+];
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>('menu');
   const [menuView, setMenuView] = useState<MenuView>('main');
@@ -48,6 +74,9 @@ export default function App() {
   const [players, setPlayers] = useState<PlayerPub[]>([]);
   const [attacks, setAttacks] = useState<AttackPub[]>([]);
   const [boats, setBoats] = useState<BoatPub[]>([]);
+  const [buildings, setBuildings] = useState<BuildingPub[]>([]);
+  const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
+  const [shownMoney, setShownMoney] = useState(0);
   const [spawnLeft, setSpawnLeft] = useState<number | null>(null);
   const [winner, setWinner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +84,9 @@ export default function App() {
   const [ratio, setRatio] = useState(30);
   const [connected, setConnected] = useState(false);
   const [invadeMenu, setInvadeMenu] = useState<{ cell: number; x: number; y: number } | null>(null);
+  const [upgradeMenu, setUpgradeMenu] = useState<
+    { cell: number; x: number; y: number; level: number } | null
+  >(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -64,6 +96,11 @@ export default function App() {
   const phaseRef = useRef(phase);
   const troopHistory = useRef<number[]>([]); // история войск для графика прироста
   const liveTroops = useRef(0); // актуальные войска (обновляются каждый тик)
+  const liveMoney = useRef(0);
+  const buildModeRef = useRef<BuildingType | null>(null);
+  buildModeRef.current = buildMode;
+  const canBuildHqRef = useRef(false);
+  const needFocus = useRef(false); // отложенный автозум к спавну
   const [shownTroops, setShownTroops] = useState(0); // отображаемое значение (реже)
   const [fps, setFps] = useState(0);
   const [growthView, setGrowthView] = useState<{ rate: number; points: number[] }>({
@@ -75,18 +112,25 @@ export default function App() {
 
   if (!gcRef.current) gcRef.current = new GameClient();
   const gc = gcRef.current;
+  gc.buildMode = buildMode; // синхронизируем режим постройки с движком
 
   const sendMsg = (msg: object) => wsRef.current?.send(JSON.stringify(msg));
 
   useEffect(() => {
     const detach = gc.attach(canvasRef.current!);
     const detachMini = gc.attachMinimap(miniRef.current!);
-    gc.onCellClick = (cell) => {
+    gc.onCellClick = (cell, sx, sy) => {
       setInvadeMenu(null);
       if (phaseRef.current === 'spawn') {
         sendMsg({ type: 'spawn', cell });
       } else if (phaseRef.current === 'playing') {
-        sendMsg({ type: 'attack', cell, ratio: ratioRef.current / 100 });
+        // клик по своему штабу — меню прокачки, иначе атака
+        const myHq = gc.buildingAt(cell);
+        if (myHq && myHq.owner === gc.selfId && myHq.progress >= 1) {
+          setUpgradeMenu({ cell, x: sx, y: sy, level: myHq.level });
+        } else {
+          sendMsg({ type: 'attack', cell, ratio: ratioRef.current / 100 });
+        }
       }
     };
     // правый клик / два пальца по суше — меню морского вторжения
@@ -94,6 +138,11 @@ export default function App() {
       if (phaseRef.current !== 'playing') return;
       if (!gc.terrain[cell] || gc.owners[cell] === gc.selfId) return;
       setInvadeMenu({ cell, x: sx, y: sy });
+    };
+    // клик в режиме постройки — ставим здание и выходим из режима
+    gc.onBuild = (cell) => {
+      if (buildModeRef.current) sendMsg({ type: 'build', bt: buildModeRef.current, cell });
+      setBuildMode(null);
     };
 
     // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
@@ -120,18 +169,27 @@ export default function App() {
         setSpawnLeft(msg.spawnSeconds ?? null);
         if (msg.selfId > 0) setPhase('spawn');
       } else if (msg.type === 'update') {
+        // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
+        const upAttacks = msg.attacks ?? [];
+        const upBoats = msg.boats ?? [];
+        const upBuildings = msg.buildings ?? [];
         gc.applyUpdate(msg.changes);
-        gc.setPlayers(msg.players);
-        gc.setAttacks(msg.attacks);
-        gc.setBoats(msg.boats);
-        setPlayers(msg.players);
-        setAttacks(msg.attacks);
-        setBoats(msg.boats);
+        // отложенный автозум к спавну — когда клетки уже пришли
+        if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
+        gc.setPlayers(msg.players ?? []);
+        gc.setAttacks(upAttacks);
+        gc.setBoats(upBoats);
+        gc.setBuildings(upBuildings);
+        setPlayers(msg.players ?? []);
+        setAttacks(upAttacks);
+        setBoats(upBoats);
+        setBuildings(upBuildings);
         // копим историю войск для графика прироста (последние ~12 с при 100мс)
         if (gc.selfId > 0) {
           const me = msg.players.find((p) => p.id === gc.selfId);
           if (me) {
             liveTroops.current = me.troops;
+            liveMoney.current = me.money ?? 0;
             const h = troopHistory.current;
             h.push(me.troops);
             if (h.length > 120) h.shift();
@@ -139,6 +197,8 @@ export default function App() {
         }
       } else if (msg.type === 'spawned') {
         setPhase('playing');
+        // клетки спавна придут следующим update — фокус делаем там (см. ниже)
+        needFocus.current = true;
       } else if (msg.type === 'roundStart') {
         setSpawnLeft(null);
       } else if (msg.type === 'dead') {
@@ -171,6 +231,7 @@ export default function App() {
   useEffect(() => {
     const iv = setInterval(() => {
       setShownTroops(liveTroops.current);
+      setShownMoney(liveMoney.current);
       setFps(gc.fps);
       const h = troopHistory.current;
       const rate = h.length > 30 ? Math.round((h[h.length - 1] - h[h.length - 31]) / 3) : 0;
@@ -197,12 +258,25 @@ export default function App() {
     troopHistory.current = [];
   };
 
-  // Escape: из игры/лобби — в меню, в меню — назад к главному экрану
+  // Escape: сначала отменяет режим постройки, затем из игры/лобби — в меню
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (phaseRef.current === 'menu') setMenuView('main');
-      else leaveToMenu();
+      if (e.key === 'Escape') {
+        if (buildModeRef.current) {
+          setBuildMode(null);
+          return;
+        }
+        if (phaseRef.current === 'menu') setMenuView('main');
+        else leaveToMenu();
+        return;
+      }
+      // хоткеи панели зданий 1–0 (в игре): активен только щит (слот 4)
+      if (phaseRef.current === 'playing' && /^[0-9]$/.test(e.key)) {
+        const idx = e.key === '0' ? 9 : +e.key - 1;
+        if (TOOLS[idx]?.bt === 'hq' && canBuildHqRef.current) {
+          setBuildMode((bm) => (bm === 'hq' ? null : 'hq'));
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -235,6 +309,13 @@ export default function App() {
     .slice(0, 8);
   const totalCells = players.reduce((s, p) => s + (p.alive ? p.cells : 0), 0) || 1;
   const inGame = phase === 'spawn' || phase === 'playing' || phase === 'dead';
+  // экономика: мои штабы, цена следующего, сколько войск уйдёт в атаку
+  const myHqs = buildings.filter((b) => b.owner === gc.selfId && b.type === 'hq').length;
+  const nextHqCost = hqCost(myHqs);
+  // превью выделенных на атаку — от ЖИВОГО числа войск (обновляется каждый тик),
+  // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
+  const attackTroops = Math.floor(((self?.troops ?? shownTroops) * ratio) / 100);
+  canBuildHqRef.current = shownMoney >= nextHqCost;
 
   return (
     <div className="app">
@@ -318,40 +399,74 @@ export default function App() {
               ))}
             </div>
           )}
-          <div className="panel hud">
-            <Sparkline
-              data={growthView.points}
-              max={self.maxTroops}
-              color={playerColorCSS(self.id)}
-              rate={growthView.rate}
-            />
-            <div className="troops">
-              {shownTroops.toLocaleString('ru')}
-              <span className="troops-max"> / {self.maxTroops.toLocaleString('ru')}</span>
-              {committed > 0 && (
-                <span className="committed"> ⚔ {committed.toLocaleString('ru')}</span>
-              )}
+          {buildMode && (
+            <div className="build-hint">
+              Кликните по своей внутренней клетке — поставить штаб (Esc — отмена)
             </div>
-          <div className="troop-bar">
-            <div
-              className="troop-fill"
-              style={{
-                width: `${Math.min(100, (self.troops / self.maxTroops) * 100)}%`,
-                background: playerColorCSS(self.id),
-              }}
-            />
-          </div>
-          <label className="ratio">
-            <span className="ratio-label">В атаку</span>
-            <input
-              type="range"
-              min={5}
-              max={100}
-              value={ratio}
-              onChange={(e) => setRatio(+e.target.value)}
-            />
-            <span className="ratio-val">{ratio}%</span>
-          </label>
+          )}
+          <div className="panel hud">
+            <div className="hud-top">
+              <span className="growth-chip">
+                🪖 {growthView.rate >= 0 ? '+' : ''}
+                {growthView.rate}/с
+              </span>
+              <div className="troop-wrap">
+                <div
+                  className="troop-fill"
+                  style={{
+                    width: `${Math.min(100, (self.troops / self.maxTroops) * 100)}%`,
+                    background: playerColorCSS(self.id),
+                  }}
+                />
+                <span className="troop-nums">
+                  {fmtK(shownTroops)} / {fmtK(self.maxTroops)} 🧍
+                  {committed > 0 && <span className="committed"> ⚔ {fmtK(committed)}</span>}
+                </span>
+              </div>
+              <span className="gold-chip">◈ {fmtK(shownMoney)}</span>
+            </div>
+
+            <label className="ratio">
+              <span className="ratio-val">
+                ⚔ {ratio}% ({fmtK(attackTroops)})
+              </span>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                value={ratio}
+                onChange={(e) => setRatio(+e.target.value)}
+              />
+            </label>
+
+            <div className="toolbar">
+              {TOOLS.map((t, i) => {
+                const active = t.bt === 'hq';
+                const afford = shownMoney >= nextHqCost;
+                const usable = active && afford;
+                const selected = buildMode === t.bt && active;
+                return (
+                  <button
+                    key={i}
+                    className={
+                      'tool' + (usable ? '' : ' disabled') + (selected ? ' selected' : '')
+                    }
+                    disabled={!usable}
+                    title={
+                      active
+                        ? `${t.name} · ${fmtK(nextHqCost)}${afford ? '' : ' — не хватает денег'}`
+                        : `${t.name} — скоро`
+                    }
+                    onClick={() => usable && setBuildMode(selected ? null : 'hq')}
+                  >
+                    <span className="tool-key">{(i + 1) % 10}</span>
+                    <span className="tool-icon">{t.icon}</span>
+                    <span className="tool-count">{active ? myHqs : 0}</span>
+                    {active && <span className="tool-cost">{fmtK(nextHqCost)}</span>}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -538,47 +653,52 @@ export default function App() {
         </>
       )}
 
+      {upgradeMenu && (
+        <>
+          <div className="menu-scrim" onClick={() => setUpgradeMenu(null)} />
+          <div
+            className="ctx-menu"
+            style={{
+              left: Math.min(upgradeMenu.x, window.innerWidth - 220),
+              top: Math.min(upgradeMenu.y, window.innerHeight - 120),
+            }}
+          >
+            {(() => {
+              const b = gc.buildingAt(upgradeMenu.cell);
+              const lvl = b?.level ?? upgradeMenu.level;
+              const upgrading = (b?.upProgress ?? 0) > 0;
+              const toLevel = lvl + 1;
+              const cost = hqUpgradeCost(toLevel);
+              return (
+                <>
+                  <div className="ctx-title">🛡 Штаб обороны · ур. {lvl}</div>
+                  {upgrading ? (
+                    <div className="ctx-note">Улучшается…</div>
+                  ) : lvl >= MAX_HQ_LEVEL ? (
+                    <div className="ctx-note">Максимальный уровень — усиленный взрыв</div>
+                  ) : (
+                    <button
+                      className="ctx-btn"
+                      disabled={shownMoney < cost}
+                      onClick={() => {
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        setUpgradeMenu(null);
+                      }}
+                    >
+                      ⚡ До {toLevel} ур. · {fmtK(cost)} · {toLevel === 2 ? '5с' : '10с'}
+                    </button>
+                  )}
+                </>
+              );
+            })()}
+            <button className="ctx-cancel" onClick={() => setUpgradeMenu(null)}>
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+
       {winner && <div className="winner">🏆 {winner} — контроль над миром. Новый раунд через 8 с</div>}
     </div>
   );
 }
-
-// График роста войск: залитая область истории + метка прироста в секунду.
-// memo — перерисовывается только при смене снимка данных (раз в 0.5с).
-const Sparkline = memo(function Sparkline({
-  data,
-  max,
-  color,
-  rate,
-}: {
-  data: number[];
-  max: number;
-  color: string;
-  rate: number;
-}) {
-  const W = 200;
-  const H = 40;
-  const n = data.length;
-  const top = Math.max(max, ...(n ? data : [1]), 1);
-  const pts =
-    n > 1
-      ? data.map((v, i) => `${(i / (n - 1)) * W},${H - (v / top) * H}`).join(' ')
-      : '';
-  return (
-    <div className="growth">
-      <span className="growth-label">Прирост войск</span>
-      <svg className="growth-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-        {pts && (
-          <>
-            <polyline points={`0,${H} ${pts} ${W},${H}`} fill={color} opacity="0.18" />
-            <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" />
-          </>
-        )}
-      </svg>
-      <span className="growth-rate" style={{ color: rate >= 0 ? '#7dd18b' : '#ff6a55' }}>
-        {rate >= 0 ? '+' : ''}
-        {rate.toLocaleString('ru')}/с
-      </span>
-    </div>
-  );
-});
