@@ -51,6 +51,7 @@ export class GameClient {
   private fortField = new Int16Array(0); // владелец штаба на клетку (укрепления)
   private buildingsSig = '';
   private flashes: { cell: number; t0: number; big: boolean }[] = []; // вспышки взрыва
+  private boatCum = new Map<number, { len: number; cum: number[]; total: number }>();
 
   private img: ImageData | null = null;
   private off = document.createElement('canvas');
@@ -198,6 +199,11 @@ export class GameClient {
 
   setBoats(boats: BoatPub[]) {
     this.boats = boats;
+    // чистим кэш длин у исчезнувших лодок
+    if (this.boatCum.size > boats.length) {
+      const ids = new Set(boats.map((b) => b.id));
+      for (const id of this.boatCum.keys()) if (!ids.has(id)) this.boatCum.delete(id);
+    }
   }
 
   setBuildings(buildings: BuildingPub[]) {
@@ -462,6 +468,8 @@ export class GameClient {
     // при отдалении названия стран и счётчики скрыты — рисуем только лодки
     const showLabels = this.labelsVisible();
     const foodZoom = this.minZoom() * FOOD_LABEL_MUL;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
     if (showLabels)
     for (const p of this.players) {
       if (!p.alive || p.cells === 0) continue;
@@ -476,6 +484,8 @@ export class GameClient {
       size = Math.min(size, 26);
       const sx = this.panX + l.x * this.zoom;
       const sy = this.panY + l.y * this.zoom;
+      // отсекаем подписи за пределами экрана — не тратим strokeText впустую
+      if (sx < -80 || sy < -40 || sx > vw + 80 || sy > vh + 40) continue;
       ctx.lineWidth = Math.max(2, size / 6);
       ctx.strokeStyle = 'rgba(0,0,0,0.75)';
       ctx.fillStyle = '#fff';
@@ -499,15 +509,24 @@ export class GameClient {
       if (pts < 2) continue;
       const col = playerColorCSS(b.player);
       const hostile = b.target === this.selfId;
-      // накопленная длина проредённого маршрута
-      const cum = [0];
-      for (let i = 1; i < pts; i++) {
-        cum.push(
-          cum[i - 1] +
-            Math.hypot(b.path[i * 2] - b.path[(i - 1) * 2], b.path[i * 2 + 1] - b.path[(i - 1) * 2 + 1])
-        );
+      // накопленная длина маршрута — считаем один раз на лодку и кэшируем
+      let cached = this.boatCum.get(b.id);
+      if (!cached || cached.len !== b.path.length) {
+        const cum = [0];
+        for (let i = 1; i < pts; i++) {
+          cum.push(
+            cum[i - 1] +
+              Math.hypot(
+                b.path[i * 2] - b.path[(i - 1) * 2],
+                b.path[i * 2 + 1] - b.path[(i - 1) * 2 + 1]
+              )
+          );
+        }
+        cached = { len: b.path.length, cum, total: cum[pts - 1] || 1 };
+        this.boatCum.set(b.id, cached);
       }
-      const total = cum[pts - 1] || 1;
+      const cum = cached.cum;
+      const total = cached.total;
       // базовая точка маршрута на дистанции d (без покачивания)
       const baseAt = (d: number): [number, number] => {
         d = Math.max(0, Math.min(total, d));
@@ -576,6 +595,7 @@ export class GameClient {
       const size = Math.min(16, Math.max(11, this.zoom * 3));
       const sx = this.panX + wl.x * this.zoom;
       let sy = this.panY + wl.y * this.zoom;
+      if (sx < -80 || sy < -40 || sx > vw + 80 || sy > vh + 40) continue;
       ctx.font = `700 ${size}px 'IBM Plex Mono', monospace`;
       ctx.lineWidth = Math.max(2.5, size / 5);
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
@@ -595,9 +615,12 @@ export class GameClient {
     ctx.textBaseline = 'middle';
     const r = Math.max(5, Math.min(16, this.zoom * 2.2));
     const now = performance.now();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
     for (const b of this.buildings) {
       const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
+      if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue; // вне экрана
       const building = b.progress < 1;
       const upgrading = b.upProgress > 0 && b.upProgress < 1;
       ctx.globalAlpha = building ? 0.55 : 1; // строящийся — приглушён
