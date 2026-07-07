@@ -175,6 +175,7 @@ export class Game {
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
   // пересобирается только при изменении зданий — в бою это O(1) чтение
   fortField: Int16Array;
+  private fortLevel: Uint8Array; // уровень укрепляющего штаба на клетку (0 нет)
   private fortDirty = true;
   landId: Int16Array; // id связного материка для каждой клетки суши (-1 = вода)
   difficulty: Difficulty = 'normal';
@@ -200,6 +201,7 @@ export class Game {
     this.owners = new Int16Array(this.cells);
     this.landId = new Int16Array(this.cells);
     this.fortField = new Int16Array(this.cells);
+    this.fortLevel = new Uint8Array(this.cells);
     this.genTerrain();
     this.computeLandIds();
     this.buildWaterGrid();
@@ -214,6 +216,7 @@ export class Game {
     this.boats = [];
     this.buildings = [];
     this.fortField.fill(0);
+    this.fortLevel.fill(0);
     this.fortDirty = true;
     this.changed.clear();
     this.deaths = [];
@@ -829,7 +832,8 @@ export class Game {
 
   // Захват/фитиль/взрыв щитов. Вызывается каждый тик (зданий немного).
   private checkBuildings() {
-    const remove: Building[] = [];
+    const remove = new Set<Building>();
+    const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
       // завершение апгрейда
@@ -848,7 +852,7 @@ export class Game {
         continue;
       }
       if (b.level < 2) {
-        remove.push(b); // обычный щит — взрывается мгновенно (просто сносится)
+        remove.add(b); // обычный щит — взрывается мгновенно (просто сносится)
         continue;
       }
       // прокачанный: 10с фитиль, потом взрыв с уроном по области
@@ -856,12 +860,25 @@ export class Game {
         b.fuseTick = this.tickNo + HQ_FUSE_TICKS;
         this.fortDirty = true; // укрепление гаснет при захвате
       } else if (this.tickNo >= b.fuseTick) {
-        this.explode(b.cell, b.level);
-        remove.push(b);
+        explosions.push({ cell: b.cell, level: b.level });
+        remove.add(b);
       }
     }
-    if (remove.length) {
-      this.buildings = this.buildings.filter((b) => !remove.includes(b));
+    // выполняем взрывы: урон по территории/армии + снос всех зданий в радиусе
+    for (const ex of explosions) {
+      this.explode(ex.cell, ex.level);
+      const R = ex.level >= 3 ? HQ_EXPLODE_RADIUS * 2 : HQ_EXPLODE_RADIUS;
+      const R2 = R * R;
+      const cx = ex.cell % this.w;
+      const cy = (ex.cell / this.w) | 0;
+      for (const b of this.buildings) {
+        const dx = (b.cell % this.w) - cx;
+        const dy = ((b.cell / this.w) | 0) - cy;
+        if (dx * dx + dy * dy <= R2) remove.add(b); // любое здание в радиусе — снесено
+      }
+    }
+    if (remove.size) {
+      this.buildings = this.buildings.filter((b) => !remove.has(b));
       this.fortDirty = true;
     }
   }
@@ -907,6 +924,7 @@ export class Game {
   // Дёшево и делается только при изменении зданий.
   private rebuildFort() {
     this.fortField.fill(0);
+    this.fortLevel.fill(0);
     const R = HQ_RADIUS;
     const R2 = R * R;
     for (const b of this.buildings) {
@@ -920,7 +938,12 @@ export class Game {
           if (dx * dx + dy * dy > R2) continue;
           const x = cx + dx;
           if (x < 0 || x >= this.w) continue;
-          this.fortField[y * this.w + x] = b.owner;
+          const n = y * this.w + x;
+          // сильнейший штаб на клетке определяет владельца и уровень защиты
+          if (b.level > this.fortLevel[n]) {
+            this.fortLevel[n] = b.level;
+            this.fortField[n] = b.owner;
+          }
         }
       }
     }
@@ -1107,7 +1130,6 @@ export class Game {
         waveScale = Math.min(6, Math.max(0.2, a.troops / enemy.troops));
       }
     }
-    const fortCost = 1 + 5 * density; // цена на укреплённой клетке
     // остаток меньше даже обычной цены — наступление выдохлось, вернуть войска
     if (a.troops < baseCost) {
       this.refund(a, attacker);
@@ -1119,9 +1141,12 @@ export class Game {
       while (list.length && quota > 0) {
         const i = (Math.random() * list.length) | 0;
         const c = list[i];
-        // укреплена ли эта клетка штабом её владельца (цели)
+        // укреплена ли клетка штабом её владельца; сопротивление по уровню:
+        // 1 ур. — 1:5, 2 ур. — 1:7, 3 ур. — 1:10
         const fortified = enemy && this.fortField[c] === a.target;
-        const cellCost = fortified ? fortCost : baseCost;
+        const fl = this.fortLevel[c];
+        const mul = fl >= 3 ? 10 : fl === 2 ? 7 : 5;
+        const cellCost = fortified ? 1 + mul * density : baseCost;
         if (a.troops < cellCost) {
           // не по карману именно эта клетка — пропускаем её в этом тике
           if (a.troops < baseCost) break;

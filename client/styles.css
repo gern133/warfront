@@ -182,10 +182,53 @@ button {
 
 /* --- лидерборд --- */
 
-.fps {
+/* панель управления игрой — правый верхний угол */
+.ctrl-panel {
   position: absolute;
   top: 16px;
   right: 16px;
+  z-index: 40;
+  display: flex;
+  gap: 4px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.ctrl-btn {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: rgba(233, 237, 227, 0.06);
+  color: var(--ink);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ctrl-btn:hover {
+  border-color: var(--khaki);
+}
+
+.ctrl-speed.active {
+  background: var(--khaki);
+  color: #10140c;
+}
+
+.ctrl-exit:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.fps {
+  position: absolute;
+  top: 16px;
+  left: 16px;
   z-index: 50;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 11px;
@@ -199,9 +242,24 @@ button {
 }
 
 .leaderboard {
-  top: 46px;
+  top: 58px;
   right: 16px;
-  min-width: 224px;
+  min-width: 300px;
+}
+
+.leaderboard .lb-row {
+  gap: 6px;
+}
+
+.lb-stat {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.lb-gold {
+  color: #f2c94c;
 }
 
 .leaderboard .eyebrow {
@@ -553,6 +611,23 @@ button {
   50% {
     border-color: rgba(255, 77, 51, 0.35);
   }
+}
+
+.pause-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--khaki);
+  border-radius: 6px;
+  padding: 14px 28px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 18px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .winner {

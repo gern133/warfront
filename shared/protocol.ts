@@ -89,7 +89,8 @@ export type ClientMsg =
   | { type: 'invade'; cell: number; ratio: number } // морское вторжение (ПКМ)
   | { type: 'recall'; boatId: number } // отозвать десант
   | { type: 'build'; bt: BuildingType; cell: number } // построить здание
-  | { type: 'upgrade'; cell: number }; // прокачать здание
+  | { type: 'upgrade'; cell: number } // прокачать здание
+  | { type: 'setSpeed'; speed: number }; // скорость игры (0 пауза,1,2,3,10)
 
 export type ServerMsg =
   | {
@@ -118,6 +119,8 @@ export type ServerMsg =
       attacks: AttackPub[];
       boats: BoatPub[];
       buildings: BuildingPub[];
+      speed: number; // текущая скорость игры
+      humans: number; // сколько реальных игроков в комнате
     }
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла

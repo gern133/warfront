@@ -68,6 +68,7 @@ interface Room {
   difficulty: Difficulty;
   map: MapType;
   isPublic: boolean;
+  speed: number; // скорость игры: 0 пауза, 1, 2, 3, 10
   resetTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -100,6 +101,7 @@ function makeRoom(code: string, difficulty: Difficulty, map: MapType, isPublic: 
     difficulty,
     map,
     isPublic,
+    speed: 1,
     resetTimer: null,
   };
   rooms.set(code, room);
@@ -330,6 +332,15 @@ wss.on('connection', (ws) => {
         if (err) send(ws, { type: 'error', message: err });
         break;
       }
+      case 'setSpeed': {
+        const room = st.room;
+        if (!room) return;
+        // скоростью управляет хост лобби, либо любой в одиночной комнате
+        const allowed = room.isPublic ? room.clients.size <= 1 : room.host === ws;
+        if (!allowed) return;
+        if ([0, 1, 2, 3, 10].includes(msg.speed)) room.speed = msg.speed;
+        break;
+      }
       case 'leave': {
         leaveRoom(ws, st);
         break;
@@ -382,8 +393,9 @@ setInterval(() => {
     if (room.isPublic && room.clients.size === 0) continue;
     const game = room.game;
 
-    if (room.phase === 'running') game.tick();
-    else checkSpawnPhase(room);
+    if (room.phase === 'running') {
+      for (let i = 0; i < room.speed; i++) game.tick(); // ускорение: тик N раз
+    } else checkSpawnPhase(room);
 
     for (const ws of room.clients) {
       const cst = clients.get(ws);
@@ -405,6 +417,8 @@ setInterval(() => {
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),
+      speed: room.speed,
+      humans: room.clients.size,
     } satisfies ServerMsg);
     for (const ws of room.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(update);

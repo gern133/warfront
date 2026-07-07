@@ -77,6 +77,8 @@ export default function App() {
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
   const [shownMoney, setShownMoney] = useState(0);
+  const [speed, setSpeed] = useState(1);
+  const [humans, setHumans] = useState(1);
   const [spawnLeft, setSpawnLeft] = useState<number | null>(null);
   const [winner, setWinner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +103,11 @@ export default function App() {
   buildModeRef.current = buildMode;
   const canBuildHqRef = useRef(false);
   const needFocus = useRef(false); // отложенный автозум к спавну
+  const speedRef = useRef(1);
+  speedRef.current = speed;
+  const playersRef = useRef<PlayerPub[]>([]);
+  // снимок армии/золота для рейтинга — обновляется раз в 5с
+  const statSnap = useRef<Map<number, { max: number; money: number }>>(new Map());
   const [shownTroops, setShownTroops] = useState(0); // отображаемое значение (реже)
   const [fps, setFps] = useState(0);
   const [growthView, setGrowthView] = useState<{ rate: number; points: number[] }>({
@@ -180,10 +187,13 @@ export default function App() {
         gc.setAttacks(upAttacks);
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
+        playersRef.current = msg.players ?? [];
         setPlayers(msg.players ?? []);
         setAttacks(upAttacks);
         setBoats(upBoats);
         setBuildings(upBuildings);
+        setSpeed(msg.speed ?? 1);
+        setHumans(msg.humans ?? 1);
         // копим историю войск для графика прироста (последние ~12 с при 100мс)
         if (gc.selfId > 0) {
           const me = msg.players.find((p) => p.id === gc.selfId);
@@ -240,6 +250,16 @@ export default function App() {
     return () => clearInterval(iv);
   }, []);
 
+  // рейтинг: армию и золото обновляем раз в 5с (оптимизация + меньше мельтешит)
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const m = new Map<number, { max: number; money: number }>();
+      for (const p of playersRef.current) m.set(p.id, { max: p.maxTroops, money: p.money });
+      statSnap.current = m;
+    }, 5000);
+    return () => clearInterval(iv);
+  }, []);
+
   const cleanName = () => {
     const n = name.trim() || 'Аноним';
     localStorage.setItem('wf-name', n);
@@ -258,12 +278,22 @@ export default function App() {
     troopHistory.current = [];
   };
 
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.();
+  };
+
   // Escape: сначала отменяет режим постройки, затем из игры/лобби — в меню
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (buildModeRef.current) {
           setBuildMode(null);
+          return;
+        }
+        // в игре Esc — переключатель паузы (второй раз продолжает игру)
+        if (phaseRef.current === 'playing') {
+          sendMsg({ type: 'setSpeed', speed: speedRef.current === 0 ? 1 : 0 });
           return;
         }
         if (phaseRef.current === 'menu') setMenuView('main');
@@ -325,9 +355,35 @@ export default function App() {
       <div className="fps" title="Кадров в секунду">{fps} FPS</div>
 
       {inGame && (
-        <button className="exit-btn" onClick={leaveToMenu} title="Esc — выход в меню">
-          ⎋ В меню
-        </button>
+        <div className="ctrl-panel">
+          {/* пауза и ускорение — только когда ты один (без реальных игроков) */}
+          {humans <= 1 && (
+            <>
+              <button
+                className="ctrl-btn"
+                title={speed === 0 ? 'Продолжить' : 'Пауза'}
+                onClick={() => sendMsg({ type: 'setSpeed', speed: speed === 0 ? 1 : 0 })}
+              >
+                {speed === 0 ? '▶' : '⏸'}
+              </button>
+              {[1, 2, 3, 10].map((s) => (
+                <button
+                  key={s}
+                  className={'ctrl-btn ctrl-speed' + (speed === s ? ' active' : '')}
+                  onClick={() => sendMsg({ type: 'setSpeed', speed: s })}
+                >
+                  {s}×
+                </button>
+              ))}
+            </>
+          )}
+          <button className="ctrl-btn" title="Полный экран" onClick={toggleFullscreen}>
+            ⛶
+          </button>
+          <button className="ctrl-btn ctrl-exit" title="Выйти в меню" onClick={leaveToMenu}>
+            ✕
+          </button>
+        </div>
       )}
 
       {inGame && (
@@ -335,17 +391,22 @@ export default function App() {
           <div className="eyebrow">
             Лидеры{roomCode !== 'QUICK' && <span className="room-code"> · {roomCode}</span>}
           </div>
-          {board.map((p, i) => (
-            <div key={p.id} className={'lb-row' + (p.id === gc.selfId ? ' me' : '')}>
-              <span className="lb-rank">{i + 1}</span>
-              <span className="dot" style={{ background: playerColorCSS(p.id) }} />
-              <span className="lb-name">
-                {p.name}
-                {p.bot && !p.strong ? ' 🤖' : ''}
-              </span>
-              <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
-            </div>
-          ))}
+          {board.map((p, i) => {
+            const stat = statSnap.current.get(p.id);
+            return (
+              <div key={p.id} className={'lb-row' + (p.id === gc.selfId ? ' me' : '')}>
+                <span className="lb-rank">{i + 1}</span>
+                <span className="dot" style={{ background: playerColorCSS(p.id) }} />
+                <span className="lb-name">
+                  {p.name}
+                  {p.bot && !p.strong ? ' 🤖' : ''}
+                </span>
+                <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
+                <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
+                <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -469,6 +530,10 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {phase === 'playing' && speed === 0 && (
+        <div className="pause-banner">⏸ Пауза · Esc — продолжить</div>
       )}
 
       {phase === 'menu' && (
