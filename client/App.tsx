@@ -96,11 +96,13 @@ export default function App() {
       setInvadeMenu({ cell, x: sx, y: sy });
     };
 
-    // через https-туннель (cloudflared/ngrok) — wss на том же хосте
+    // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
+    // Без неё — старое поведение: через https-туннель (cloudflared/ngrok) wss на том же хосте.
     const wsUrl =
-      location.protocol === 'https:'
+      import.meta.env.VITE_WS_URL ||
+      (location.protocol === 'https:'
         ? `wss://${location.host}`
-        : `ws://${location.hostname}:${PORT}`;
+        : `ws://${location.hostname}:${PORT}`);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     ws.onopen = () => setConnected(true);

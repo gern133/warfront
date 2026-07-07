@@ -28,6 +28,36 @@ npm start          # http://localhost:8080
   даст публичный https-адрес, WebSocket через него работает (клиент сам
   переключается на wss при https).
 
+## Постоянный деплой (GitHub Pages + свой сервер через ngrok)
+
+Клиент — на GitHub Pages (постоянная ссылка), сервер — на своей машине,
+доступ снаружи через статический домен ngrok (бесплатный, не меняется
+между перезапусками).
+
+1. **Настройка ngrok (один раз)**:
+   - Зарегистрироваться на [ngrok.com](https://ngrok.com), установить
+     (`brew install ngrok`), привязать аккаунт: `ngrok config add-authtoken <token>`.
+   - Dashboard → Domains → **Create domain** — получить бесплатный
+     статический домен, например `warfront.ngrok-free.app`.
+
+2. **Запуск сервера + туннеля** (каждый раз, когда хочешь дать друзьям
+   поиграть):
+   ```bash
+   npm run build && npm start                       # сервер на :8080
+   ngrok http --url=warfront.ngrok-free.app 8080     # туннель наружу
+   ```
+
+3. **Клиент на GitHub Pages** (настраивается один раз, домен ngrok не
+   меняется — пересобирать не нужно):
+   - Settings → Pages → Source: **GitHub Actions**.
+   - Settings → Secrets and variables → Actions → **Variables** → добавить
+     `VITE_WS_URL` = `wss://warfront.ngrok-free.app` (именно `wss://`, не
+     `https://`).
+   - Запушить в `main` (или запустить workflow `Deploy client to GitHub
+     Pages` вручную) — соберётся и задеплоится автоматически.
+   - Игра будет доступна на `https://<username>.github.io/warfront/` —
+     но играть можно только когда твой сервер и ngrok запущены.
+
 ## Как играть
 
 - **Режимы**: быстрая игра (общая комната), создать лобби (код из 5 символов для

@@ -395,6 +395,7 @@ setInterval(() => {
   }
 }, TICK_MS);
 
-server.listen(PORT, () => {
-  console.log(`Warfront server: http://localhost:${PORT} (ws на том же порту)`);
+const LISTEN_PORT = Number(process.env.PORT) || PORT;
+server.listen(LISTEN_PORT, () => {
+  console.log(`Warfront server: http://localhost:${LISTEN_PORT} (ws на том же порту)`);
 });
