@@ -76,6 +76,7 @@ interface CState {
   playerId: number | null;
   name: string;
   room: Room | null;
+  needResync: boolean; // клиент отставал (буфер забит) — при восстановлении ресинк
 }
 
 const rooms = new Map<string, Room>();
@@ -211,7 +212,7 @@ function roomFull(room: Room): boolean {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws) => {
-  const st: CState = { playerId: null, name: '', room: null };
+  const st: CState = { playerId: null, name: '', room: null, needResync: false };
   clients.set(ws, st);
 
   ws.on('message', (raw) => {
@@ -386,7 +387,10 @@ function checkSpawnPhase(room: Room) {
 }
 
 // --- Игровой цикл: тикаем все запущенные комнаты ---
+let intervalNo = 0;
 setInterval(() => {
+  intervalNo++;
+  const sendPlayers = intervalNo % 5 === 0; // полный список игроков — раз в 500мс
   for (const room of rooms.values()) {
     if (room.phase === 'lobby') continue;
     // публичная комната без людей заморожена — боты не съедают карту впустую
@@ -413,7 +417,9 @@ setInterval(() => {
     const update = JSON.stringify({
       type: 'update',
       changes,
-      players: game.playersPub(),
+      // список игроков (300 объектов, ~30КБ) шлём реже — клиент всё равно
+      // показывает армии/золото раз в 1–5с; дельты клеток идут каждый тик
+      players: sendPlayers ? game.playersPub() : [],
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),
@@ -421,7 +427,21 @@ setInterval(() => {
       humans: room.clients.size,
     } satisfies ServerMsg);
     for (const ws of room.clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(update);
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      const cst = clients.get(ws);
+      // буфер забит — пропускаем кадр (иначе очередь растёт → 30-сек лаг)
+      if (ws.bufferedAmount >= 256 * 1024) {
+        if (cst) cst.needResync = true;
+        continue;
+      }
+      // клиент отставал и восстановился — шлём полный снимок владельцев, а не
+      // дельту (пропущенные дельты уже потеряны)
+      if (cst?.needResync) {
+        cst.needResync = false;
+        send(ws, { type: 'resync', ownersRle: rleEncode(game.owners) });
+        continue;
+      }
+      ws.send(update);
     }
 
     if (game.winnerId !== null && !room.resetTimer) {

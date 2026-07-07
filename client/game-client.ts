@@ -51,7 +51,11 @@ export class GameClient {
   private fortField = new Int16Array(0); // владелец штаба на клетку (укрепления)
   private buildingsSig = '';
   private flashes: { cell: number; t0: number; big: boolean }[] = []; // вспышки взрыва
-  private boatCum = new Map<number, { len: number; cum: number[]; total: number }>();
+  private boatCum = new Map<
+    number,
+    { len: number; cum: number[]; total: number; wob: Float64Array }
+  >();
+  private boatProg = new Map<number, number>(); // интерполированный прогресс лодок
 
   private img: ImageData | null = null;
   private off = document.createElement('canvas');
@@ -152,6 +156,13 @@ export class GameClient {
     }
   }
 
+  // Полный ресинк владельцев (после отставания клиента) — без смены фазы
+  resync(ownersRle: number[]) {
+    if (!this.cells) return;
+    rleDecode(ownersRle, this.owners);
+    this.repaintAll();
+  }
+
   applyUpdate(changes: number[]) {
     if (!changes.length || !this.cells) return;
     for (let i = 0; i < changes.length; i += 2) {
@@ -199,11 +210,43 @@ export class GameClient {
 
   setBoats(boats: BoatPub[]) {
     this.boats = boats;
-    // чистим кэш длин у исчезнувших лодок
+    // чистим кэш у исчезнувших лодок
     if (this.boatCum.size > boats.length) {
       const ids = new Set(boats.map((b) => b.id));
-      for (const id of this.boatCum.keys()) if (!ids.has(id)) this.boatCum.delete(id);
+      for (const id of this.boatCum.keys())
+        if (!ids.has(id)) {
+          this.boatCum.delete(id);
+          this.boatProg.delete(id);
+        }
     }
+  }
+
+  // Предрасчёт маршрута лодки: накопленная длина + волнистые мировые координаты
+  // каждой точки (покачивание зависит только от дистанции → статично)
+  private buildBoatPath(path: number[], pts: number) {
+    const WOB_AMP = 10;
+    const WOB_FREQ = 0.08;
+    const cum = new Array(pts);
+    cum[0] = 0;
+    for (let i = 1; i < pts; i++) {
+      cum[i] =
+        cum[i - 1] +
+        Math.hypot(path[i * 2] - path[(i - 1) * 2], path[i * 2 + 1] - path[(i - 1) * 2 + 1]);
+    }
+    const total = cum[pts - 1] || 1;
+    const wob = new Float64Array(pts * 2);
+    for (let i = 0; i < pts; i++) {
+      const ia = Math.max(0, i - 1);
+      const ib = Math.min(pts - 1, i + 1);
+      const dxn = path[ib * 2] - path[ia * 2];
+      const dyn = path[ib * 2 + 1] - path[ia * 2 + 1];
+      const len = Math.hypot(dxn, dyn) || 1;
+      const taper = Math.sin(Math.PI * (cum[i] / total));
+      const w = Math.sin(cum[i] * WOB_FREQ) * WOB_AMP * taper;
+      wob[i * 2] = path[i * 2] - (dyn / len) * w;
+      wob[i * 2 + 1] = path[i * 2 + 1] + (dxn / len) * w;
+    }
+    return { len: path.length, cum, total, wob };
   }
 
   setBuildings(buildings: BuildingPub[]) {
@@ -500,75 +543,43 @@ export class GameClient {
         ctx.fillText(troops, sx, ty);
       }
     }
-    // морские десанты: след и кружок из одной параметризации по дистанции —
-    // линия идёт точно за лодкой по той же волнистой траектории
-    const WOB_AMP = 10;
-    const WOB_FREQ = 0.08;
+    // морские десанты: волнистый маршрут статичен (зависит только от дистанции)
+    // — считаем один раз и кэшируем; позицию интерполируем между апдейтами
     for (const b of this.boats) {
       const pts = b.path.length / 2;
       if (pts < 2) continue;
       const col = playerColorCSS(b.player);
       const hostile = b.target === this.selfId;
-      // накопленная длина маршрута — считаем один раз на лодку и кэшируем
       let cached = this.boatCum.get(b.id);
       if (!cached || cached.len !== b.path.length) {
-        const cum = [0];
-        for (let i = 1; i < pts; i++) {
-          cum.push(
-            cum[i - 1] +
-              Math.hypot(
-                b.path[i * 2] - b.path[(i - 1) * 2],
-                b.path[i * 2 + 1] - b.path[(i - 1) * 2 + 1]
-              )
-          );
-        }
-        cached = { len: b.path.length, cum, total: cum[pts - 1] || 1 };
+        cached = this.buildBoatPath(b.path, pts);
         this.boatCum.set(b.id, cached);
       }
-      const cum = cached.cum;
-      const total = cached.total;
-      // базовая точка маршрута на дистанции d (без покачивания)
-      const baseAt = (d: number): [number, number] => {
-        d = Math.max(0, Math.min(total, d));
-        let s = 0;
-        while (s < pts - 2 && cum[s + 1] < d) s++;
-        const segLen = cum[s + 1] - cum[s] || 1;
-        const t = (d - cum[s]) / segLen;
-        return [
-          b.path[s * 2] + (b.path[(s + 1) * 2] - b.path[s * 2]) * t,
-          b.path[s * 2 + 1] + (b.path[(s + 1) * 2 + 1] - b.path[s * 2 + 1]) * t,
-        ];
-      };
-      // точка с покачиванием: нормаль берём по «окну» (сглаженное направление,
-      // не скачет на изломах), амплитуду гасим к обоим концам маршрута
-      const pointAt = (d: number): [number, number] => {
-        const [px, py] = baseAt(d);
-        const [ax, ay] = baseAt(d - 8);
-        const [bx2, by2] = baseAt(d + 8);
-        const len = Math.hypot(bx2 - ax, by2 - ay) || 1;
-        const nx = -(by2 - ay) / len;
-        const ny = (bx2 - ax) / len;
-        const taper = Math.sin(Math.PI * Math.max(0, Math.min(1, d / total)));
-        const wob = Math.sin(d * WOB_FREQ) * WOB_AMP * taper;
-        return [px + nx * wob, py + ny * wob];
-      };
-      const done = b.prog * total;
-      const scr = (p: [number, number]) => [this.panX + p[0] * this.zoom, this.panY + p[1] * this.zoom];
-      // след — сплошная линия от старта до текущей позиции
+      const { cum, total, wob } = cached;
+      // плавная интерполяция прогресса (сервер шлёт ~10 раз/с, экран 60fps)
+      let shown = this.boatProg.get(b.id);
+      shown = shown === undefined ? b.prog : shown + (b.prog - shown) * 0.25;
+      this.boatProg.set(b.id, shown);
+      const done = Math.max(0, Math.min(1, shown)) * total;
+      const px = this.panX;
+      const py = this.panY;
+      const z = this.zoom;
+      // трасер: сплошная линия по кэшированным точкам до текущей дистанции
       ctx.lineWidth = 2.5;
       ctx.lineJoin = 'round';
       ctx.strokeStyle = hostile ? 'rgba(255,77,51,0.85)' : col;
       ctx.beginPath();
-      const step = Math.max(2, total / 60);
-      let first = true;
-      for (let d = 0; d <= done; d += step) {
-        const [px, py] = scr(pointAt(d));
-        if (first) {
-          ctx.moveTo(px, py);
-          first = false;
-        } else ctx.lineTo(px, py);
-      }
-      const [bx, by] = scr(pointAt(done));
+      ctx.moveTo(px + wob[0] * z, py + wob[1] * z);
+      let i = 1;
+      for (; i < pts && cum[i] <= done; i++) ctx.lineTo(px + wob[i * 2] * z, py + wob[i * 2 + 1] * z);
+      // конечная точка на дистанции done (интерполяция сегмента) = позиция лодки
+      const s = Math.min(i, pts - 1);
+      const segLen = cum[s] - cum[s - 1] || 1;
+      const t = Math.max(0, Math.min(1, (done - cum[s - 1]) / segLen));
+      const wx = wob[(s - 1) * 2] + (wob[s * 2] - wob[(s - 1) * 2]) * t;
+      const wy = wob[(s - 1) * 2 + 1] + (wob[s * 2 + 1] - wob[(s - 1) * 2 + 1]) * t;
+      const bx = px + wx * z;
+      const by = py + wy * z;
       ctx.lineTo(bx, by);
       ctx.stroke();
       const rad = Math.max(5, Math.min(11, this.zoom * 1.6));

@@ -122,6 +122,7 @@ export type ServerMsg =
       speed: number; // текущая скорость игры
       humans: number; // сколько реальных игроков в комнате
     }
+  | { type: 'resync'; ownersRle: number[] } // полный снимок владельцев (после лага)
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла
   | { type: 'dead' }

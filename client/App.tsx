@@ -183,28 +183,33 @@ export default function App() {
         gc.applyUpdate(msg.changes);
         // отложенный автозум к спавну — когда клетки уже пришли
         if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
-        gc.setPlayers(msg.players ?? []);
         gc.setAttacks(upAttacks);
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
-        playersRef.current = msg.players ?? [];
-        setPlayers(msg.players ?? []);
         setAttacks(upAttacks);
         setBoats(upBoats);
         setBuildings(upBuildings);
         setSpeed(msg.speed ?? 1);
         setHumans(msg.humans ?? 1);
-        // копим историю войск для графика прироста (последние ~12 с при 100мс)
-        if (gc.selfId > 0) {
-          const me = msg.players.find((p) => p.id === gc.selfId);
-          if (me) {
-            liveTroops.current = me.troops;
-            liveMoney.current = me.money ?? 0;
-            const h = troopHistory.current;
-            h.push(me.troops);
-            if (h.length > 120) h.shift();
+        // список игроков сервер шлёт реже (раз в 500мс) — обрабатываем, когда есть
+        const pl = msg.players;
+        if (pl && pl.length) {
+          gc.setPlayers(pl);
+          playersRef.current = pl;
+          setPlayers(pl);
+          if (gc.selfId > 0) {
+            const me = pl.find((p) => p.id === gc.selfId);
+            if (me) {
+              liveTroops.current = me.troops;
+              liveMoney.current = me.money ?? 0;
+              const h = troopHistory.current;
+              h.push(me.troops);
+              if (h.length > 120) h.shift();
+            }
           }
         }
+      } else if (msg.type === 'resync') {
+        gc.resync(msg.ownersRle); // полный снимок владельцев после лага
       } else if (msg.type === 'spawned') {
         setPhase('playing');
         // клетки спавна придут следующим update — фокус делаем там (см. ниже)
