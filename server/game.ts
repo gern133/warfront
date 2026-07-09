@@ -25,7 +25,7 @@ import {
   tradeValue,
   shipsForLevel,
 } from '../shared/protocol';
-import { earthTerrain, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
+import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
 export interface Player {
   id: number;
@@ -292,6 +292,13 @@ export class Game {
           }
         }
         this.cwater[cy * this.cw + cx] = total > 0 && land === 0 ? 1 : 0;
+      }
+    }
+    // узкие каналы/проливы грубая сетка не видит (блок не полностью водный) —
+    // принудительно открываем судоходный коридор вдоль них
+    if (this.mapType === 'earth') {
+      for (const c of canalCoarseCells(this.w, this.h, k, this.cw, this.ch)) {
+        this.cwater[c] = 1;
       }
     }
   }

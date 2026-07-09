@@ -42,6 +42,90 @@ const LAKES: Ring[] = [
   [[50, 47], [52.5, 46.5], [54, 44], [53.5, 42], [54, 40.5], [53, 37.5], [50, 36.8], [48.5, 38.5], [49.5, 41], [47.5, 43.5]],
 ];
 
+// Реальные каналы и узкие проливы. В растре 50m они уже 1–2 клеток и «зарастают»
+// сушей, из-за чего торговые маршруты рвутся. Прорезаем их водой, чтобы корабли
+// проходили насквозь (ширина игровая, крупнее реальной — иначе не судоходно).
+// Каждый — ломаная из точек [lon, lat] и радиус прорезаемого канала (в клетках).
+const CANALS: { pts: [number, number][]; r: number }[] = [
+  // Суэцкий канал: Средиземное море → Красное море (тянем до широкой открытой воды)
+  { pts: [[32.2, 32.0], [32.4, 30.6], [32.7, 29.8], [33.5, 28.2], [34.8, 26.5], [36.0, 24.5]], r: 1 },
+  // Баб-эль-Мандебский пролив: Красное море → Аденский залив (Индийский океан)
+  { pts: [[42.0, 14.5], [43.0, 12.8], [44.2, 12.0], [46.0, 11.6]], r: 1 },
+  // Панамский канал: Карибское море → Тихий океан
+  { pts: [[-80.5, 10.0], [-79.9, 9.2], [-79.5, 8.5], [-79.2, 7.8]], r: 1 },
+  // Гибралтарский пролив: Атлантика → Средиземное море
+  { pts: [[-7.5, 36.0], [-6.0, 35.95], [-5.0, 35.9], [-3.5, 36.0]], r: 1 },
+  // Босфор → Мраморное море → Дарданеллы: Чёрное море → Эгейское/Средиземное
+  { pts: [[29.3, 41.4], [29.0, 41.0], [28.0, 40.7], [26.7, 40.3], [25.6, 39.8]], r: 1 },
+];
+
+// Коридор канала в грубой водной сетке: судоходность узкого канала грубая сетка
+// (блок K×K, проходим только если весь водный) сама не видит — поэтому вдоль
+// каждого канала принудительно помечаем блоки водой. Возвращает индексы блоков.
+export function canalCoarseCells(w: number, h: number, ck: number, cw: number, ch: number): number[] {
+  const set = new Set<number>();
+  const add = (cx: number, cy: number) => {
+    if (cy < 0 || cy >= ch) return;
+    set.add(cy * cw + (((cx % cw) + cw) % cw)); // заворот по долготе
+  };
+  for (const canal of CANALS) {
+    const pts = canal.pts;
+    let px = -999;
+    let py = -999;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const x0 = ((pts[i][0] + 180) / 360) * w;
+      const y0 = latRow(pts[i][1], h);
+      const x1 = ((pts[i + 1][0] + 180) / 360) * w;
+      const y1 = latRow(pts[i + 1][1], h);
+      const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0)) + 1;
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const cx = Math.floor((x0 + (x1 - x0) * t) / ck);
+        const cy = Math.floor((y0 + (y1 - y0) * t) / ck);
+        // тонкий коридор в 1 блок; при диагональном переходе добавляем ортогональный
+        // мостик, чтобы обход воды (без срезания углов) не разрывался
+        if (px !== -999 && cx !== px && cy !== py) add(cx, py);
+        add(cx, cy);
+        px = cx;
+        py = cy;
+      }
+    }
+  }
+  return [...set];
+}
+
+// прорезаем диск воды (mask=0) с заворотом по долготе
+function carveDisk(mask: Uint8Array, w: number, h: number, cx: number, cy: number, r: number) {
+  const r2 = r * r;
+  for (let dy = -r; dy <= r; dy++) {
+    const y = cy + dy;
+    if (y < 0 || y >= h) continue;
+    for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy > r2) continue;
+      const x = (((cx + dx) % w) + w) % w;
+      mask[y * w + x] = 0;
+    }
+  }
+}
+
+// прорезаем все каналы: идём по ломаной с мелким шагом и чистим диск
+function carveCanals(mask: Uint8Array, w: number, h: number) {
+  for (const canal of CANALS) {
+    const pts = canal.pts;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const x0 = ((pts[i][0] + 180) / 360) * w;
+      const y0 = latRow(pts[i][1], h);
+      const x1 = ((pts[i + 1][0] + 180) / 360) * w;
+      const y1 = latRow(pts[i + 1][1], h);
+      const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0)) + 1;
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        carveDisk(mask, w, h, Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t), canal.r);
+      }
+    }
+  }
+}
+
 // Биомные зоны — эллипсы с плавным затуханием влияния к краям:
 // [центр lon, центр lat, радиус lon, радиус lat, сила]
 type Zone = [number, number, number, number, number];
@@ -221,6 +305,9 @@ export function earthTerrain(): Uint8Array {
       for (const cc of comp) mask[cc] = 0;
     }
   }
+
+  // прорезаем реальные каналы/проливы (Суэц, Панама, Гибралтар, Босфор, Баб-эль-Мандеб)
+  carveCanals(mask, w, h);
 
   // классификация местности: плавные поля влияния + шум, без резких границ
   const out = new Uint8Array(w * h);
