@@ -4,8 +4,11 @@ import {
   BoatPub,
   BuildingPub,
   BuildingType,
+  TradeShipPub,
+  TradeEarn,
   HQ_RADIUS,
   HQ_EXPLODE_RADIUS,
+  PORT_RADIUS,
 } from '../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../shared/color';
 import { rleDecode } from '../shared/rle';
@@ -29,6 +32,12 @@ const TERRAIN: Record<number, [number, number, number]> = {
 
 function fmtTroops(n: number): string {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+}
+
+function fmtMoney(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'k';
+  return String(Math.round(n));
 }
 
 export class GameClient {
@@ -70,6 +79,10 @@ export class GameClient {
 
   private attacks: AttackPub[] = [];
   private boats: BoatPub[] = [];
+  private ships: TradeShipPub[] = []; // трейд-корабли (кружки без следа)
+  private moneyPops: { x: number; y: number; amount: number; t0: number }[] = []; // всплывашки заработка
+  allies = new Set<number>(); // мои союзники
+  enemies = new Set<number>(); // мои враги (нельзя торговать)
   private warSet = new Set<number>(); // с кем воюем: атакуем мы или атакуют нас
   private warLabels: { x: number; y: number; lines: string[] }[] = [];
   // сглаженные цвета нейтральной земли (переходы биомов), статичны за раунд
@@ -120,6 +133,8 @@ export class GameClient {
     this.warLabels = [];
     this.buildings = [];
     this.buildingsSig = '';
+    this.moneyPops = [];
+    this.ships = [];
     this.fortField = new Int16Array(this.cells);
     this.buildNeutralColors();
     this.repaintAll();
@@ -208,6 +223,32 @@ export class GameClient {
     }
   }
 
+  setShips(ships: TradeShipPub[]) {
+    this.ships = ships ?? [];
+  }
+
+  // заработок портов — показываем только свои (КПД игрока)
+  addEarnings(list: TradeEarn[]) {
+    if (!list?.length) return;
+    const now = performance.now();
+    for (const e of list) {
+      if (e.owner !== this.selfId) continue;
+      this.moneyPops.push({ x: e.x, y: e.y, amount: e.amount, t0: now });
+    }
+  }
+
+  setRelations(allies: number[], enemies: number[]) {
+    this.allies = new Set(allies);
+    this.enemies = new Set(enemies);
+  }
+
+  relationOf(id: number): 'self' | 'allied' | 'hostile' | 'neutral' {
+    if (id === this.selfId) return 'self';
+    if (this.allies.has(id)) return 'allied';
+    if (this.enemies.has(id)) return 'hostile';
+    return 'neutral';
+  }
+
   setBoats(boats: BoatPub[]) {
     this.boats = boats;
     // чистим кэш у исчезнувших лодок
@@ -277,7 +318,7 @@ export class GameClient {
     const R = HQ_RADIUS;
     const R2 = R * R;
     for (const b of this.buildings) {
-      if (b.progress < 1) continue; // ещё строится — не укрепляет
+      if (b.progress < 1 || b.type === 'port') continue; // строится/порт — не укрепляет
       const cx = b.cell % this.w;
       const cy = (b.cell / this.w) | 0;
       for (let dy = -R; dy <= R; dy++) {
@@ -307,6 +348,63 @@ export class GameClient {
     if (cell >= this.w && this.owners[cell - this.w] !== this.selfId) return false;
     if (cell < this.cells - this.w && this.owners[cell + this.w] !== this.selfId) return false;
     return !this.buildings.some((b) => b.cell === cell);
+  }
+
+  // Порт: своя прибрежная клетка (рядом вода), без вражеских соседей, без здания
+  canBuildPortAt(cell: number): boolean {
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
+    if (this.owners[cell] !== this.selfId) return false;
+    const x = cell % this.w;
+    const y = (cell / this.w) | 0;
+    let coastal = false;
+    let enemyAdj = false;
+    const chk = (n: number) => {
+      if (!this.terrain[n]) coastal = true;
+      else if (this.owners[n] !== this.selfId) enemyAdj = true;
+    };
+    if (x > 0) chk(cell - 1);
+    if (x < this.w - 1) chk(cell + 1);
+    if (y > 0) chk(cell - this.w);
+    if (y < this.h - 1) chk(cell + this.w);
+    if (!coastal || enemyAdj) return false;
+    return !this.buildings.some((b) => b.cell === cell);
+  }
+
+  // ближайшая своя прибрежная клетка под порт в радиусе maxR (притягивание)
+  nearestOwnCoast(cell: number, maxR: number): number {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const maxR2 = maxR * maxR;
+    let best = -1;
+    let bestD = Infinity;
+    for (let dy = -maxR; dy <= maxR; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= this.h) continue;
+      for (let dx = -maxR; dx <= maxR; dx++) {
+        const d = dx * dx + dy * dy;
+        if (d > maxR2 || d >= bestD) continue;
+        const x = cx + dx;
+        if (x < 0 || x >= this.w) continue;
+        const c = y * this.w + x;
+        if (!this.canBuildPortAt(c)) continue;
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  // свой порт в радиусе PORT_RADIUS от клетки (клик туда апгрейдит его)
+  nearbyPort(cell: number): BuildingPub | undefined {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const r2 = PORT_RADIUS * PORT_RADIUS;
+    return this.buildings.find(
+      (b) =>
+        b.type === 'port' &&
+        b.owner === this.selfId &&
+        ((b.cell % this.w) - cx) ** 2 + (((b.cell / this.w) | 0) - cy) ** 2 <= r2
+    );
   }
 
   // Центрируем камеру на клетке (фокус на агрессоре), с приближением
@@ -492,15 +590,27 @@ export class GameClient {
     this.panY = (window.innerHeight - this.h * z) / 2;
   }
 
-  // Не даём укатить карту за край экрана
+  // Ограничение панорамы. Разрешаем «перелёт» за края карты на margin пикселей,
+  // чтобы можно было вытащить края/углы из-под HUD и спокойно их рассмотреть.
   private clampPan() {
     if (!this.w) return;
     const w = window.innerWidth;
     const h = window.innerHeight;
     const mw = this.w * this.zoom;
     const mh = this.h * this.zoom;
-    this.panX = mw <= w ? (w - mw) / 2 : Math.min(0, Math.max(w - mw, this.panX));
-    this.panY = mh <= h ? (h - mh) / 2 : Math.min(0, Math.max(h - mh, this.panY));
+    const margin = Math.min(w, h) * 0.5;
+    if (mw <= w) {
+      const c = (w - mw) / 2; // карта уже вся видна — но даём чуть подвигать
+      this.panX = Math.min(c + margin, Math.max(c - margin, this.panX));
+    } else {
+      this.panX = Math.min(margin, Math.max(w - mw - margin, this.panX));
+    }
+    if (mh <= h) {
+      const c = (h - mh) / 2;
+      this.panY = Math.min(c + margin, Math.max(c - margin, this.panY));
+    } else {
+      this.panY = Math.min(margin, Math.max(h - mh - margin, this.panY));
+    }
   }
 
   // Имена игроков поверх их территорий (в экранных координатах)
@@ -541,6 +651,19 @@ export class GameClient {
         ctx.font = `600 ${size * 0.72}px 'IBM Plex Mono', monospace`;
         ctx.strokeText(troops, sx, ty);
         ctx.fillText(troops, sx, ty);
+      }
+    }
+    // союзники: зелёное рукопожатие в центре территории
+    if (this.allies.size) {
+      for (const id of this.allies) {
+        const l = this.labels.get(id);
+        if (!l) continue;
+        const sx = this.panX + l.x * this.zoom;
+        const sy = this.panY + l.y * this.zoom;
+        if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue;
+        const size = Math.min(28, Math.max(14, this.zoom * 3));
+        ctx.font = `${size}px sans-serif`;
+        ctx.fillText('🤝', sx, sy - size * 1.4);
       }
     }
     // морские десанты: волнистый маршрут статичен (зависит только от дистанции)
@@ -619,6 +742,27 @@ export class GameClient {
     }
   }
 
+  // Трейд-корабли: кружки без следа (для производительности)
+  private drawShips(ctx: CanvasRenderingContext2D, dpr: number) {
+    if (!this.ships.length) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const rad = Math.max(2.5, Math.min(6, this.zoom * 0.9));
+    ctx.lineWidth = 1.5;
+    for (const s of this.ships) {
+      const sx = this.panX + s.x * this.zoom;
+      const sy = this.panY + s.y * this.zoom;
+      if (sx < -20 || sy < -20 || sx > vw + 20 || sy > vh + 20) continue;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+      ctx.fillStyle = playerColorCSS(s.owner);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.stroke();
+    }
+  }
+
   // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
   private drawBuildings(ctx: CanvasRenderingContext2D, dpr: number) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -632,6 +776,45 @@ export class GameClient {
       const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
       if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue; // вне экрана
+      if (b.type === 'port') {
+        const buildingP = b.progress < 1;
+        ctx.globalAlpha = buildingP ? 0.55 : 1;
+        ctx.fillStyle = '#0b2a2e';
+        ctx.strokeStyle = '#37c7d4'; // бирюзовый — порт
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = `${r * 1.1}px sans-serif`;
+        ctx.fillText('⚓', sx, sy + 1);
+        // номер уровня справа-сверху
+        if (b.level > 1 && !buildingP) {
+          const fs = Math.max(10, r * 0.9);
+          ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+          ctx.lineWidth = Math.max(2, fs / 5);
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+          ctx.fillStyle = '#8fe9f2';
+          ctx.strokeText(String(b.level), sx + r, sy - r);
+          ctx.fillText(String(b.level), sx + r, sy - r);
+        }
+        ctx.globalAlpha = 1;
+        // прогресс постройки над портом (апгрейд мгновенный — бар не нужен)
+        if (buildingP) {
+          const bw = r * 2.4;
+          const bh = Math.max(3, r * 0.35);
+          const bx = sx - bw / 2;
+          const by = sy - r - bh - 3;
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = '#37c7d4';
+          ctx.fillRect(bx, by, bw * b.progress, bh);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        continue;
+      }
       const building = b.progress < 1;
       const upgrading = b.upProgress > 0 && b.upProgress < 1;
       ctx.globalAlpha = building ? 0.55 : 1; // строящийся — приглушён
@@ -702,8 +885,62 @@ export class GameClient {
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
-    // предпросмотр под курсором
-    if (this.buildMode && this.hoverCell >= 0) {
+    // всплывающий заработок портов: зелёное «+сумма» поднимается и тает (~1.4с)
+    const POP_MS = 1400;
+    this.moneyPops = this.moneyPops.filter((m) => now - m.t0 < POP_MS);
+    ctx.textAlign = 'center';
+    for (const m of this.moneyPops) {
+      const p = (now - m.t0) / POP_MS;
+      const sx = this.panX + m.x * this.zoom;
+      const sy = this.panY + m.y * this.zoom - r - 6 - p * 26;
+      if (sx < -60 || sy < -20 || sx > vw + 60 || sy > vh + 20) continue;
+      const fs = Math.max(12, Math.min(20, this.zoom * 2.4));
+      ctx.globalAlpha = 1 - p * p; // держится, потом быстро гаснет
+      ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+      ctx.lineWidth = Math.max(2.5, fs / 5);
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.fillStyle = '#57e08a';
+      const txt = '+' + fmtMoney(m.amount);
+      ctx.strokeText(txt, sx, sy);
+      ctx.fillText(txt, sx, sy);
+      ctx.globalAlpha = 1;
+    }
+    // предпросмотр порта под курсором (притягивается к берегу)
+    if (this.buildMode === 'port' && this.hoverCell >= 0) {
+      const near = this.nearbyPort(this.hoverCell);
+      // куда реально встанет порт: апгрейд существующего, либо ближайший берег
+      const target = near
+        ? near.cell
+        : this.canBuildPortAt(this.hoverCell)
+          ? this.hoverCell
+          : this.nearestOwnCoast(this.hoverCell, PORT_RADIUS);
+      const cellFor = target >= 0 ? target : this.hoverCell;
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
+      const ok = target >= 0;
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = ok ? 'rgba(55,199,212,0.35)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#37c7d4' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `${r * 1.1}px sans-serif`;
+      ctx.fillText('⚓', sx, sy + 1);
+      // при апгрейде — показываем будущий уровень
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#8fe9f2';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
+      ctx.globalAlpha = 1;
+    } else if (this.buildMode && this.hoverCell >= 0) {
+      // предпросмотр штаба
       const ok = this.canBuildAt(this.hoverCell);
       const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
@@ -841,6 +1078,7 @@ export class GameClient {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(this.off, 0, 0);
         this.drawNames(ctx, dpr);
+        this.drawShips(ctx, dpr);
         this.drawBuildings(ctx, dpr);
         this.drawMinimap();
       }

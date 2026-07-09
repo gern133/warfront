@@ -12,6 +12,9 @@ import {
   hqCost,
   hqUpgradeCost,
   MAX_HQ_LEVEL,
+  portUpgradeCost,
+  shipsForLevel,
+  PORT_BUILD_COST,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
@@ -52,7 +55,7 @@ function fmtK(n: number): string {
 const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
   { icon: '🏢', bt: null, name: 'Город' },
   { icon: '🏭', bt: null, name: 'Завод' },
-  { icon: '⚓', bt: null, name: 'Порт' },
+  { icon: '⚓', bt: 'port', name: 'Торговый порт' },
   { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
   { icon: '🎯', bt: null, name: 'Ракета' },
   { icon: '📡', bt: null, name: 'Радар' },
@@ -80,7 +83,7 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const [humans, setHumans] = useState(1);
   const [spawnLeft, setSpawnLeft] = useState<number | null>(null);
-  const [winner, setWinner] = useState<string | null>(null);
+  const [winner, setWinner] = useState<{ name: string; you: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [ratio, setRatio] = useState(30);
@@ -89,6 +92,9 @@ export default function App() {
   const [upgradeMenu, setUpgradeMenu] = useState<
     { cell: number; x: number; y: number; level: number } | null
   >(null);
+  // входящие предложения союза (очередь)
+  const [proposals, setProposals] = useState<{ from: number; name: string }[]>([]);
+  const [relVer, setRelVer] = useState(0); // счётчик смены отношений (для перерисовки меню)
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -102,6 +108,7 @@ export default function App() {
   const buildModeRef = useRef<BuildingType | null>(null);
   buildModeRef.current = buildMode;
   const canBuildHqRef = useRef(false);
+  const canBuildPortRef = useRef(false);
   const needFocus = useRef(false); // отложенный автозум к спавну
   const speedRef = useRef(1);
   speedRef.current = speed;
@@ -174,6 +181,7 @@ export default function App() {
         setPlayers(msg.players);
         setRoomCode(msg.code);
         setSpawnLeft(msg.spawnSeconds ?? null);
+        setWinner(null); // новый раунд (в т.ч. после реванша) — закрываем модалку
         if (msg.selfId > 0) setPhase('spawn');
       } else if (msg.type === 'update') {
         // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
@@ -186,6 +194,8 @@ export default function App() {
         gc.setAttacks(upAttacks);
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
+        gc.setShips(msg.ships ?? []);
+        gc.addEarnings(msg.earnings ?? []);
         setAttacks(upAttacks);
         setBoats(upBoats);
         setBuildings(upBuildings);
@@ -208,6 +218,12 @@ export default function App() {
             }
           }
         }
+      } else if (msg.type === 'relations') {
+        gc.setRelations(msg.allies ?? [], msg.enemies ?? []);
+        setRelVer((v) => v + 1);
+      } else if (msg.type === 'proposal') {
+        // входящее предложение союза — показываем, избегая дублей
+        setProposals((q) => (q.some((p) => p.from === msg.from) ? q : [...q, { from: msg.from, name: msg.name }]));
       } else if (msg.type === 'resync') {
         gc.resync(msg.ownersRle); // полный снимок владельцев после лага
       } else if (msg.type === 'spawned') {
@@ -220,8 +236,7 @@ export default function App() {
         troopHistory.current = [];
         setPhase('dead');
       } else if (msg.type === 'winner') {
-        setWinner(msg.name);
-        setTimeout(() => setWinner(null), 7500);
+        setWinner({ name: msg.name, you: msg.id === gc.selfId });
       } else if (msg.type === 'error') {
         setError(msg.message);
         setTimeout(() => setError(null), 4000);
@@ -305,12 +320,14 @@ export default function App() {
         else leaveToMenu();
         return;
       }
-      // хоткеи панели зданий 1–0 (в игре): активен только щит (слот 4)
+      // хоткеи панели зданий 1–0 (в игре): активны штаб (4) и порт (3)
       if (phaseRef.current === 'playing' && /^[0-9]$/.test(e.key)) {
         const idx = e.key === '0' ? 9 : +e.key - 1;
-        if (TOOLS[idx]?.bt === 'hq' && canBuildHqRef.current) {
-          setBuildMode((bm) => (bm === 'hq' ? null : 'hq'));
-        }
+        const bt = TOOLS[idx]?.bt;
+        // не хватает денег — префаб выбрать нельзя
+        if (bt === 'hq' && !canBuildHqRef.current) return;
+        if (bt === 'port' && !canBuildPortRef.current) return;
+        if (bt) setBuildMode((bm) => (bm === bt ? null : bt));
       }
     };
     window.addEventListener('keydown', onKey);
@@ -346,11 +363,17 @@ export default function App() {
   const inGame = phase === 'spawn' || phase === 'playing' || phase === 'dead';
   // экономика: мои штабы, цена следующего, сколько войск уйдёт в атаку
   const myHqs = buildings.filter((b) => b.owner === gc.selfId && b.type === 'hq').length;
+  const myPorts = buildings.filter((b) => b.owner === gc.selfId && b.type === 'port').length;
   const nextHqCost = hqCost(myHqs);
   // превью выделенных на атаку — от ЖИВОГО числа войск (обновляется каждый тик),
   // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
   const attackTroops = Math.floor(((self?.troops ?? shownTroops) * ratio) / 100);
   canBuildHqRef.current = shownMoney >= nextHqCost;
+  // порт можно выбрать (клавиша 3), если хватает на новый ИЛИ на апгрейд своего
+  const cheapestPortUpg = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'port')
+    .reduce((min, b) => Math.min(min, portUpgradeCost(b.level + 1)), Infinity);
+  canBuildPortRef.current = shownMoney >= Math.min(PORT_BUILD_COST, cheapestPortUpg);
 
   return (
     <div className="app">
@@ -465,9 +488,14 @@ export default function App() {
               ))}
             </div>
           )}
-          {buildMode && (
+          {buildMode === 'hq' && (
             <div className="build-hint">
               Кликните по своей внутренней клетке — поставить штаб (Esc — отмена)
+            </div>
+          )}
+          {buildMode === 'port' && (
+            <div className="build-hint">
+              Кликните по своему берегу — порт; рядом с портом — апгрейд (Esc — отмена)
             </div>
           )}
           <div className="panel hud">
@@ -507,8 +535,11 @@ export default function App() {
 
             <div className="toolbar">
               {TOOLS.map((t, i) => {
-                const active = t.bt === 'hq';
-                const afford = shownMoney >= nextHqCost;
+                const active = t.bt === 'hq' || t.bt === 'port';
+                const cost = t.bt === 'port' ? PORT_BUILD_COST : nextHqCost;
+                const count = t.bt === 'port' ? myPorts : t.bt === 'hq' ? myHqs : 0;
+                // порт доступен, если хватает на новый ИЛИ на апгрейд своего
+                const afford = t.bt === 'port' ? canBuildPortRef.current : shownMoney >= cost;
                 const usable = active && afford;
                 const selected = buildMode === t.bt && active;
                 return (
@@ -520,15 +551,15 @@ export default function App() {
                     disabled={!usable}
                     title={
                       active
-                        ? `${t.name} · ${fmtK(nextHqCost)}${afford ? '' : ' — не хватает денег'}`
+                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : ' — не хватает денег'}`
                         : `${t.name} — скоро`
                     }
-                    onClick={() => usable && setBuildMode(selected ? null : 'hq')}
+                    onClick={() => usable && t.bt && setBuildMode(selected ? null : t.bt)}
                   >
                     <span className="tool-key">{(i + 1) % 10}</span>
                     <span className="tool-icon">{t.icon}</span>
-                    <span className="tool-count">{active ? myHqs : 0}</span>
-                    {active && <span className="tool-cost">{fmtK(nextHqCost)}</span>}
+                    <span className="tool-count">{count}</span>
+                    {active && <span className="tool-cost">{fmtK(cost)}</span>}
                   </button>
                 );
               })}
@@ -707,20 +738,87 @@ export default function App() {
                 ? 'нейтральный берег'
                 : nameOf(gc.owners[invadeMenu.cell])}
             </div>
-            <button
-              className="ctx-btn"
-              onClick={() => {
-                sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
-                setInvadeMenu(null);
-              }}
-            >
-              🚢 Морское вторжение · {ratio}%
-            </button>
+            {(() => {
+              void relVer; // перерисовка при смене отношений
+              const owner = gc.owners[invadeMenu.cell];
+              const rel = owner > 0 ? gc.relationOf(owner) : 'neutral';
+              return (
+                <>
+                  {rel === 'allied' ? (
+                    <div className="ctx-note">🤝 Союзник — атаковать нельзя</div>
+                  ) : (
+                    <button
+                      className="ctx-btn"
+                      onClick={() => {
+                        sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
+                        setInvadeMenu(null);
+                      }}
+                    >
+                      🚢 Морское вторжение · {ratio}%
+                    </button>
+                  )}
+                  {owner > 0 && rel === 'allied' && (
+                    <button
+                      className="ctx-btn"
+                      onClick={() => {
+                        sendMsg({ type: 'breakAlliance', cell: invadeMenu.cell });
+                        setInvadeMenu(null);
+                      }}
+                    >
+                      💔 Расторгнуть союз
+                    </button>
+                  )}
+                  {owner > 0 && rel !== 'allied' && (
+                    <button
+                      className="ctx-btn"
+                      onClick={() => {
+                        sendMsg({ type: 'propose', cell: invadeMenu.cell });
+                        setInvadeMenu(null);
+                      }}
+                    >
+                      🤝 Предложить союз
+                    </button>
+                  )}
+                </>
+              );
+            })()}
             <button className="ctx-cancel" onClick={() => setInvadeMenu(null)}>
               Отмена
             </button>
           </div>
         </>
+      )}
+
+      {proposals.length > 0 && phase === 'playing' && (
+        <div className="proposals">
+          {proposals.map((p) => (
+            <div className="proposal-card" key={p.from}>
+              <div className="proposal-text">
+                🤝 <b>{p.name}</b> предлагает союз
+              </div>
+              <div className="proposal-actions">
+                <button
+                  className="ctx-btn"
+                  onClick={() => {
+                    sendMsg({ type: 'allianceResponse', from: p.from, accept: true });
+                    setProposals((q) => q.filter((x) => x.from !== p.from));
+                  }}
+                >
+                  Принять
+                </button>
+                <button
+                  className="ctx-cancel"
+                  onClick={() => {
+                    sendMsg({ type: 'allianceResponse', from: p.from, accept: false });
+                    setProposals((q) => q.filter((x) => x.from !== p.from));
+                  }}
+                >
+                  Отклонить
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
       {upgradeMenu && (
@@ -736,6 +834,28 @@ export default function App() {
             {(() => {
               const b = gc.buildingAt(upgradeMenu.cell);
               const lvl = b?.level ?? upgradeMenu.level;
+              if (b?.type === 'port') {
+                const toLevel = lvl + 1;
+                const cost = portUpgradeCost(toLevel);
+                return (
+                  <>
+                    <div className="ctx-title">⚓ Торговый порт · ур. {lvl}</div>
+                    <div className="ctx-note">
+                      Кораблей: {shipsForLevel(lvl)} · дальше — дороже доставка
+                    </div>
+                    <button
+                      className="ctx-btn"
+                      disabled={shownMoney < cost}
+                      onClick={() => {
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        setUpgradeMenu(null);
+                      }}
+                    >
+                      ⚡ До {toLevel} ур. · {fmtK(cost)}
+                    </button>
+                  </>
+                );
+              }
               const upgrading = (b?.upProgress ?? 0) > 0;
               const toLevel = lvl + 1;
               const cost = hqUpgradeCost(toLevel);
@@ -768,7 +888,32 @@ export default function App() {
         </>
       )}
 
-      {winner && <div className="winner">🏆 {winner} — контроль над миром. Новый раунд через 8 с</div>}
+      {winner && (
+        <div className="overlay">
+          <div className="menu">
+            <h1 className="title">{winner.you ? 'Победа!' : 'Раунд окончен'}</h1>
+            <div className="frontline" aria-hidden="true" />
+            <p className="dead-msg">
+              {winner.you ? (
+                <>Вы захватили мир 🏆</>
+              ) : (
+                <>
+                  🏆 <b>{winner.name}</b> захватил контроль над миром
+                </>
+              )}
+            </p>
+            <button className="primary" onClick={() => sendMsg({ type: 'rematch' })}>
+              Реванш — новая карта
+            </button>
+            <button className="secondary" onClick={() => setWinner(null)}>
+              Продолжить играть
+            </button>
+            <button className="link" onClick={leaveToMenu}>
+              В меню
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

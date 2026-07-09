@@ -20,8 +20,8 @@ export interface PlayerPub {
 
 export const START_MONEY = 40000;
 
-// Здания. Пока только штаб обороны; список расширяемый.
-export type BuildingType = 'hq';
+// Здания: штаб обороны и торговый порт.
+export type BuildingType = 'hq' | 'port';
 
 export interface BuildingPub {
   id: number;
@@ -29,10 +29,48 @@ export interface BuildingPub {
   cell: number;
   type: BuildingType;
   progress: number; // 0..1 — прогресс постройки (1 = достроено)
-  level: number; // 1 обычный, 2 взрыв по области, 3 усиленный взрыв
+  level: number; // hq: 1..3; port: любой (влияет на кол-во кораблей и цену)
   fuse: number; // секунд до взрыва после захвата (0 = не тикает)
   upProgress: number; // 0..1 — прогресс апгрейда (0 = не улучшается)
 }
+
+// Торговый порт
+export const PORT_BUILD_COST = 50000;
+export const PORT_BUILD_TICKS = 50; // 5с
+export const PORT_SHIP_INTERVAL = 70; // корабль раз в 7с (на 1 ур. — 1 корабль)
+export const PORT_MAX_SHIP_LEVEL = 30; // после 30 ур. число кораблей не растёт
+export const TRADE_BASE_VALUE = 20000; // деньги за заход в порт (1 ур.)
+export const PORT_RADIUS = 10; // клик в этом радиусе от порта — апгрейд, а не новый
+
+export function portUpgradeCost(toLevel: number): number {
+  return 30000 * (toLevel - 1); // до 2 ур. — 30к, до 3 — 60к, ...
+}
+export function tradeValue(level: number): number {
+  // +3% за уровень (и до 30, и после — так растёт «прайс доставки»)
+  return TRADE_BASE_VALUE * Math.pow(1.03, level - 1);
+}
+export function shipsForLevel(level: number): number {
+  return Math.min(level, PORT_MAX_SHIP_LEVEL);
+}
+
+// Трейд-корабль (без следа — только кружок, для производительности)
+export interface TradeShipPub {
+  id: number;
+  owner: number;
+  x: number;
+  y: number;
+}
+
+// Всплывающий заработок (для показа КПД игроку) — в точке, где корабль заработал
+export interface TradeEarn {
+  x: number; // позиция корабля в момент выплаты (чужой порт / свой при возврате)
+  y: number;
+  amount: number; // сколько денег принёс заход
+  owner: number; // владелец корабля (клиент показывает только свои)
+}
+
+// Отношения игрока (относительно себя): союзники и враги; остальные нейтральны
+export type RelationState = 'neutral' | 'hostile' | 'allied';
 
 // Время постройки штаба обороны (тики; 50 = 5 секунд при 100мс)
 export const HQ_BUILD_TICKS = 50;
@@ -84,13 +122,17 @@ export type ClientMsg =
   | { type: 'start' } // хост запускает игру в лобби
   | { type: 'spawn'; cell: number } // выбор точки старта
   | { type: 'respawn' } // реванш после смерти в той же комнате
+  | { type: 'rematch' } // новый раунд после победы (свежая карта)
   | { type: 'leave' } // выход из комнаты в меню
   | { type: 'attack'; cell: number; ratio: number } // сухопутная атака (ЛКМ)
   | { type: 'invade'; cell: number; ratio: number } // морское вторжение (ПКМ)
   | { type: 'recall'; boatId: number } // отозвать десант
   | { type: 'build'; bt: BuildingType; cell: number } // построить здание
   | { type: 'upgrade'; cell: number } // прокачать здание
-  | { type: 'setSpeed'; speed: number }; // скорость игры (0 пауза,1,2,3,10)
+  | { type: 'setSpeed'; speed: number } // скорость игры (0 пауза,1,2,3,10)
+  | { type: 'propose'; cell: number } // предложить союз владельцу клетки
+  | { type: 'allianceResponse'; from: number; accept: boolean } // ответ на предложение
+  | { type: 'breakAlliance'; cell: number }; // расторгнуть союз с владельцем клетки
 
 export type ServerMsg =
   | {
@@ -119,12 +161,16 @@ export type ServerMsg =
       attacks: AttackPub[];
       boats: BoatPub[];
       buildings: BuildingPub[];
+      ships: TradeShipPub[]; // трейд-корабли (кружки без следа)
+      earnings: TradeEarn[]; // заработок портов за интервал (для всплывашек)
       speed: number; // текущая скорость игры
       humans: number; // сколько реальных игроков в комнате
     }
   | { type: 'resync'; ownersRle: number[] } // полный снимок владельцев (после лага)
+  | { type: 'relations'; allies: number[]; enemies: number[] } // отношения игрока
+  | { type: 'proposal'; from: number; name: string } // входящее предложение союза
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла
   | { type: 'dead' }
-  | { type: 'winner'; name: string }
+  | { type: 'winner'; name: string; id: number }
   | { type: 'error'; message: string };

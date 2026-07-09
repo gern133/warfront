@@ -70,6 +70,7 @@ interface Room {
   isPublic: boolean;
   speed: number; // скорость игры: 0 пауза, 1, 2, 3, 10
   resetTimer: ReturnType<typeof setTimeout> | null;
+  winnerSent: number | null; // id уже объявленного победителя (чтобы не слать повторно)
 }
 
 interface CState {
@@ -77,6 +78,7 @@ interface CState {
   name: string;
   room: Room | null;
   needResync: boolean; // клиент отставал (буфер забит) — при восстановлении ресинк
+  proposals: Set<number>; // id игроков, приславших этому клиенту предложение союза
 }
 
 const rooms = new Map<string, Room>();
@@ -104,6 +106,7 @@ function makeRoom(code: string, difficulty: Difficulty, map: MapType, isPublic: 
     isPublic,
     speed: 1,
     resetTimer: null,
+    winnerSent: null,
   };
   rooms.set(code, room);
   return room;
@@ -193,6 +196,7 @@ function beginRound(room: Room) {
 }
 
 function resetRoom(room: Room) {
+  room.winnerSent = null;
   room.game.reset();
   if (room.isPublic) {
     room.game.addBots(room.difficulty);
@@ -212,7 +216,7 @@ function roomFull(room: Room): boolean {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws) => {
-  const st: CState = { playerId: null, name: '', room: null, needResync: false };
+  const st: CState = { playerId: null, name: '', room: null, needResync: false, proposals: new Set() };
   clients.set(ws, st);
 
   ws.on('message', (raw) => {
@@ -300,6 +304,13 @@ wss.on('connection', (ws) => {
         enterGame(ws, st, room);
         break;
       }
+      case 'rematch': {
+        // новый раунд после победы: свежая карта + боты, все заново выбирают спавн
+        const room = st.room;
+        if (!room || room.winnerSent === null) return;
+        resetRoom(room);
+        break;
+      }
       case 'attack': {
         const room = st.room;
         if (!room || room.phase !== 'running' || st.playerId === null) return;
@@ -331,6 +342,35 @@ wss.on('connection', (ws) => {
         if (!room || room.phase !== 'running' || st.playerId === null) return;
         const err = room.game.upgrade(st.playerId, msg.cell | 0);
         if (err) send(ws, { type: 'error', message: err });
+        break;
+      }
+      case 'propose': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const res = room.game.proposeAlliance(st.playerId, msg.cell | 0);
+        if (!res || res.auto) break; // бот принял сразу — relations придут тиком
+        // человеку — уведомление с возможностью принять/отклонить
+        for (const cws of room.clients) {
+          const cst = clients.get(cws);
+          if (cst?.playerId !== res.toId) continue;
+          cst.proposals.add(st.playerId);
+          send(cws, { type: 'proposal', from: st.playerId, name: st.name });
+          break;
+        }
+        break;
+      }
+      case 'allianceResponse': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const from = msg.from | 0;
+        if (!st.proposals.delete(from)) return; // не было такого предложения
+        if (msg.accept) room.game.acceptAlliance(st.playerId, from);
+        break;
+      }
+      case 'breakAlliance': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        room.game.breakAlliance(st.playerId, msg.cell | 0);
         break;
       }
       case 'setSpeed': {
@@ -423,9 +463,12 @@ setInterval(() => {
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),
+      ships: game.tradeShipsPub(),
+      earnings: game.tradeEarnings,
       speed: room.speed,
       humans: room.clients.size,
     } satisfies ServerMsg);
+    game.tradeEarnings = []; // события уже сериализованы в update — сбрасываем
     for (const ws of room.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       const cst = clients.get(ws);
@@ -444,13 +487,24 @@ setInterval(() => {
       ws.send(update);
     }
 
-    if (game.winnerId !== null && !room.resetTimer) {
+    // отношения изменились — шлём затронутым игрокам их персональные списки
+    if (game.relChanged.size) {
+      for (const ws of room.clients) {
+        const cst = clients.get(ws);
+        if (!cst || cst.playerId === null || !game.relChanged.has(cst.playerId)) continue;
+        const rel = game.relationsFor(cst.playerId);
+        send(ws, { type: 'relations', allies: rel.allies, enemies: rel.enemies });
+      }
+      game.relChanged.clear();
+    }
+
+    // объявляем победителя один раз; карту НЕ сбрасываем — ждём выбора игрока
+    // (Реванш или Продолжить играть) в модалке на клиенте
+    if (game.winnerId !== null && room.winnerSent !== game.winnerId) {
+      room.winnerSent = game.winnerId;
       const w = game.players.get(game.winnerId);
-      for (const ws of room.clients) send(ws, { type: 'winner', name: w?.name ?? '?' });
-      room.resetTimer = setTimeout(() => {
-        resetRoom(room);
-        room.resetTimer = null;
-      }, 8000);
+      for (const ws of room.clients)
+        send(ws, { type: 'winner', name: w?.name ?? '?', id: game.winnerId });
     }
   }
 }, TICK_MS);

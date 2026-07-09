@@ -15,6 +15,15 @@ import {
   MAX_HQ_LEVEL,
   hqUpgradeCost,
   hqUpgradeTicks,
+  TradeShipPub,
+  TradeEarn,
+  PORT_BUILD_COST,
+  PORT_BUILD_TICKS,
+  PORT_SHIP_INTERVAL,
+  PORT_RADIUS,
+  portUpgradeCost,
+  tradeValue,
+  shipsForLevel,
 } from '../shared/protocol';
 import { earthTerrain, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
@@ -46,7 +55,26 @@ interface Building {
   fuseTick: number; // тик взрыва после захвата (0 = не тикает)
   upStart: number; // тик начала апгрейда (0 = не улучшается)
   upEnd: number; // тик завершения апгрейда
+  nextShipTick: number; // порт: когда выпускать следующий корабль
+  ships: number; // порт: кораблей в полёте
 }
+
+interface TradeShip {
+  id: number;
+  owner: number;
+  portCell: number; // домашний порт (для учёта кораблей)
+  path: number[]; // маршрут по воде
+  cum: number[];
+  totalLen: number;
+  traveled: number;
+  returning: boolean; // возвращается домой
+  payout: number; // деньги за заход (с учётом уровня и дистанции)
+  done: boolean; // рейс завершён — на удаление
+  x: number;
+  y: number;
+}
+
+const TRADE_SPEED = 0.6; // клеток за тик
 
 interface Attack {
   player: number;
@@ -172,6 +200,16 @@ export class Game {
   boats: Boat[] = [];
   buildings: Building[] = [];
   private nextBuildingId = 1;
+  tradeShips: TradeShip[] = [];
+  private nextShipId = 1;
+  tradeEarnings: TradeEarn[] = []; // заработок портов за интервал (чистится в index)
+  // связи (симметричные): союзники и враги. Храним только пары с участием
+  // человека — бот-vs-бот всегда нейтральны. relChanged — кому переслать обновление.
+  allies = new Map<number, Set<number>>();
+  hostiles = new Map<number, Set<number>>();
+  relChanged = new Set<number>();
+  // кэш морских маршрутов между клетками портов (порты статичны)
+  private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
   // пересобирается только при изменении зданий — в бою это O(1) чтение
   fortField: Int16Array;
@@ -215,6 +253,12 @@ export class Game {
     this.attacks = [];
     this.boats = [];
     this.buildings = [];
+    this.tradeShips = [];
+    this.tradeEarnings = [];
+    this.allies.clear();
+    this.hostiles.clear();
+    this.relChanged.clear();
+    this.routeCache.clear();
     this.fortField.fill(0);
     this.fortLevel.fill(0);
     this.fortDirty = true;
@@ -543,9 +587,25 @@ export class Game {
     this.attacks = this.attacks.filter((a) => a.player !== id);
     this.boats = this.boats.filter((b) => b.player !== id);
     this.buildings = this.buildings.filter((b) => b.owner !== id);
+    this.tradeShips = this.tradeShips.filter((s) => s.owner !== id);
+    this.clearRelations(id);
     this.fortDirty = true;
     this.cellsOf.delete(id);
     this.players.delete(id);
+  }
+
+  // убрать все союзы/вражду игрока и уведомить бывших партнёров
+  private clearRelations(id: number) {
+    for (const other of this.allies.get(id) ?? []) {
+      this.allies.get(other)?.delete(id);
+      this.relChanged.add(other);
+    }
+    for (const other of this.hostiles.get(id) ?? []) {
+      this.hostiles.get(other)?.delete(id);
+      this.relChanged.add(other);
+    }
+    this.allies.delete(id);
+    this.hostiles.delete(id);
   }
 
   private setOwner(c: number, owner: number) {
@@ -578,6 +638,8 @@ export class Game {
     const killer = killerId > 0 ? this.players.get(killerId) : undefined;
     if (killer?.alive) killer.money += p.money;
     p.money = 0;
+    this.tradeShips = this.tradeShips.filter((s) => s.owner !== p.id);
+    this.clearRelations(p.id);
     // здания НЕ сносим тут: их клетки уже захвачены, и checkBuildings корректно
     // взорвёт щит (обычный мгновенно, прокачанный через фитиль)
     this.fortDirty = true;
@@ -588,6 +650,7 @@ export class Game {
     if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return;
     const targetOwner = this.owners[cell];
     if (targetOwner === playerId) return;
+    if (targetOwner > 0 && this.relation(playerId, targetOwner) === 'allied') return;
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return;
     const r = Math.min(1, Math.max(0.05, ratio || 0));
@@ -597,7 +660,9 @@ export class Game {
   // Морское вторжение (ПКМ): десант к берегу цели. true = отправлен
   launchInvasion(playerId: number, cell: number, ratio: number): boolean {
     if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
-    if (this.owners[cell] === playerId) return false;
+    const to = this.owners[cell];
+    if (to === playerId) return false;
+    if (to > 0 && this.relation(playerId, to) === 'allied') return false;
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return false;
     const r = Math.min(1, Math.max(0.05, ratio || 0));
@@ -789,10 +854,89 @@ export class Game {
     return n;
   }
 
+  // Порт можно ставить на своей прибрежной клетке (рядом вода), без вражеских
+  // соседей по суше и без здания в клетке
+  private canBuildPort(playerId: number, cell: number): boolean {
+    if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
+    if (this.owners[cell] !== playerId) return false;
+    let coastal = false;
+    let enemyAdj = false;
+    this.forNeighbors(cell, (n) => {
+      if (!this.terrain[n]) coastal = true;
+      else if (this.owners[n] !== playerId) enemyAdj = true;
+    });
+    if (!coastal || enemyAdj) return false;
+    return !this.buildings.some((b) => b.cell === cell);
+  }
+
+  // ближайшая своя прибрежная клетка, куда можно поставить порт, в радиусе maxR
+  // от указанной точки (порт «притягивается» к берегу)
+  private nearestOwnCoast(playerId: number, cell: number, maxR: number): number {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const maxR2 = maxR * maxR;
+    let best = -1;
+    let bestD = Infinity;
+    for (let dy = -maxR; dy <= maxR; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= this.h) continue;
+      for (let dx = -maxR; dx <= maxR; dx++) {
+        const d = dx * dx + dy * dy;
+        if (d > maxR2 || d >= bestD) continue;
+        const x = cx + dx;
+        if (x < 0 || x >= this.w) continue;
+        const c = y * this.w + x;
+        if (!this.canBuildPort(playerId, c)) continue;
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  // ближайший свой порт в радиусе PORT_RADIUS от клетки (для апгрейда вместо новой)
+  private nearbyPort(playerId: number, cell: number): Building | undefined {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const r2 = PORT_RADIUS * PORT_RADIUS;
+    return this.buildings.find(
+      (b) =>
+        b.type === 'port' &&
+        b.owner === playerId &&
+        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+    );
+  }
+
   // Постройка здания. Возвращает код ошибки или null при успехе.
   build(playerId: number, bt: BuildingType, cell: number): string | null {
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return 'Нельзя строить';
+    if (bt === 'port') {
+      // клик рядом с существующим портом — апгрейд, а не новый порт
+      const near = this.nearbyPort(playerId, cell);
+      if (near) return this.upgrade(playerId, near.cell);
+      // притягиваем к ближайшему своему берегу (клик в радиусе PORT_RADIUS от него)
+      const shore = this.canBuildPort(playerId, cell)
+        ? cell
+        : this.nearestOwnCoast(playerId, cell, PORT_RADIUS);
+      if (shore < 0) return 'Рядом нет своего берега';
+      if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
+      p.money -= PORT_BUILD_COST;
+      this.buildings.push({
+        id: this.nextBuildingId++,
+        owner: playerId,
+        cell: shore,
+        type: 'port',
+        readyTick: this.tickNo + PORT_BUILD_TICKS,
+        level: 1,
+        fuseTick: 0,
+        upStart: 0,
+        upEnd: 0,
+        nextShipTick: 0,
+        ships: 0,
+      });
+      return null;
+    }
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
     const cost = hqCost(this.hqCount(playerId));
     if (p.money < cost) return 'Недостаточно денег';
@@ -807,18 +951,27 @@ export class Game {
       fuseTick: 0,
       upStart: 0,
       upEnd: 0,
+      nextShipTick: 0,
+      ships: 0,
     });
     // укрепление появится, когда постройка завершится (см. tick)
     return null;
   }
 
-  // Прокачка штаба (занимает время): 2 ур. — взрыв по области, 3 ур. — усиленный
+  // Прокачка: штаб (до 3 ур.) или порт (бесконечно) — оба с таймером и прогрессом
   upgrade(playerId: number, cell: number): string | null {
     const p = this.players.get(playerId);
     if (!p?.alive) return 'Нельзя';
     const b = this.buildings.find((x) => x.cell === cell && x.owner === playerId);
     if (!b) return 'Здесь нет вашего здания';
     if (this.tickNo < b.readyTick) return 'Ещё строится';
+    if (b.type === 'port') {
+      const cost = portUpgradeCost(b.level + 1);
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      b.level++; // порт апгрейдится мгновенно, уровней сколько угодно
+      return null;
+    }
     if (b.upEnd > 0) return 'Уже улучшается';
     if (b.level >= MAX_HQ_LEVEL) return 'Максимальный уровень';
     const toLevel = b.level + 1;
@@ -830,12 +983,234 @@ export class Game {
     return null;
   }
 
+  // --- Связи (союзы/вражда) ---
+  relation(a: number, b: number): 'neutral' | 'hostile' | 'allied' {
+    if (this.allies.get(a)?.has(b)) return 'allied';
+    if (this.hostiles.get(a)?.has(b)) return 'hostile';
+    return 'neutral';
+  }
+
+  private setRel(map: Map<number, Set<number>>, a: number, b: number, on: boolean) {
+    if (on) {
+      (map.get(a) ?? map.set(a, new Set()).get(a)!).add(b);
+      (map.get(b) ?? map.set(b, new Set()).get(b)!).add(a);
+    } else {
+      map.get(a)?.delete(b);
+      map.get(b)?.delete(a);
+    }
+  }
+
+  // отметить пару враждебной (при атаке); только если задействован человек
+  private markHostile(a: number, b: number) {
+    if (a === b) return;
+    const pa = this.players.get(a);
+    const pb = this.players.get(b);
+    if (!pa || !pb || (pa.bot && pb.bot)) return; // бот-vs-бот игнорируем
+    if (this.relation(a, b) === 'allied') return; // союзников не трогаем
+    if (this.relation(a, b) === 'hostile') return;
+    this.setRel(this.hostiles, a, b, true);
+    this.relChanged.add(a).add(b);
+  }
+
+  // предложить союз владельцу клетки. Боты принимают сразу; людям — уведомление.
+  proposeAlliance(fromId: number, cell: number): { toId: number; auto: boolean } | null {
+    const toId = this.owners[cell];
+    if (toId <= 0 || toId === fromId) return null;
+    const to = this.players.get(toId);
+    if (!to?.alive) return null;
+    if (this.relation(fromId, toId) === 'allied') return null;
+    if (to.bot) {
+      this.acceptAlliance(fromId, toId);
+      return { toId, auto: true };
+    }
+    return { toId, auto: false };
+  }
+
+  acceptAlliance(a: number, b: number) {
+    this.setRel(this.hostiles, a, b, false); // союз снимает вражду
+    this.setRel(this.allies, a, b, true);
+    this.relChanged.add(a).add(b);
+  }
+
+  breakAlliance(a: number, cell: number) {
+    const b = this.owners[cell];
+    if (b <= 0) return;
+    this.setRel(this.allies, a, b, false); // назад в нейтралитет
+    this.relChanged.add(a).add(b);
+  }
+
+  // списки для клиента (относительно игрока)
+  relationsFor(id: number): { allies: number[]; enemies: number[] } {
+    return {
+      allies: [...(this.allies.get(id) ?? [])],
+      enemies: [...(this.hostiles.get(id) ?? [])],
+    };
+  }
+
+  // --- Трейд-корабли ---
+  // Маршрут по воде между двумя портовыми (прибрежными) клетками; кэшируется.
+  private waterRoute(fromCell: number, toCell: number) {
+    const key = fromCell * this.cells + toCell;
+    const cached = this.routeCache.get(key);
+    if (cached !== undefined) return cached;
+    const sx = fromCell % this.w;
+    const sy = (fromCell / this.w) | 0;
+    const lx = toCell % this.w;
+    const ly = (toCell / this.w) | 0;
+    let result: { path: number[]; cum: number[]; totalLen: number } | null = null;
+    const startC = this.nearestWaterCoarse(sx, sy);
+    const goalC = this.nearestWaterCoarse(lx, ly);
+    if (startC >= 0 && goalC >= 0) {
+      const coarse = this.waterPath(startC, goalC);
+      if (coarse) {
+        const raw: number[] = [sx + 0.5, sy + 0.5];
+        for (let i = 0; i < coarse.length; i += 2) {
+          const cc = coarse[i];
+          raw.push((cc % this.cw) * this.ck + this.ck / 2, ((cc / this.cw) | 0) * this.ck + this.ck / 2);
+        }
+        raw.push(lx + 0.5, ly + 0.5);
+        const path = chaikin(chaikin(raw));
+        const cum: number[] = [0];
+        for (let i = 2; i < path.length; i += 2) {
+          cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+        }
+        result = { path, cum, totalLen: cum[cum.length - 1] || 1 };
+      }
+    }
+    this.routeCache.set(key, result);
+    return result;
+  }
+
+  // порт-получатель для кораблей из from: только порт ДРУГОГО не-враждебного
+  // игрока (в свои же порты корабль не ходит)
+  private pickTradeDest(from: Building): Building | null {
+    const cands = this.buildings.filter(
+      (b) =>
+        b.type === 'port' &&
+        b.owner !== from.owner &&
+        this.tickNo >= b.readyTick &&
+        this.relation(from.owner, b.owner) !== 'hostile'
+    );
+    if (!cands.length) return null;
+    return cands[(Math.random() * cands.length) | 0];
+  }
+
+  // выпуск торговых кораблей из портов (по одному раз в PORT_SHIP_INTERVAL,
+  // одновременно не больше shipsForLevel(level))
+  private spawnTradeShips() {
+    for (const b of this.buildings) {
+      if (b.type !== 'port' || this.tickNo < b.readyTick) continue;
+      if (this.tickNo < b.nextShipTick) continue;
+      b.nextShipTick = this.tickNo + PORT_SHIP_INTERVAL;
+      const active = this.tradeShips.reduce(
+        (n, s) => (s.portCell === b.cell && s.owner === b.owner ? n + 1 : n),
+        0
+      );
+      if (active >= shipsForLevel(b.level)) continue;
+      const dest = this.pickTradeDest(b);
+      if (!dest) continue;
+      const route = this.waterRoute(b.cell, dest.cell);
+      if (!route) continue;
+      // дальние рейсы прибыльнее: +100% на каждые ~800 клеток пути
+      const distFactor = 1 + route.totalLen / 800;
+      this.tradeShips.push({
+        id: this.nextShipId++,
+        owner: b.owner,
+        portCell: b.cell,
+        path: route.path,
+        cum: route.cum,
+        totalLen: route.totalLen,
+        traveled: 0,
+        returning: false,
+        payout: Math.round(tradeValue(b.level) * distFactor),
+        done: false,
+        x: (b.cell % this.w) + 0.5,
+        y: ((b.cell / this.w) | 0) + 0.5,
+      });
+    }
+  }
+
+  private stepTradeShips() {
+    for (const s of this.tradeShips) {
+      const p = this.players.get(s.owner);
+      // домашний порт ещё существует и наш?
+      const home = this.buildings.find(
+        (b) => b.cell === s.portCell && b.owner === s.owner && b.type === 'port'
+      );
+      if (!p?.alive || !home) {
+        s.done = true;
+        continue;
+      }
+      s.traveled += s.returning ? -TRADE_SPEED : TRADE_SPEED;
+      if (!s.returning && s.traveled >= s.totalLen) {
+        p.money += s.payout; // дошёл до чужого порта — выплата
+        this.recordEarning(s);
+        s.returning = true;
+        s.traveled = s.totalLen;
+      } else if (s.returning && s.traveled <= 0) {
+        p.money += s.payout; // вернулся домой — ещё выплата
+        this.recordEarning(s);
+        s.done = true;
+        continue;
+      }
+      const d = Math.max(0, Math.min(s.totalLen, s.traveled));
+      let seg = 0;
+      while (seg < s.cum.length - 2 && s.cum[seg + 1] < d) seg++;
+      const segLen = s.cum[seg + 1] - s.cum[seg] || 1;
+      const t = (d - s.cum[seg]) / segLen;
+      const ax = s.path[seg * 2];
+      const ay = s.path[seg * 2 + 1];
+      const bx = s.path[(seg + 1) * 2];
+      const by = s.path[(seg + 1) * 2 + 1];
+      s.x = ax + (bx - ax) * t;
+      s.y = ay + (by - ay) * t;
+    }
+    if (this.tradeShips.some((s) => s.done)) {
+      this.tradeShips = this.tradeShips.filter((s) => !s.done);
+    }
+  }
+
+  // фиксируем заработок для всплывашки — только у людей (боту не показываем);
+  // деньги получает домашний порт корабля → всплывашка всегда над ним (и на
+  // заходе в чужой порт, и на возврате в свой)
+  private recordEarning(s: TradeShip) {
+    if (this.players.get(s.owner)?.bot) return;
+    const x = (s.portCell % this.w) + 0.5;
+    const y = ((s.portCell / this.w) | 0) + 0.5;
+    // несколько выплат одного порта за интервал — суммируем в одну всплывашку
+    const e = this.tradeEarnings.find((z) => z.x === x && z.y === y && z.owner === s.owner);
+    if (e) e.amount += s.payout;
+    else this.tradeEarnings.push({ x, y, amount: s.payout, owner: s.owner });
+  }
+
+  tradeShipsPub(): TradeShipPub[] {
+    return this.tradeShips.map((s) => ({
+      id: s.id,
+      owner: s.owner,
+      x: s.x,
+      y: s.y,
+    }));
+  }
+
   // Захват/фитиль/взрыв щитов. Вызывается каждый тик (зданий немного).
   private checkBuildings() {
     const remove = new Set<Building>();
     const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
+      // порт: при захвате клетки переходит захватчику (нейтраль/взрыв — сносится)
+      if (b.type === 'port') {
+        const now = this.owners[b.cell];
+        if (now !== b.owner) {
+          if (now > 0 && this.players.get(now)?.alive) {
+            b.owner = now; // новый хозяин; корабли прежнего владельца сами исчезнут
+            b.nextShipTick = this.tickNo + PORT_SHIP_INTERVAL;
+          } else {
+            remove.add(b);
+          }
+        }
+        continue;
+      }
       // завершение апгрейда
       if (b.upEnd > 0 && this.tickNo >= b.upEnd) {
         b.level++;
@@ -928,7 +1303,7 @@ export class Game {
     const R = HQ_RADIUS;
     const R2 = R * R;
     for (const b of this.buildings) {
-      if (this.tickNo < b.readyTick) continue; // ещё строится — не укрепляет
+      if (this.tickNo < b.readyTick || b.type === 'port') continue; // строится/порт — не укрепляет
       const cx = b.cell % this.w;
       const cy = (b.cell / this.w) | 0;
       for (let dy = -R; dy <= R; dy++) {
@@ -953,9 +1328,13 @@ export class Game {
   launchAttackOwner(playerId: number, targetOwner: number, troops: number) {
     const p = this.players.get(playerId);
     if (!p?.alive) return;
+    // на союзников нападать нельзя (сначала расторгнуть союз)
+    if (targetOwner > 0 && this.relation(playerId, targetOwner) === 'allied') return;
     troops = Math.min(troops, Math.floor(p.troops));
     if (troops < 10) return;
     p.troops -= troops;
+    // атака на игрока делает пару враждебной (торговля прекращается)
+    if (targetOwner > 0) this.markHostile(playerId, targetOwner);
     const existing = this.attacks.find((a) => a.player === playerId && a.target === targetOwner);
     if (existing) existing.troops += troops;
     else {
@@ -1010,13 +1389,15 @@ export class Game {
     }
     this.cancelOpposing();
     this.stepBoats();
+    this.spawnTradeShips();
+    this.stepTradeShips();
     for (const a of this.attacks) this.stepAttack(a);
     this.attacks = this.attacks.filter(
       (a) => a.troops >= 1 && this.players.get(a.player)?.alive
     );
     if (this.winnerId === null) {
       for (const p of this.players.values()) {
-        if (p.alive && p.cells > this.landCount * 0.65) {
+        if (p.alive && p.cells > this.landCount * 0.9) {
           this.winnerId = p.id;
           break;
         }
@@ -1194,6 +1575,22 @@ export class Game {
       return;
     }
 
+    // Страны изредка строят торговый порт — так у трейда всегда есть партнёры
+    // (корабли игрока идут в порты соседей, и наоборот)
+    if (
+      p.strong &&
+      p.money >= PORT_BUILD_COST &&
+      !this.buildings.some((b) => b.owner === p.id && b.type === 'port')
+    ) {
+      for (let i = 0; i < cells.length; i += step) {
+        const c = cells[i];
+        if (this.owners[c] === p.id && this.canBuildPort(p.id, c)) {
+          this.build(p.id, 'port', c);
+          break;
+        }
+      }
+    }
+
     // Страны: агрессия зависит от сложности
     const aggro = DIFFICULTY[this.difficulty].aggro;
     p.thinkAt = this.tickNo + Math.round(18 / aggro) + ((Math.random() * 30) | 0);
@@ -1230,7 +1627,10 @@ export class Game {
       owner: b.owner,
       cell: b.cell,
       type: b.type,
-      progress: Math.max(0, Math.min(1, 1 - (b.readyTick - this.tickNo) / HQ_BUILD_TICKS)),
+      progress: Math.max(
+        0,
+        Math.min(1, 1 - (b.readyTick - this.tickNo) / (b.type === 'port' ? PORT_BUILD_TICKS : HQ_BUILD_TICKS))
+      ),
       level: b.level,
       fuse: b.fuseTick > 0 ? Math.max(0, (b.fuseTick - this.tickNo) / 10) : 0,
       upProgress:
