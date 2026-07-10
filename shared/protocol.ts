@@ -5,6 +5,7 @@ export * from './constants/hq';
 export * from './constants/city';
 export * from './constants/port';
 export * from './constants/silo';
+export * from './constants/sam';
 export * from './types/common';
 export * from './types/dto';
 export * from './types/messages';

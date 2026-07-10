@@ -53,6 +53,7 @@ export interface MissilePub {
   tx: number; // цель
   ty: number;
   prog: number; // 0..1 — доля пути
+  intercept: boolean; // true = ракета-перехватчик ПВО (другой цвет, без взрыва)
 }
 
 // Активная атака: сколько войск выделено против кого

@@ -33,7 +33,9 @@ export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr:
   const z = gc.zoom;
   for (const m of gc.missiles) {
     const dist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
-    const arc = Math.min(dist * 0.4, 140); // высота дуги в клетках
+    // перехватчик летит прямой (цель уже в точке встречи на дуге ракеты);
+    // ядерка — по баллистической дуге
+    const arc = m.intercept ? 0 : Math.min(dist * 0.4, 140);
     const pos = (t: number): [number, number] => {
       const gx = m.sx + (m.tx - m.sx) * t;
       const gy = m.sy + (m.ty - m.sy) * t;
@@ -52,6 +54,10 @@ export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr:
       ctx.stroke();
       ctx.setLineDash([]);
     }
+    // цвет: ядерка — жёлто-оранжевая, перехватчик ПВО — бирюзовый
+    const trail = m.intercept ? 'rgba(90,230,255,0.6)' : 'rgba(255,215,120,0.55)';
+    const glow = m.intercept ? '#4de1ff' : '#ffcf4d';
+    const head = m.intercept ? '#d6fbff' : '#fff2b0';
     // трассер 0..prog
     const steps = 26;
     ctx.beginPath();
@@ -61,17 +67,17 @@ export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr:
       else ctx.lineTo(x, y);
     }
     ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(255,215,120,0.55)';
+    ctx.strokeStyle = trail;
     ctx.stroke();
     // светящаяся голова
     const [hx, hy] = pos(Math.min(1, m.prog));
     const rad = Math.max(3, Math.min(8, z * 1.3));
     ctx.save();
-    ctx.shadowColor = '#ffcf4d';
+    ctx.shadowColor = glow;
     ctx.shadowBlur = 18;
     ctx.beginPath();
     ctx.arc(hx, hy, rad, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff2b0';
+    ctx.fillStyle = head;
     ctx.fill();
     ctx.restore();
   }

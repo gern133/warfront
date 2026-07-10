@@ -21,7 +21,7 @@ export const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = 
   { icon: '⚓', bt: 'port', name: 'Торговый порт' },
   { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
   { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },
-  { icon: '📡', bt: null, name: 'Радар' },
+  { icon: '🛰️', bt: 'sam', name: 'ПВО' },
   { icon: '🚢', bt: null, name: 'Флот' },
   { icon: '☢️', bt: null, name: 'Ядерка' },
   { icon: '💥', bt: null, name: 'Удар' },

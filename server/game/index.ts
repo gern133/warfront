@@ -33,6 +33,10 @@ import {
   NUKES,
   nukeFlightTicks,
   MissilePub,
+  SAM_BUILD_TICKS,
+  SAM_RELOAD_TICKS,
+  SAM_RANGE,
+  samCost,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
 import { Player, Building, TradeShip, Missile, Attack, Boat } from './types';
@@ -760,6 +764,13 @@ export class Game {
     return n;
   }
 
+  // суммарный уровень всех ПВО игрока — от него растёт цена следующей покупки
+  private samLevels(playerId: number): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.owner === playerId && b.type === 'sam') n += b.level;
+    return n;
+  }
+
   // Порт можно ставить на своей прибрежной клетке (рядом вода), без вражеских
   // соседей по суше и без здания в клетке
   private canBuildPort(playerId: number, cell: number): boolean {
@@ -840,7 +851,7 @@ export class Game {
         : this.nearestOwnCoast(playerId, cell, PORT_RADIUS);
       if (shore < 0) return 'Рядом нет своего берега';
       // порт нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
+      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
         return 'Слишком близко к другому зданию';
       if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
       p.money -= PORT_BUILD_COST;
@@ -858,6 +869,7 @@ export class Game {
         ships: 0,
         stock: 0,
         reloadTick: 0,
+        reloads: [],
       });
       return null;
     }
@@ -867,7 +879,7 @@ export class Game {
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       // города нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
         return 'Слишком близко к другому зданию';
       const cost = cityCost(this.cityLevels(playerId));
       if (p.money < cost) return 'Недостаточно денег';
@@ -886,6 +898,7 @@ export class Game {
         ships: 0,
         stock: 0,
         reloadTick: 0,
+        reloads: [],
       });
       return null;
     }
@@ -894,7 +907,7 @@ export class Game {
       const near = this.nearbyOwnType(playerId, cell, 'silo');
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
         return 'Слишком близко к другому зданию';
       if (p.money < SILO_COST) return 'Недостаточно денег';
       p.money -= SILO_COST;
@@ -912,12 +925,41 @@ export class Game {
         ships: 0,
         stock: 1, // одна ракета готова к пуску после постройки
         reloadTick: 0,
+        reloads: [],
+      });
+      return null;
+    }
+    if (bt === 'sam') {
+      // клик рядом со своим ПВО — апгрейд
+      const near = this.nearbyOwnType(playerId, cell, 'sam');
+      if (near) return this.upgrade(playerId, near.cell);
+      if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+        return 'Слишком близко к другому зданию';
+      const cost = samCost(this.samLevels(playerId));
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      this.buildings.push({
+        id: this.nextBuildingId++,
+        owner: playerId,
+        cell,
+        type: 'sam',
+        readyTick: this.tickNo + SAM_BUILD_TICKS,
+        level: 1,
+        fuseTick: 0,
+        upStart: 0,
+        upEnd: 0,
+        nextShipTick: 0,
+        ships: 0,
+        stock: 0,
+        reloadTick: 0,
+        reloads: [],
       });
       return null;
     }
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
     // штаб нельзя ставить впритык к другому штабу/порту/городу/шахте
-    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
+    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
       return 'Слишком близко к другому зданию';
     const cost = hqCost(this.hqCount(playerId));
     if (p.money < cost) return 'Недостаточно денег';
@@ -936,6 +978,7 @@ export class Game {
       ships: 0,
       stock: 0,
       reloadTick: 0,
+      reloads: [],
     });
     // укрепление появится, когда постройка завершится (см. tick)
     return null;
@@ -969,6 +1012,15 @@ export class Game {
       p.money -= SILO_COST;
       b.upStart = this.tickNo;
       b.upEnd = this.tickNo + SILO_BUILD_TICKS;
+      return null;
+    }
+    if (b.type === 'sam') {
+      // ПВО: апгрейд «в общем» по сумме уровней, идёт 5с; уровень = число перехватов
+      const cost = samCost(this.samLevels(playerId));
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      b.upStart = this.tickNo;
+      b.upEnd = this.tickNo + SAM_BUILD_TICKS;
       return null;
     }
     if (b.level >= MAX_HQ_LEVEL) return 'Максимальный уровень';
@@ -1194,13 +1246,69 @@ export class Game {
   // Перезарядка залпа: +1 ракета раз в SILO_RELOAD_TICKS до потолка (= уровень)
   private reloadSilos() {
     for (const b of this.buildings) {
-      if (b.type !== 'silo' || this.tickNo < b.readyTick) continue;
-      if (b.stock >= b.level) continue;
-      if (this.tickNo >= b.reloadTick) {
-        b.stock++;
-        b.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+      if (b.type === 'silo' && this.tickNo >= b.readyTick && b.stock < b.level) {
+        if (this.tickNo >= b.reloadTick) {
+          b.stock++;
+          b.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+        }
+      } else if (b.type === 'sam' && b.reloads.length) {
+        // ПВО: израсходованные заряды восстанавливаются параллельно (каждый 7с)
+        if (b.reloads.some((t) => this.tickNo >= t)) {
+          b.reloads = b.reloads.filter((t) => this.tickNo < t);
+        }
       }
     }
+  }
+
+  // Перехват летящей ядерки ближайшим подходящим ПВО (не своего владельца, цель
+  // в радиусе, есть свободный заряд). Проверяется КАЖДЫЙ тик, пока ракета не
+  // перехвачена и не подлетела вплотную — так ПВО сбивает и те ракеты, что были
+  // выпущены во время его перезарядки (перехватит, как только перезарядится).
+  private tryIntercept(m: Missile) {
+    if (m.killProg > 0 || m.prog >= 0.88) return; // уже перехвачена или поздно
+    const cx = m.tx;
+    const cy = m.ty;
+    const r2 = SAM_RANGE * SAM_RANGE;
+    let sam: Building | undefined;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'sam' || b.owner === m.owner) continue;
+      if (this.tickNo < b.readyTick) continue;
+      if (b.reloads.length >= b.level) continue; // все заряды на перезарядке
+      const bx = b.cell % this.w;
+      const by = (b.cell / this.w) | 0;
+      const d = (bx + 0.5 - cx) ** 2 + (by + 0.5 - cy) ** 2;
+      if (d <= r2 && d < bestD) {
+        bestD = d;
+        sam = b;
+      }
+    }
+    if (!sam) return;
+    sam.reloads.push(this.tickNo + SAM_RELOAD_TICKS); // заряд израсходован
+    // точка перехвата впереди по курсу ракеты (с запасом на подлёт перехватчика)
+    m.killProg = Math.min(0.9, m.prog + 0.5);
+    // точка встречи — где ракета будет В ВОЗДУХЕ на своей баллистической дуге
+    // (та же формула дуги, что в рендере: arc = min(dist*0.4, 140))
+    const kx = m.sx + (m.tx - m.sx) * m.killProg;
+    const ky = m.sy + (m.ty - m.sy) * m.killProg;
+    const gdist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
+    const lift = Math.min(gdist * 0.4, 140) * Math.sin(Math.PI * m.killProg);
+    this.missiles.push({
+      id: this.nextMissileId++,
+      owner: sam.owner,
+      kind: 'interceptor',
+      sx: (sam.cell % this.w) + 0.5,
+      sy: ((sam.cell / this.w) | 0) + 0.5,
+      tx: kx,
+      ty: ky - lift, // целимся выше — в точку ракеты на дуге, а не в землю
+      targetCell: 0,
+      prog: 0,
+      // прилетает в точку перехвата ровно тогда, когда ракета туда доходит
+      flightTicks: Math.max(1, Math.round((m.killProg - m.prog) * m.flightTicks)),
+      done: false,
+      intercept: true,
+      killProg: 0,
+    });
   }
 
   // Пуск ракеты из ближайшей заряженной шахты игрока в клетку cell.
@@ -1233,7 +1341,7 @@ export class Game {
     const sx = (silo.cell % this.w) + 0.5;
     const sy = ((silo.cell / this.w) | 0) + 0.5;
     const dist = Math.hypot(cx + 0.5 - sx, cy + 0.5 - sy);
-    this.missiles.push({
+    const nuke: Missile = {
       id: this.nextMissileId++,
       owner: playerId,
       kind,
@@ -1245,17 +1353,32 @@ export class Game {
       prog: 0,
       flightTicks: nukeFlightTicks(spec, dist), // время полёта — по расстоянию
       done: false,
-    });
+      intercept: false,
+      killProg: 0,
+    };
+    this.missiles.push(nuke);
     return null;
   }
 
   private stepMissiles() {
     if (!this.missiles.length) return;
+    // сперва пробуем перехватить все ещё-не-сбитые ядерки (ПВО могло только что
+    // перезарядиться — тогда собьёт ракету, выпущенную во время перезарядки).
+    // Идём по исходной длине — tryIntercept добавляет перехватчики в конец.
+    const n = this.missiles.length;
+    for (let i = 0; i < n; i++) {
+      const m = this.missiles[i];
+      if (!m.intercept && m.killProg === 0) this.tryIntercept(m);
+    }
     for (const m of this.missiles) {
-      const spec = NUKES[m.kind];
       m.prog += 1 / Math.max(1, m.flightTicks);
-      if (m.prog >= 1) {
+      if (m.intercept) {
+        if (m.prog >= 1) m.done = true; // перехватчик долетел и исчез
+      } else if (m.killProg > 0 && m.prog >= m.killProg) {
+        m.done = true; // сбита ПВО — без взрыва
+      } else if (m.prog >= 1) {
         m.done = true;
+        const spec = NUKES[m.kind];
         this.detonate(m.targetCell, spec?.radius ?? HQ_EXPLODE_RADIUS * 2, spec?.armyFrac ?? 0.25);
       }
     }
@@ -1274,6 +1397,7 @@ export class Game {
       tx: m.tx,
       ty: m.ty,
       prog: Math.min(1, m.prog),
+      intercept: m.intercept,
     }));
   }
 
@@ -1283,8 +1407,8 @@ export class Game {
     const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
-      // порт/город/шахта: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
-      if (b.type === 'port' || b.type === 'city' || b.type === 'silo') {
+      // порт/город/шахта/ПВО: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
+      if (b.type === 'port' || b.type === 'city' || b.type === 'silo' || b.type === 'sam') {
         const now = this.owners[b.cell];
         if (now !== b.owner) {
           if (now > 0 && this.players.get(now)?.alive) {
@@ -1292,13 +1416,14 @@ export class Game {
             b.nextShipTick = this.tickNo + PORT_SHIP_INTERVAL;
             b.stock = 0; // шахта достаётся разряженной
             b.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+            b.reloads = []; // ПВО достаётся с полными зарядами
             b.upStart = 0;
             b.upEnd = 0;
           } else {
             remove.add(b);
           }
-        } else if (b.type === 'silo' && b.upEnd > 0 && this.tickNo >= b.upEnd) {
-          b.level++; // апгрейд шахты завершён — залп увеличился
+        } else if ((b.type === 'silo' || b.type === 'sam') && b.upEnd > 0 && this.tickNo >= b.upEnd) {
+          b.level++; // апгрейд завершён (силос — залп, ПВО — число перехватов)
           b.upStart = 0;
           b.upEnd = 0;
         }
@@ -1726,7 +1851,7 @@ export class Game {
       if (myCities < 3 && p.money >= cityCost(this.cityLevels(p.id))) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
             this.build(p.id, 'city', c);
             break;
           }
@@ -1736,7 +1861,7 @@ export class Game {
       if (myHqs < 2 && p.money >= hqCost(myHqs)) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
             this.build(p.id, 'hq', c);
             break;
           }
@@ -1747,8 +1872,19 @@ export class Game {
       if (mySilos < 1 && p.money >= SILO_COST) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
             this.build(p.id, 'silo', c);
+            break;
+          }
+        }
+      }
+      // ПВО (дорогое — одно на страну, если совсем разбогатела)
+      const mySams = this.buildings.filter((b) => b.owner === p.id && b.type === 'sam').length;
+      if (mySams < 1 && p.money >= samCost(0)) {
+        for (let i = 0; i < cells.length; i += step) {
+          const c = cells[i];
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
+            this.build(p.id, 'sam', c);
             break;
           }
         }
@@ -1822,7 +1958,12 @@ export class Game {
         b.upEnd > b.upStart
           ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
           : 0,
-      ammo: b.type === 'silo' ? b.stock : 0,
+      ammo:
+        b.type === 'silo'
+          ? b.stock
+          : b.type === 'sam'
+            ? Math.max(0, b.level - b.reloads.length)
+            : 0,
     }));
   }
 

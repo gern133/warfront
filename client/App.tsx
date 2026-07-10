@@ -19,6 +19,7 @@ import {
   cityTroopBonus,
   SILO_COST,
   NUKES,
+  samCost,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
@@ -78,6 +79,7 @@ export default function App() {
   const canBuildPortRef = useRef(false);
   const canBuildCityRef = useRef(false);
   const canBuildSiloRef = useRef(false);
+  const canBuildSamRef = useRef(false);
   const canNukeRef = useRef(false);
   const needFocus = useRef(false); // отложенный автозум к спавну
   const speedRef = useRef(1);
@@ -316,6 +318,7 @@ export default function App() {
         if (bt === 'port' && !canBuildPortRef.current) return;
         if (bt === 'city' && !canBuildCityRef.current) return;
         if (bt === 'silo' && !canBuildSiloRef.current) return;
+        if (bt === 'sam' && !canBuildSamRef.current) return;
         if (bt) {
           setNukeMode(false);
           setBuildMode((bm) => (bm === bt ? null : bt));
@@ -358,6 +361,12 @@ export default function App() {
   const myPorts = buildings.filter((b) => b.owner === gc.selfId && b.type === 'port').length;
   const myCities = buildings.filter((b) => b.owner === gc.selfId && b.type === 'city').length;
   const mySilos = buildings.filter((b) => b.owner === gc.selfId && b.type === 'silo').length;
+  const mySams = buildings.filter((b) => b.owner === gc.selfId && b.type === 'sam').length;
+  // суммарный уровень ПВО → цена следующей покупки (в общем)
+  const mySamLevels = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'sam')
+    .reduce((s, b) => s + b.level, 0);
+  const nextSamCost = samCost(mySamLevels);
   // суммарный заряд достроенных шахт (сколько ракет готово к пуску)
   const nukeAmmo = buildings.reduce(
     (s, b) => (b.owner === gc.selfId && b.type === 'silo' && b.progress >= 1 ? s + b.ammo : s),
@@ -383,6 +392,8 @@ export default function App() {
   canBuildCityRef.current = shownMoney >= nextCityCost;
   // шахта (клавиша 5): постройка и апгрейд по 1млн
   canBuildSiloRef.current = shownMoney >= SILO_COST;
+  // ПВО (клавиша 6): постройка/апгрейд по сумме уровней
+  canBuildSamRef.current = shownMoney >= nextSamCost;
   // ядерка (клавиша 8): нужна заряженная шахта и деньги на пуск
   canNukeRef.current = nukeReady && shownMoney >= NUKES.basic.cost;
 
@@ -519,6 +530,11 @@ export default function App() {
               Кликните в глубине своей земли — ракетная шахта; рядом с шахтой — апгрейд (Esc)
             </div>
           )}
+          {buildMode === 'sam' && (
+            <div className="build-hint">
+              Кликните в глубине своей земли — ПВО (сбивает ракеты); рядом с ПВО — апгрейд (Esc)
+            </div>
+          )}
           {nukeMode && (
             <div className="build-hint nuke-hint">
               ☢️ Кликните цель — ракета вылетит из ближайшей шахты ({fmtK(NUKES.basic.cost)}). Esc — отмена
@@ -562,7 +578,8 @@ export default function App() {
             <div className="toolbar">
               {TOOLS.map((t, i) => {
                 const isNuke = i === 7; // ☢️ — действие (пуск), не постройка
-                const active = isNuke || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo';
+                const active =
+                  isNuke || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
                 const cost = isNuke
                   ? NUKES.basic.cost
                   : t.bt === 'port'
@@ -571,7 +588,9 @@ export default function App() {
                       ? nextCityCost
                       : t.bt === 'silo'
                         ? SILO_COST
-                        : nextHqCost;
+                        : t.bt === 'sam'
+                          ? nextSamCost
+                          : nextHqCost;
                 const count = isNuke
                   ? nukeAmmo
                   : t.bt === 'port'
@@ -580,9 +599,11 @@ export default function App() {
                       ? myCities
                       : t.bt === 'silo'
                         ? mySilos
-                        : t.bt === 'hq'
-                          ? myHqs
-                          : 0;
+                        : t.bt === 'sam'
+                          ? mySams
+                          : t.bt === 'hq'
+                            ? myHqs
+                            : 0;
                 const afford = isNuke
                   ? canNukeRef.current
                   : t.bt === 'port'
@@ -591,7 +612,9 @@ export default function App() {
                       ? canBuildCityRef.current
                       : t.bt === 'silo'
                         ? canBuildSiloRef.current
-                        : shownMoney >= cost;
+                        : t.bt === 'sam'
+                          ? canBuildSamRef.current
+                          : shownMoney >= cost;
                 const usable = active && afford;
                 const selected = isNuke ? nukeMode : buildMode === t.bt && active;
                 return (
@@ -799,6 +822,31 @@ export default function App() {
                         }}
                       >
                         ⚡ До {lvl + 1} ур. · {fmtK(SILO_COST)} · 5с
+                      </button>
+                    )}
+                  </>
+                );
+              }
+              if (b?.type === 'sam') {
+                const upgrading = (b.upProgress ?? 0) > 0;
+                return (
+                  <>
+                    <div className="ctx-title">🛰️ ПВО · ур. {lvl}</div>
+                    <div className="ctx-note">
+                      Перехватов: {b.ammo}/{lvl} · апгрейд +1 к перехвату
+                    </div>
+                    {upgrading ? (
+                      <div className="ctx-note">Улучшается…</div>
+                    ) : (
+                      <button
+                        className="ctx-btn"
+                        disabled={shownMoney < nextSamCost}
+                        onClick={() => {
+                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                          setUpgradeMenu(null);
+                        }}
+                      >
+                        ⚡ До {lvl + 1} ур. · {fmtK(nextSamCost)} · 5с
                       </button>
                     )}
                   </>

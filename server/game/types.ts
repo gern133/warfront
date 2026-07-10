@@ -34,6 +34,7 @@ export interface Building {
   ships: number; // порт: кораблей в полёте
   stock: number; // шахта: заряженных ракет сейчас (0..level)
   reloadTick: number; // шахта: когда добавить +1 ракету в залп
+  reloads: number[]; // ПВО: тики восстановления израсходованных зарядов (параллельно)
 }
 
 export interface TradeShip {
@@ -63,6 +64,8 @@ export interface Missile {
   prog: number; // 0..1
   flightTicks: number; // полное время полёта (по расстоянию)
   done: boolean;
+  intercept: boolean; // true = перехватчик ПВО (летит к ядерке, не взрывается)
+  killProg: number; // для ядерки: prog, на котором её собьёт ПВО (0 = не перехвачена)
 }
 
 export interface Attack {

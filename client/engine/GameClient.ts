@@ -11,6 +11,7 @@ import {
   HQ_RADIUS,
   HQ_EXPLODE_RADIUS,
   PORT_RADIUS,
+  SAM_RANGE,
 } from '../../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../../shared/color';
 import { rleDecode } from '../../shared/rle';
@@ -219,14 +220,22 @@ export class GameClient {
 
   setMissiles(missiles: MissilePub[]) {
     const next = missiles ?? [];
-    // ракета исчезла из списка = долетела → большая вспышка ядерного взрыва в цели
+    // ракета исчезла из списка → взрыв в цели, НО только если это долетевшая
+    // ядерка (перехваченная/перехватчик — маленький «пшик», без ядерного гриба)
     if (this.missiles.length) {
       const nextIds = new Set(next.map((m) => m.id));
       for (const m of this.missiles) {
-        if (!nextIds.has(m.id)) {
-          const cell = (Math.floor(m.ty) | 0) * this.w + (Math.floor(m.tx) | 0);
+        if (nextIds.has(m.id)) continue;
+        const cell = (Math.floor(m.ty) | 0) * this.w + (Math.floor(m.tx) | 0);
+        if (m.intercept) {
+          // перехватчик долетел — маленький «пшик» в точке встречи
+          this.flashes.push({ cell, t0: performance.now(), big: false });
+        } else if (m.prog >= 0.9) {
+          // ядерка дошла до цели (не сбита) — ядерный взрыв
           this.flashes.push({ cell, t0: performance.now(), big: true, nuke: true });
         }
+        // сбитая ядерка (исчезла на середине пути) — своей вспышки не даёт,
+        // её гасит «пшик» перехватчика
       }
     }
     this.missiles = next;
@@ -831,6 +840,46 @@ export class GameClient {
         }
         continue;
       }
+      if (b.type === 'sam') {
+        const buildingP = b.progress < 1;
+        const upgrading = b.upProgress > 0 && b.upProgress < 1;
+        ctx.globalAlpha = buildingP ? 0.55 : 1;
+        ctx.fillStyle = '#0b1f2a';
+        ctx.strokeStyle = '#4de1ff'; // бирюзовый — ПВО
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = `${r * 1.05}px sans-serif`;
+        ctx.fillText('🛰️', sx, sy + 1);
+        if (!buildingP) {
+          const fs = Math.max(9, r * 0.85);
+          ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+          ctx.lineWidth = Math.max(2, fs / 5);
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+          ctx.fillStyle = b.ammo > 0 ? '#8fe9f2' : '#ff6a55';
+          const txt = `${b.ammo}/${b.level}`;
+          ctx.strokeText(txt, sx + r, sy - r);
+          ctx.fillText(txt, sx + r, sy - r);
+        }
+        ctx.globalAlpha = 1;
+        if (buildingP || upgrading) {
+          const prog = buildingP ? b.progress : b.upProgress;
+          const bw = r * 2.4;
+          const bh = Math.max(3, r * 0.35);
+          const bx = sx - bw / 2;
+          const by = sy - r - bh - 3;
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = buildingP ? '#4de1ff' : '#4dd2ff';
+          ctx.fillRect(bx, by, bw * prog, bh);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        continue;
+      }
       if (b.type === 'city') {
         const buildingP = b.progress < 1;
         ctx.globalAlpha = buildingP ? 0.55 : 1;
@@ -1069,6 +1118,44 @@ export class GameClient {
         ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
       }
       ctx.globalAlpha = 1;
+    } else if (this.buildMode === 'sam' && this.hoverCell >= 0) {
+      // предпросмотр ПВО: показываем ЗОНУ ПОКРЫТИЯ (радиус перехвата SAM_RANGE)
+      const near = this.nearbyOwnType(this.hoverCell, 'sam');
+      const cellFor = near ? near.cell : this.hoverCell;
+      const ok = near ? true : this.canBuildHqAt(this.hoverCell);
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
+      const rangePx = SAM_RANGE * this.zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rangePx, 0, Math.PI * 2);
+      ctx.fillStyle = ok ? 'rgba(77,225,255,0.12)' : 'rgba(150,150,150,0.15)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = ok ? 'rgba(77,225,255,0.8)' : 'rgba(160,160,160,0.7)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = ok ? 'rgba(11,31,42,0.9)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#4de1ff' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `${r * 1.05}px sans-serif`;
+      ctx.globalAlpha = ok ? 1 : 0.5;
+      ctx.fillText('🛰️', sx, sy + 1);
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#8fe9f2';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
+      ctx.globalAlpha = 1;
     } else if (this.buildMode && this.hoverCell >= 0) {
       // предпросмотр штаба
       const ok = this.canBuildHqAt(this.hoverCell);
@@ -1097,6 +1184,25 @@ export class GameClient {
       ctx.globalAlpha = ok ? 1 : 0.5;
       ctx.fillText('🛡', sx, sy + 1);
       ctx.globalAlpha = 1;
+    }
+    // при наведении ядерки — красные полупрозрачные зоны ВСЕХ ПВО (там ракету собьют)
+    if (this.nukeMode) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const rr = SAM_RANGE * this.zoom;
+      for (const b of this.buildings) {
+        if (b.type !== 'sam' || b.progress < 1) continue;
+        const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
+        const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
+        if (sx < -rr || sy < -rr || sx > vw + rr || sy > vh + rr) continue;
+        ctx.beginPath();
+        ctx.arc(sx, sy, rr, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,40,40,0.12)';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(255,60,60,0.6)';
+        ctx.stroke();
+      }
     }
     // наведение ядерного удара: прицел + радиус поражения под курсором
     if (this.nukeMode && this.hoverCell >= 0) {
