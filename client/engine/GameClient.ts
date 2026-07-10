@@ -11,36 +11,20 @@ import {
   HQ_RADIUS,
   HQ_EXPLODE_RADIUS,
   PORT_RADIUS,
-} from '../shared/protocol';
-import { playerColorRGB, playerColorCSS } from '../shared/color';
-import { rleDecode } from '../shared/rle';
-
-const FORT_BORDER: [number, number, number] = [222, 214, 196]; // каменная граница
-
-const WATER: [number, number, number] = [58, 96, 140];
-const WAR: [number, number, number] = [225, 36, 26]; // линия фронта
-// метки стран/людей показываем, когда приблизились вдвое от обзорного зума;
-// «корм» — только если он огромный или приближение очень сильное
-const LABEL_ZOOM_MUL = 2;
-const FOOD_LABEL_MUL = 5;
-const FOOD_LABEL_CELLS = 4000;
-// цвета нейтральной местности по типу почвы — как на классических картах мира
-const TERRAIN: Record<number, [number, number, number]> = {
-  1: [168, 190, 138], // трава
-  2: [216, 203, 160], // песок
-  3: [188, 183, 173], // камень
-  4: [242, 244, 242], // снег
-};
-
-function fmtTroops(n: number): string {
-  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
-}
-
-function fmtMoney(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1000) return Math.round(n / 1000) + 'k';
-  return String(Math.round(n));
-}
+} from '../../shared/protocol';
+import { playerColorRGB, playerColorCSS } from '../../shared/color';
+import { rleDecode } from '../../shared/rle';
+import {
+  FORT_BORDER,
+  WATER,
+  WAR,
+  LABEL_ZOOM_MUL,
+  FOOD_LABEL_MUL,
+  FOOD_LABEL_CELLS,
+  TERRAIN,
+} from './constants';
+import { fmtTroops, fmtMoney } from '../lib/format';
+import { drawShips, drawMissiles } from './render/projectiles';
 
 export class GameClient {
   w = 0;
@@ -59,7 +43,7 @@ export class GameClient {
   buildMode: BuildingType | null = null;
   nukeMode = false; // режим наведения ядерного удара (клик = пуск)
   private hoverCell = -1;
-  private missiles: MissilePub[] = []; // ракеты в полёте
+  missiles: MissilePub[] = []; // ракеты в полёте (читает engine/render)
   private buildings: BuildingPub[] = [];
   private fortField = new Int16Array(0); // владелец штаба на клетку (укрепления)
   private buildingsSig = '';
@@ -83,7 +67,7 @@ export class GameClient {
 
   private attacks: AttackPub[] = [];
   private boats: BoatPub[] = [];
-  private ships: TradeShipPub[] = []; // трейд-корабли (кружки без следа)
+  ships: TradeShipPub[] = []; // трейд-корабли (читает engine/render)
   private moneyPops: { x: number; y: number; amount: number; t0: number }[] = []; // всплывашки заработка
   allies = new Set<number>(); // мои союзники
   enemies = new Set<number>(); // мои враги (нельзя торговать)
@@ -94,9 +78,10 @@ export class GameClient {
   private labelTick = 0;
   private warTick = 0;
 
-  private zoom = 3;
-  private panX = 0;
-  private panY = 0;
+  // камера публична — читается модулями рендера (engine/render/*)
+  zoom = 3;
+  panX = 0;
+  panY = 0;
 
   // плавная анимация камеры (автозум к спавну)
   private anim: {
@@ -791,80 +776,6 @@ export class GameClient {
     }
   }
 
-  // Трейд-корабли: кружки без следа (для производительности)
-  private drawShips(ctx: CanvasRenderingContext2D, dpr: number) {
-    if (!this.ships.length) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const rad = Math.max(2.5, Math.min(6, this.zoom * 0.9));
-    ctx.lineWidth = 1.5;
-    for (const s of this.ships) {
-      const sx = this.panX + s.x * this.zoom;
-      const sy = this.panY + s.y * this.zoom;
-      if (sx < -20 || sy < -20 || sx > vw + 20 || sy > vh + 20) continue;
-      ctx.beginPath();
-      ctx.arc(sx, sy, rad, 0, Math.PI * 2);
-      ctx.fillStyle = playerColorCSS(s.owner);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-      ctx.stroke();
-    }
-  }
-
-  // Ракеты: баллистическая дуга, трассер за головой, светящийся кружок, кольцо
-  // радиуса поражения в цели
-  private drawMissiles(ctx: CanvasRenderingContext2D, dpr: number) {
-    if (!this.missiles.length) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const px = this.panX;
-    const py = this.panY;
-    const z = this.zoom;
-    for (const m of this.missiles) {
-      const dist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
-      const arc = Math.min(dist * 0.4, 140); // высота дуги в клетках
-      const pos = (t: number): [number, number] => {
-        const gx = m.sx + (m.tx - m.sx) * t;
-        const gy = m.sy + (m.ty - m.sy) * t;
-        const lift = arc * Math.sin(Math.PI * t);
-        return [px + gx * z, py + gy * z - lift * z];
-      };
-      // кольцо радиуса поражения в цели
-      const spec = NUKES[m.kind];
-      if (spec) {
-        const [tx, ty] = pos(1);
-        ctx.beginPath();
-        ctx.arc(tx, ty, spec.radius * z, 0, Math.PI * 2);
-        ctx.setLineDash([5, 5]);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = 'rgba(255,80,40,0.5)';
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      // трассер 0..prog
-      const steps = 26;
-      ctx.beginPath();
-      for (let i = 0; i <= steps; i++) {
-        const [x, y] = pos((i / steps) * m.prog);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = 'rgba(255,215,120,0.55)';
-      ctx.stroke();
-      // светящаяся голова
-      const [hx, hy] = pos(Math.min(1, m.prog));
-      const rad = Math.max(3, Math.min(8, z * 1.3));
-      ctx.save();
-      ctx.shadowColor = '#ffcf4d';
-      ctx.shadowBlur = 18;
-      ctx.beginPath();
-      ctx.arc(hx, hy, rad, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff2b0';
-      ctx.fill();
-      ctx.restore();
-    }
-  }
 
   // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
   private drawBuildings(ctx: CanvasRenderingContext2D, dpr: number) {
@@ -1322,9 +1233,9 @@ export class GameClient {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(this.off, 0, 0);
         this.drawNames(ctx, dpr);
-        this.drawShips(ctx, dpr);
+        drawShips(this, ctx, dpr);
         this.drawBuildings(ctx, dpr);
-        this.drawMissiles(ctx, dpr);
+        drawMissiles(this, ctx, dpr);
         this.drawMinimap();
       }
       raf = requestAnimationFrame(loop);

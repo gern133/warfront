@@ -21,53 +21,13 @@ import {
   NUKES,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
-import { GameClient } from './game-client';
-
-type Phase = 'menu' | 'lobby' | 'spawn' | 'playing' | 'dead';
-type MenuView = 'main' | 'create' | 'join';
-
-interface LobbyInfo {
-  code: string;
-  host: boolean;
-  difficulty: Difficulty;
-  map: MapType;
-  players: string[];
-}
-
-// Ботов всегда 300 (275 пассивного «корма» + 25 стран); сложность меняет силу
-// стран относительно игрока
-const DIFF_LABELS: Record<Difficulty, { name: string; desc: string }> = {
-  easy: { name: 'Лёгкий', desc: 'страны слабее вас' },
-  normal: { name: 'Средний', desc: 'страны как вы' },
-  hard: { name: 'Тяжёлый', desc: 'страны на 20% сильнее' },
-  insane: { name: 'Безумный', desc: 'страны на 50% сильнее' },
-};
-
-const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
-  random: { name: 'Случайный мир', desc: 'новые континенты каждый раунд' },
-  earth: { name: 'Земля', desc: 'реальные материки и острова' },
-};
-
-// компактный формат чисел: 1234 → 1.2K, 1200000 → 1.2M
-function fmtK(n: number): string {
-  if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(2).replace(/\.?0+$/, '') + 'K';
-  return String(Math.floor(n));
-}
-
-// панель зданий/вооружений (1–0); активен только штаб обороны, остальные — позже
-const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
-  { icon: '🏙️', bt: 'city', name: 'Город' },
-  { icon: '🏭', bt: null, name: 'Завод' },
-  { icon: '⚓', bt: 'port', name: 'Торговый порт' },
-  { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
-  { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },
-  { icon: '📡', bt: null, name: 'Радар' },
-  { icon: '🚢', bt: null, name: 'Флот' },
-  { icon: '☢️', bt: null, name: 'Ядерка' },
-  { icon: '💥', bt: null, name: 'Удар' },
-  { icon: '💣', bt: null, name: 'Бомба' },
-];
+import { GameClient } from './engine/GameClient';
+import { Phase, MenuView, LobbyInfo } from './types';
+import { TOOLS } from './constants/ui';
+import { fmtK } from './lib/format';
+import { MenuScreen } from './screens/MenuScreen';
+import { LobbyScreen } from './screens/LobbyScreen';
+import { DeadScreen, WinnerModal } from './screens/EndScreens';
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('menu');
@@ -674,153 +634,37 @@ export default function App() {
       )}
 
       {phase === 'menu' && (
-        <div className="overlay">
-          <div className="menu">
-            <h1 className="title">Warfront</h1>
-            <div className="frontline" aria-hidden="true" />
-            <label className="field">
-              <span className="eyebrow">Позывной</span>
-              <input
-                placeholder="Ваше имя"
-                value={name}
-                maxLength={16}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </label>
-            {menuView === 'main' && (
-              <>
-                <button className="primary" onClick={quickPlay} disabled={!connected}>
-                  В бой
-                </button>
-                <button className="secondary" onClick={() => setMenuView('create')} disabled={!connected}>
-                  Создать лобби
-                </button>
-                <button className="secondary" onClick={() => setMenuView('join')} disabled={!connected}>
-                  Войти по коду
-                </button>
-                {!connected && <p className="hint">Подключение к серверу…</p>}
-              </>
-            )}
-            {menuView === 'create' && (
-              <>
-                <div className="field">
-                  <span className="eyebrow">Театр действий</span>
-                  <div className="opt-list">
-                    {(Object.keys(MAP_LABELS) as MapType[]).map((m) => (
-                      <label key={m} className={'opt' + (mapType === m ? ' active' : '')}>
-                        <input
-                          type="radio"
-                          name="map"
-                          checked={mapType === m}
-                          onChange={() => setMapType(m)}
-                        />
-                        <span className="opt-name">{MAP_LABELS[m].name}</span>
-                        <span className="opt-desc">{MAP_LABELS[m].desc}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="field">
-                  <span className="eyebrow">Уровень угрозы</span>
-                  <div className="opt-list">
-                    {(Object.keys(DIFF_LABELS) as Difficulty[]).map((d) => (
-                      <label key={d} className={'opt' + (difficulty === d ? ' active' : '')}>
-                        <input
-                          type="radio"
-                          name="diff"
-                          checked={difficulty === d}
-                          onChange={() => setDifficulty(d)}
-                        />
-                        <span className="opt-name">{DIFF_LABELS[d].name}</span>
-                        <span className="opt-desc">{DIFF_LABELS[d].desc}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <button className="primary" onClick={createLobby} disabled={!connected}>
-                  Создать лобби
-                </button>
-                <button className="link" onClick={() => setMenuView('main')}>
-                  ← Назад
-                </button>
-              </>
-            )}
-            {menuView === 'join' && (
-              <>
-                <label className="field">
-                  <span className="eyebrow">Шифр доступа</span>
-                  <input
-                    className="code-input"
-                    placeholder="•••••"
-                    value={joinCode}
-                    maxLength={5}
-                    onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                    onKeyDown={(e) => e.key === 'Enter' && joinLobby()}
-                  />
-                </label>
-                <button className="primary" onClick={joinLobby} disabled={!connected || joinCode.length < 5}>
-                  Войти
-                </button>
-                <button className="link" onClick={() => setMenuView('main')}>
-                  ← Назад
-                </button>
-              </>
-            )}
-            {error && <p className="error">{error}</p>}
-          </div>
-        </div>
+        <MenuScreen
+          name={name}
+          setName={setName}
+          menuView={menuView}
+          setMenuView={setMenuView}
+          connected={connected}
+          mapType={mapType}
+          setMapType={setMapType}
+          difficulty={difficulty}
+          setDifficulty={setDifficulty}
+          joinCode={joinCode}
+          setJoinCode={setJoinCode}
+          error={error}
+          onQuick={quickPlay}
+          onCreate={createLobby}
+          onJoin={joinLobby}
+        />
       )}
 
       {phase === 'lobby' && lobby && (
-        <div className="overlay">
-          <div className="menu">
-            <h1 className="title">Лобби</h1>
-            <div className="frontline" aria-hidden="true" />
-            <div className="field">
-              <span className="eyebrow">Шифр доступа — отправьте союзникам</span>
-              <button className="code-box" onClick={copyCode}>
-                {lobby.code}
-                <span className="copy-mark">{copied ? '✓ скопировано' : 'копировать'}</span>
-              </button>
-            </div>
-            <div className="lobby-meta">
-              {MAP_LABELS[lobby.map].name} · {DIFF_LABELS[lobby.difficulty].name.toLowerCase()} уровень
-            </div>
-            <div className="lobby-players">
-              {lobby.players.map((n, i) => (
-                <div key={i} className="lobby-player">
-                  {n}
-                </div>
-              ))}
-            </div>
-            {lobby.host ? (
-              <button className="primary" onClick={() => sendMsg({ type: 'start' })}>
-                Начать игру
-              </button>
-            ) : (
-              <p className="hint">Ожидание хоста…</p>
-            )}
-            <button className="link" onClick={leaveToMenu}>
-              Покинуть лобби
-            </button>
-          </div>
-        </div>
+        <LobbyScreen
+          lobby={lobby}
+          copied={copied}
+          onCopyCode={copyCode}
+          onStart={() => sendMsg({ type: 'start' })}
+          onLeave={leaveToMenu}
+        />
       )}
 
       {phase === 'dead' && (
-        <div className="overlay">
-          <div className="menu">
-            <h1 className="title">Разбиты</h1>
-            <div className="frontline" aria-hidden="true" />
-            <p className="dead-msg">Ваша территория захвачена</p>
-            <button className="primary" onClick={() => sendMsg({ type: 'respawn' })}>
-              Реванш
-            </button>
-            <button className="link" onClick={leaveToMenu}>
-              В меню
-            </button>
-          </div>
-        </div>
+        <DeadScreen onRespawn={() => sendMsg({ type: 'respawn' })} onLeave={leaveToMenu} />
       )}
 
       {invadeMenu && (
@@ -1037,30 +881,12 @@ export default function App() {
       )}
 
       {winner && (
-        <div className="overlay">
-          <div className="menu">
-            <h1 className="title">{winner.you ? 'Победа!' : 'Раунд окончен'}</h1>
-            <div className="frontline" aria-hidden="true" />
-            <p className="dead-msg">
-              {winner.you ? (
-                <>Вы захватили мир 🏆</>
-              ) : (
-                <>
-                  🏆 <b>{winner.name}</b> захватил контроль над миром
-                </>
-              )}
-            </p>
-            <button className="primary" onClick={() => sendMsg({ type: 'rematch' })}>
-              Реванш — новая карта
-            </button>
-            <button className="secondary" onClick={() => setWinner(null)}>
-              Продолжить играть
-            </button>
-            <button className="link" onClick={leaveToMenu}>
-              В меню
-            </button>
-          </div>
-        </div>
+        <WinnerModal
+          winner={winner}
+          onRematch={() => sendMsg({ type: 'rematch' })}
+          onContinue={() => setWinner(null)}
+          onLeave={leaveToMenu}
+        />
       )}
     </div>
   );

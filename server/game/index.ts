@@ -33,182 +33,33 @@ import {
   NUKES,
   nukeFlightTicks,
   MissilePub,
-} from '../shared/protocol';
-import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
+} from '../../shared/protocol';
+import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
+import { Player, Building, TradeShip, Missile, Attack, Boat } from './types';
+import {
+  TRADE_SPEED,
+  BOAT_SPEED,
+  RANDOM_W,
+  RANDOM_H,
+  LAND_RATIO,
+  SPAWN_TROOPS,
+  NEUTRAL_COST,
+  GROWTH_SLOW_FROM,
+  WAVE_SPEED,
+  WEAK_COUNT,
+  STRONG_COUNT,
+  WEAK_GROWTH,
+  WEAK_MAX,
+  DIFFICULTY,
+  STRONG_NAMES,
+  weakNames,
+  pickShuffled,
+  chaikin,
+} from './constants';
 
-export interface Player {
-  id: number;
-  name: string;
-  troops: number;
-  maxTroops: number;
-  cells: number;
-  alive: boolean;
-  spawned: boolean; // человек ещё не выбрал точку старта — false
-  bot: boolean;
-  strong: boolean;
-  passive: boolean; // слабые боты-«корм»: только расширяются в нейтраль
-  growthMul: number;
-  maxMul: number; // множитель потолка войск (у корма втрое меньше)
-  money: number;
-  thinkAt: number;
-  spawnTick: number; // когда игрок высадился (для раннего буста роста)
-}
-
-interface Building {
-  id: number;
-  owner: number;
-  cell: number;
-  type: BuildingType;
-  readyTick: number; // тик, на котором постройка завершится
-  level: number; // 1 обычный, 2 взрыв по области, 3 усиленный
-  fuseTick: number; // тик взрыва после захвата (0 = не тикает)
-  upStart: number; // тик начала апгрейда (0 = не улучшается)
-  upEnd: number; // тик завершения апгрейда
-  nextShipTick: number; // порт: когда выпускать следующий корабль
-  ships: number; // порт: кораблей в полёте
-  stock: number; // шахта: заряженных ракет сейчас (0..level)
-  reloadTick: number; // шахта: когда добавить +1 ракету в залп
-}
-
-interface TradeShip {
-  id: number;
-  owner: number;
-  portCell: number; // домашний порт (для учёта кораблей)
-  path: number[]; // маршрут по воде
-  cum: number[];
-  totalLen: number;
-  traveled: number;
-  returning: boolean; // возвращается домой
-  payout: number; // деньги за заход (с учётом уровня и дистанции)
-  done: boolean; // рейс завершён — на удаление
-  x: number;
-  y: number;
-}
-
-interface Missile {
-  id: number;
-  owner: number;
-  kind: string; // ключ в NUKES
-  sx: number; // старт (шахта)
-  sy: number;
-  tx: number; // цель
-  ty: number;
-  targetCell: number;
-  prog: number; // 0..1
-  flightTicks: number; // полное время полёта (по расстоянию)
-  done: boolean;
-}
-
-const TRADE_SPEED = 0.6; // клеток за тик
-
-interface Attack {
-  player: number;
-  target: number; // id владельца-цели, 0 = нейтральная земля
-  troops: number;
-  frontier: Set<number>; // волна захвата, поддерживается инкрементально
-  rescanned: boolean; // полный пересбор фронта уже был после опустошения
-}
-
-interface Boat {
-  id: number;
-  player: number;
-  target: number; // владелец берега-цели на момент отправки
-  troops: number;
-  path: number[]; // маршрут по воде: [x0,y0,x1,y1,...] в клетках
-  cum: number[]; // накопленная дистанция в каждой точке пути (cum[0]=0)
-  totalLen: number; // полная длина маршрута
-  traveled: number; // пройдено вдоль маршрута (0..totalLen)
-  returning: boolean; // отозван — возвращается к старту
-  landCell: number; // клетка берега для высадки
-  x: number; // текущая позиция на маршруте
-  y: number;
-}
-
-const BOAT_SPEED = 0.6; // клеток за тик
-
-const RANDOM_W = 560;
-const RANDOM_H = 560;
-const LAND_RATIO = 0.5;
-const SPAWN_TROOPS = 600;
-const NEUTRAL_COST = 1.4;
-// Рост замедляется, когда войск больше 70% от максимума (за 30% до потолка)
-const GROWTH_SLOW_FROM = 0.7;
-// Доля фронта, захватываемая за тик — задаёт «постепенность» движения границы
-const WAVE_SPEED = 0.15;
-
-// Слабые племена — пассивный «корм»: их всегда 275, они растут вдвое медленнее
-// игрока, имеют втрое меньший потолок и лишь расширяются в нейтраль. Страны
-// (25 штук) — полноценные противники; сложность задаёт их силу относительно
-// игрока и агрессивность.
-export const WEAK_COUNT = 275;
-export const STRONG_COUNT = 25;
-const WEAK_GROWTH = 0.5; // вдвое медленнее игрока
-const WEAK_MAX = 1 / 3; // потолок войск втрое меньше
-
-export const DIFFICULTY: Record<
-  Difficulty,
-  { strongMul: number; aggro: number }
-> = {
-  easy: { strongMul: 0.8, aggro: 0.7 }, // страны слабее игрока
-  normal: { strongMul: 1.0, aggro: 1.0 }, // как игрок
-  hard: { strongMul: 1.2, aggro: 1.25 }, // на 20% сильнее
-  insane: { strongMul: 1.5, aggro: 1.6 }, // на 50% сильнее
-};
-
-// Слабые боты: случайные имена из сочетаний (нужно >= WEAK_COUNT комбинаций)
-const NAME_ADJ = [
-  'Дикие', 'Лесные', 'Степные', 'Горные', 'Северные', 'Южные', 'Багровые',
-  'Чёрные', 'Золотые', 'Серые', 'Огненные', 'Ледяные', 'Тёмные', 'Вольные',
-  'Древние', 'Кровавые', 'Туманные', 'Речные', 'Пустынные', 'Небесные',
-];
-const NAME_NOUN = [
-  'Волки', 'Вороны', 'Медведи', 'Змеи', 'Ястребы', 'Кабаны', 'Лисы', 'Быки',
-  'Драконы', 'Шакалы', 'Тигры', 'Барсы', 'Грифы', 'Псы', 'Рыси', 'Соколы',
-  'Скорпионы', 'Пантеры',
-];
-
-const STRONG_NAMES = [
-  '🇺🇸 США', '🇨🇳 Китай', '🇷🇺 Россия', '🇩🇪 Германия', '🇬🇧 Британия',
-  '🇫🇷 Франция', '🇯🇵 Япония', '🇹🇷 Турция', '🇮🇳 Индия', '🇧🇷 Бразилия',
-  '🇨🇦 Канада', '🇦🇺 Австралия', '🇪🇸 Испания', '🇮🇹 Италия', '🇲🇽 Мексика',
-  '🇰🇷 Корея', '🇮🇩 Индонезия', '🇸🇦 Аравия', '🇦🇷 Аргентина', '🇵🇱 Польша',
-  '🇳🇱 Нидерланды', '🇸🇪 Швеция', '🇨🇭 Швейцария', '🇳🇴 Норвегия', '🇺🇦 Украина',
-  '🇪🇬 Египет', '🇿🇦 ЮАР', '🇳🇬 Нигерия', '🇵🇰 Пакистан', '🇻🇳 Вьетнам',
-  '🇹🇭 Таиланд', '🇬🇷 Греция', '🇵🇹 Португалия', '🇨🇿 Чехия', '🇭🇺 Венгрия',
-  '🇫🇮 Финляндия', '🇩🇰 Дания', '🇮🇪 Ирландия', '🇮🇱 Израиль', '🇰🇿 Казахстан',
-];
-
-function pickShuffled(names: string[], n: number): string[] {
-  const pool = [...names];
-  const out: string[] = [];
-  while (out.length < n && pool.length) {
-    out.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
-  }
-  return out;
-}
-
-function weakNames(n: number): string[] {
-  const combos: string[] = [];
-  for (const a of NAME_ADJ) for (const b of NAME_NOUN) combos.push(`${a} ${b}`);
-  return pickShuffled(combos, n);
-}
-
-// Сглаживание ломаной (углы срезаются по Чайкину), концы сохраняются
-function chaikin(pts: number[]): number[] {
-  const n = pts.length / 2;
-  if (n <= 2) return pts;
-  const out: number[] = [pts[0], pts[1]];
-  for (let i = 0; i < n - 1; i++) {
-    const ax = pts[i * 2];
-    const ay = pts[i * 2 + 1];
-    const bx = pts[(i + 1) * 2];
-    const by = pts[(i + 1) * 2 + 1];
-    out.push(ax * 0.75 + bx * 0.25, ay * 0.75 + by * 0.25);
-    out.push(ax * 0.25 + bx * 0.75, ay * 0.25 + by * 0.75);
-  }
-  out.push(pts[pts.length - 2], pts[pts.length - 1]);
-  return out;
-}
+// Реэкспорт для внешних потребителей (совместимость с прежним API game.ts)
+export type { Player } from './types';
+export { DIFFICULTY, WEAK_COUNT, STRONG_COUNT } from './constants';
 
 export class Game {
   readonly mapType: MapType;
