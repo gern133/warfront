@@ -27,6 +27,12 @@ import {
   CITY_BUILD_TICKS,
   cityCost,
   cityTroopBonus,
+  SILO_COST,
+  SILO_BUILD_TICKS,
+  SILO_RELOAD_TICKS,
+  NUKES,
+  nukeFlightTicks,
+  MissilePub,
 } from '../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
@@ -60,6 +66,8 @@ interface Building {
   upEnd: number; // тик завершения апгрейда
   nextShipTick: number; // порт: когда выпускать следующий корабль
   ships: number; // порт: кораблей в полёте
+  stock: number; // шахта: заряженных ракет сейчас (0..level)
+  reloadTick: number; // шахта: когда добавить +1 ракету в залп
 }
 
 interface TradeShip {
@@ -75,6 +83,20 @@ interface TradeShip {
   done: boolean; // рейс завершён — на удаление
   x: number;
   y: number;
+}
+
+interface Missile {
+  id: number;
+  owner: number;
+  kind: string; // ключ в NUKES
+  sx: number; // старт (шахта)
+  sy: number;
+  tx: number; // цель
+  ty: number;
+  targetCell: number;
+  prog: number; // 0..1
+  flightTicks: number; // полное время полёта (по расстоянию)
+  done: boolean;
 }
 
 const TRADE_SPEED = 0.6; // клеток за тик
@@ -205,6 +227,8 @@ export class Game {
   private nextBuildingId = 1;
   tradeShips: TradeShip[] = [];
   private nextShipId = 1;
+  missiles: Missile[] = []; // ракеты в полёте
+  private nextMissileId = 1;
   tradeEarnings: TradeEarn[] = []; // заработок портов за интервал (чистится в index)
   // связи (симметричные): союзники и враги. Храним только пары с участием
   // человека — бот-vs-бот всегда нейтральны. relChanged — кому переслать обновление.
@@ -257,6 +281,7 @@ export class Game {
     this.boats = [];
     this.buildings = [];
     this.tradeShips = [];
+    this.missiles = [];
     this.tradeEarnings = [];
     this.allies.clear();
     this.hostiles.clear();
@@ -665,6 +690,14 @@ export class Game {
     if (!p?.alive || !p.spawned) return;
     const r = Math.min(1, Math.max(0.05, ratio || 0));
     this.launchAttackOwner(playerId, targetOwner, Math.floor(p.troops * r));
+    // явный клик: пересобираем фронт этой атаки, чтобы захват сразу пошёл и по
+    // только что появившимся клеткам цели (напр. нейтральный кратер от взрыва),
+    // а не ждал, пока опустеет текущий фронт
+    const a = this.attacks.find((x) => x.player === playerId && x.target === targetOwner);
+    if (a) {
+      this.buildFrontier(a);
+      a.rescanned = false;
+    }
   }
 
   // Морское вторжение (ПКМ): десант к берегу цели. true = отправлен
@@ -956,7 +989,7 @@ export class Game {
         : this.nearestOwnCoast(playerId, cell, PORT_RADIUS);
       if (shore < 0) return 'Рядом нет своего берега';
       // порт нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port']))
+      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
         return 'Слишком близко к другому зданию';
       if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
       p.money -= PORT_BUILD_COST;
@@ -972,6 +1005,8 @@ export class Game {
         upEnd: 0,
         nextShipTick: 0,
         ships: 0,
+        stock: 0,
+        reloadTick: 0,
       });
       return null;
     }
@@ -981,7 +1016,7 @@ export class Game {
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       // города нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
         return 'Слишком близко к другому зданию';
       const cost = cityCost(this.cityLevels(playerId));
       if (p.money < cost) return 'Недостаточно денег';
@@ -998,12 +1033,40 @@ export class Game {
         upEnd: 0,
         nextShipTick: 0,
         ships: 0,
+        stock: 0,
+        reloadTick: 0,
+      });
+      return null;
+    }
+    if (bt === 'silo') {
+      // клик рядом со своей шахтой — апгрейд
+      const near = this.nearbyOwnType(playerId, cell, 'silo');
+      if (near) return this.upgrade(playerId, near.cell);
+      if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
+        return 'Слишком близко к другому зданию';
+      if (p.money < SILO_COST) return 'Недостаточно денег';
+      p.money -= SILO_COST;
+      this.buildings.push({
+        id: this.nextBuildingId++,
+        owner: playerId,
+        cell,
+        type: 'silo',
+        readyTick: this.tickNo + SILO_BUILD_TICKS,
+        level: 1,
+        fuseTick: 0,
+        upStart: 0,
+        upEnd: 0,
+        nextShipTick: 0,
+        ships: 0,
+        stock: 1, // одна ракета готова к пуску после постройки
+        reloadTick: 0,
       });
       return null;
     }
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
-    // штаб нельзя ставить впритык к другому штабу/порту/городу
-    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']))
+    // штаб нельзя ставить впритык к другому штабу/порту/городу/шахте
+    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo']))
       return 'Слишком близко к другому зданию';
     const cost = hqCost(this.hqCount(playerId));
     if (p.money < cost) return 'Недостаточно денег';
@@ -1020,6 +1083,8 @@ export class Game {
       upEnd: 0,
       nextShipTick: 0,
       ships: 0,
+      stock: 0,
+      reloadTick: 0,
     });
     // укрепление появится, когда постройка завершится (см. tick)
     return null;
@@ -1047,6 +1112,14 @@ export class Game {
       return null;
     }
     if (b.upEnd > 0) return 'Уже улучшается';
+    if (b.type === 'silo') {
+      // шахта: апгрейд по 1млн, идёт 5с; уровень = размер залпа
+      if (p.money < SILO_COST) return 'Недостаточно денег';
+      p.money -= SILO_COST;
+      b.upStart = this.tickNo;
+      b.upEnd = this.tickNo + SILO_BUILD_TICKS;
+      return null;
+    }
     if (b.level >= MAX_HQ_LEVEL) return 'Максимальный уровень';
     const toLevel = b.level + 1;
     const cost = hqUpgradeCost(toLevel);
@@ -1266,22 +1339,117 @@ export class Game {
     }));
   }
 
+  // --- Ракетные шахты и ядерные удары ---
+  // Перезарядка залпа: +1 ракета раз в SILO_RELOAD_TICKS до потолка (= уровень)
+  private reloadSilos() {
+    for (const b of this.buildings) {
+      if (b.type !== 'silo' || this.tickNo < b.readyTick) continue;
+      if (b.stock >= b.level) continue;
+      if (this.tickNo >= b.reloadTick) {
+        b.stock++;
+        b.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+      }
+    }
+  }
+
+  // Пуск ракеты из ближайшей заряженной шахты игрока в клетку cell.
+  launchNuke(playerId: number, cell: number, kind = 'basic'): string | null {
+    const p = this.players.get(playerId);
+    if (!p?.alive || !p.spawned) return 'Нельзя';
+    if (cell < 0 || cell >= this.cells) return 'Неверная цель';
+    const spec = NUKES[kind];
+    if (!spec) return 'Неизвестная ракета';
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    // ближайшая своя достроенная шахта с зарядом
+    let silo: Building | undefined;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'silo' || b.owner !== playerId) continue;
+      if (this.tickNo < b.readyTick || b.stock <= 0) continue;
+      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        silo = b;
+      }
+    }
+    if (!silo) return 'Нет заряженной шахты';
+    if (p.money < spec.cost) return 'Недостаточно денег';
+    p.money -= spec.cost;
+    silo.stock--;
+    // если шахта была полной — запускаем таймер перезарядки
+    if (silo.reloadTick <= this.tickNo) silo.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+    const sx = (silo.cell % this.w) + 0.5;
+    const sy = ((silo.cell / this.w) | 0) + 0.5;
+    const dist = Math.hypot(cx + 0.5 - sx, cy + 0.5 - sy);
+    this.missiles.push({
+      id: this.nextMissileId++,
+      owner: playerId,
+      kind,
+      sx,
+      sy,
+      tx: cx + 0.5,
+      ty: cy + 0.5,
+      targetCell: cell,
+      prog: 0,
+      flightTicks: nukeFlightTicks(spec, dist), // время полёта — по расстоянию
+      done: false,
+    });
+    return null;
+  }
+
+  private stepMissiles() {
+    if (!this.missiles.length) return;
+    for (const m of this.missiles) {
+      const spec = NUKES[m.kind];
+      m.prog += 1 / Math.max(1, m.flightTicks);
+      if (m.prog >= 1) {
+        m.done = true;
+        this.detonate(m.targetCell, spec?.radius ?? HQ_EXPLODE_RADIUS * 2, spec?.armyFrac ?? 0.25);
+      }
+    }
+    if (this.missiles.some((m) => m.done)) {
+      this.missiles = this.missiles.filter((m) => !m.done);
+    }
+  }
+
+  missilesPub(): MissilePub[] {
+    return this.missiles.map((m) => ({
+      id: m.id,
+      owner: m.owner,
+      kind: m.kind,
+      sx: m.sx,
+      sy: m.sy,
+      tx: m.tx,
+      ty: m.ty,
+      prog: Math.min(1, m.prog),
+    }));
+  }
+
   // Захват/фитиль/взрыв щитов. Вызывается каждый тик (зданий немного).
   private checkBuildings() {
     const remove = new Set<Building>();
     const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
-      // порт/город: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
-      if (b.type === 'port' || b.type === 'city') {
+      // порт/город/шахта: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
+      if (b.type === 'port' || b.type === 'city' || b.type === 'silo') {
         const now = this.owners[b.cell];
         if (now !== b.owner) {
           if (now > 0 && this.players.get(now)?.alive) {
-            b.owner = now; // новый хозяин; корабли прежнего владельца сами исчезнут
+            b.owner = now; // новый хозяин
             b.nextShipTick = this.tickNo + PORT_SHIP_INTERVAL;
+            b.stock = 0; // шахта достаётся разряженной
+            b.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
+            b.upStart = 0;
+            b.upEnd = 0;
           } else {
             remove.add(b);
           }
+        } else if (b.type === 'silo' && b.upEnd > 0 && this.tickNo >= b.upEnd) {
+          b.level++; // апгрейд шахты завершён — залп увеличился
+          b.upStart = 0;
+          b.upEnd = 0;
         }
         continue;
       }
@@ -1332,13 +1500,20 @@ export class Game {
     }
   }
 
-  // Взрыв прокачанного щита: обнуляет территорию вокруг (урон по области) и
-  // отнимает у каждого задетого игрока долю армии, равную доле уничтоженной
-  // территории от его общей
+  // Взрыв прокачанного щита: 3 ур. — двойной радиус и 25% армии; иначе базовый
+  // радиус и урон по армии пропорционально доле уничтоженной территории
   private explode(cell: number, level: number) {
+    const R = level >= 3 ? HQ_EXPLODE_RADIUS * 2 : HQ_EXPLODE_RADIUS;
+    this.detonate(cell, R, level >= 3 ? 0.25 : -1);
+  }
+
+  // Общий взрыв по области: обнуляет территорию в радиусе R и бьёт по армии
+  // каждого задетого игрока. armyFrac >= 0 — фиксированная доля армии; < 0 —
+  // пропорционально доле потерянной территории. Параметры варьируются по типу
+  // оружия (щит/ядерка/будущие ракеты).
+  private detonate(cell: number, R: number, armyFrac: number) {
     const cx = cell % this.w;
     const cy = (cell / this.w) | 0;
-    const R = level >= 3 ? HQ_EXPLODE_RADIUS * 2 : HQ_EXPLODE_RADIUS; // 3 ур. — вдвое больше
     const R2 = R * R;
     const inBlast: number[] = [];
     const lost = new Map<number, number>(); // владелец -> сколько клеток теряет
@@ -1357,12 +1532,10 @@ export class Game {
         }
       }
     }
-    // урон по армии: 3 ур. — 25% от текущих войск, иначе доля уничтоженной
-    // территории от всей (считаем до обнуления клеток)
     for (const [owner, n] of lost) {
       const p = this.players.get(owner);
       if (p && p.cells > 0) {
-        const frac = level >= 3 ? 0.25 : n / p.cells;
+        const frac = armyFrac >= 0 ? armyFrac : n / p.cells;
         p.troops = Math.max(0, p.troops - p.troops * frac);
       }
     }
@@ -1469,8 +1642,17 @@ export class Game {
         // человек: автоматически расширяется в свободную нейтраль за счёт
         // излишка войск, чтобы территория и потолок росли без кликов
         p.thinkAt = this.tickNo + (early > 0 ? 10 : 15);
-        if (p.troops > p.maxTroops * 0.5 && this.hasNeutralBorder(p.id)) {
-          this.launchAttackOwner(p.id, 0, Math.floor(p.troops * 0.15));
+        if (this.hasNeutralBorder(p.id)) {
+          if (early > 0) {
+            // ранняя игра: агрессивно осваиваем нейтраль (быстрый старт)
+            if (p.troops > p.maxTroops * 0.5) {
+              this.launchAttackOwner(p.id, 0, Math.floor(p.troops * 0.15));
+            }
+          } else if (p.troops > p.maxTroops * 0.75) {
+            // поздняя игра: тратим только излишек над 75% лимита и мягко —
+            // огромная армия НЕ сливается в ноль (в т.ч. отвоёвывая кратеры)
+            this.launchAttackOwner(p.id, 0, Math.floor((p.troops - p.maxTroops * 0.75) * 0.3));
+          }
         }
       }
     }
@@ -1478,6 +1660,8 @@ export class Game {
     this.stepBoats();
     this.spawnTradeShips();
     this.stepTradeShips();
+    this.reloadSilos();
+    this.stepMissiles();
     for (const a of this.attacks) this.stepAttack(a);
     this.attacks = this.attacks.filter(
       (a) => a.troops >= 1 && this.players.get(a.player)?.alive
@@ -1641,6 +1825,8 @@ export class Game {
     const cells = this.playerCells(p.id);
     const step = Math.max(1, Math.floor(cells.length / 1500));
     const counts = new Map<number, number>();
+    let enemyFrom = -1; // своя клетка на границе с врагом
+    let enemyTo = -1; // соседняя вражеская клетка (для наведения ядерки)
     for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
       const c = cells[i];
       if (this.owners[c] !== p.id) continue; // протухшая запись
@@ -1648,6 +1834,10 @@ export class Game {
         if (this.terrain[n] && this.owners[n] !== p.id) {
           const o = this.owners[n];
           counts.set(o, (counts.get(o) || 0) + 1);
+          if (o > 0) {
+            enemyFrom = c;
+            enemyTo = n;
+          }
         }
       });
     }
@@ -1685,7 +1875,7 @@ export class Game {
       if (myCities < 3 && p.money >= cityCost(this.cityLevels(p.id))) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
             this.build(p.id, 'city', c);
             break;
           }
@@ -1695,11 +1885,43 @@ export class Game {
       if (myHqs < 2 && p.money >= hqCost(myHqs)) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
             this.build(p.id, 'hq', c);
             break;
           }
         }
+      }
+      // ракетная шахта (дорогая — одна на страну, если разбогатела)
+      const mySilos = this.buildings.filter((b) => b.owner === p.id && b.type === 'silo').length;
+      if (mySilos < 1 && p.money >= SILO_COST) {
+        for (let i = 0; i < cells.length; i += step) {
+          const c = cells[i];
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo'])) {
+            this.build(p.id, 'silo', c);
+            break;
+          }
+        }
+      }
+      // пуск ядерки по врагу: если есть заряженная шахта, деньги и цель рядом.
+      // редко (гейт), цель — вглубь врага, чтобы не накрыть себя
+      if (
+        enemyTo >= 0 &&
+        Math.random() < 0.15 &&
+        p.money >= NUKES.basic.cost &&
+        this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
+      ) {
+        const R = NUKES.basic.radius;
+        const fx = enemyFrom % this.w;
+        const fy = (enemyFrom / this.w) | 0;
+        const ex = enemyTo % this.w;
+        const ey = (enemyTo / this.w) | 0;
+        const dx = ex - fx;
+        const dy = ey - fy;
+        const len = Math.hypot(dx, dy) || 1;
+        // сдвигаем цель на ~радиус вглубь территории врага
+        const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
+        const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
+        this.launchNuke(p.id, ty * this.w + tx);
       }
     }
 
@@ -1749,6 +1971,7 @@ export class Game {
         b.upEnd > b.upStart
           ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
           : 0,
+      ammo: b.type === 'silo' ? b.stock : 0,
     }));
   }
 

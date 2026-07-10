@@ -344,6 +344,11 @@ button {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
+.build-hint.nuke-hint {
+  background: rgba(70, 25, 20, 0.92);
+  border-color: #ff5a2a;
+}
+
 /* входящие морские десанты — над блоком войск, клик фокусит на агрессоре */
 .incoming {
   display: flex;

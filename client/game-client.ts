@@ -6,6 +6,8 @@ import {
   BuildingType,
   TradeShipPub,
   TradeEarn,
+  MissilePub,
+  NUKES,
   HQ_RADIUS,
   HQ_EXPLODE_RADIUS,
   PORT_RADIUS,
@@ -55,11 +57,13 @@ export class GameClient {
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
   buildMode: BuildingType | null = null;
+  nukeMode = false; // режим наведения ядерного удара (клик = пуск)
   private hoverCell = -1;
+  private missiles: MissilePub[] = []; // ракеты в полёте
   private buildings: BuildingPub[] = [];
   private fortField = new Int16Array(0); // владелец штаба на клетку (укрепления)
   private buildingsSig = '';
-  private flashes: { cell: number; t0: number; big: boolean }[] = []; // вспышки взрыва
+  private flashes: { cell: number; t0: number; big: boolean; nuke?: boolean }[] = []; // вспышки взрыва
   private boatCum = new Map<
     number,
     { len: number; cum: number[]; total: number; wob: Float64Array }
@@ -135,6 +139,7 @@ export class GameClient {
     this.buildingsSig = '';
     this.moneyPops = [];
     this.ships = [];
+    this.missiles = [];
     this.fortField = new Int16Array(this.cells);
     this.buildNeutralColors();
     this.repaintAll();
@@ -225,6 +230,21 @@ export class GameClient {
 
   setShips(ships: TradeShipPub[]) {
     this.ships = ships ?? [];
+  }
+
+  setMissiles(missiles: MissilePub[]) {
+    const next = missiles ?? [];
+    // ракета исчезла из списка = долетела → большая вспышка ядерного взрыва в цели
+    if (this.missiles.length) {
+      const nextIds = new Set(next.map((m) => m.id));
+      for (const m of this.missiles) {
+        if (!nextIds.has(m.id)) {
+          const cell = (Math.floor(m.ty) | 0) * this.w + (Math.floor(m.tx) | 0);
+          this.flashes.push({ cell, t0: performance.now(), big: true, nuke: true });
+        }
+      }
+    }
+    this.missiles = next;
   }
 
   // заработок портов — показываем только свои (КПД игрока)
@@ -792,6 +812,60 @@ export class GameClient {
     }
   }
 
+  // Ракеты: баллистическая дуга, трассер за головой, светящийся кружок, кольцо
+  // радиуса поражения в цели
+  private drawMissiles(ctx: CanvasRenderingContext2D, dpr: number) {
+    if (!this.missiles.length) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const px = this.panX;
+    const py = this.panY;
+    const z = this.zoom;
+    for (const m of this.missiles) {
+      const dist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
+      const arc = Math.min(dist * 0.4, 140); // высота дуги в клетках
+      const pos = (t: number): [number, number] => {
+        const gx = m.sx + (m.tx - m.sx) * t;
+        const gy = m.sy + (m.ty - m.sy) * t;
+        const lift = arc * Math.sin(Math.PI * t);
+        return [px + gx * z, py + gy * z - lift * z];
+      };
+      // кольцо радиуса поражения в цели
+      const spec = NUKES[m.kind];
+      if (spec) {
+        const [tx, ty] = pos(1);
+        ctx.beginPath();
+        ctx.arc(tx, ty, spec.radius * z, 0, Math.PI * 2);
+        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255,80,40,0.5)';
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // трассер 0..prog
+      const steps = 26;
+      ctx.beginPath();
+      for (let i = 0; i <= steps; i++) {
+        const [x, y] = pos((i / steps) * m.prog);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,215,120,0.55)';
+      ctx.stroke();
+      // светящаяся голова
+      const [hx, hy] = pos(Math.min(1, m.prog));
+      const rad = Math.max(3, Math.min(8, z * 1.3));
+      ctx.save();
+      ctx.shadowColor = '#ffcf4d';
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.arc(hx, hy, rad, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff2b0';
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
   // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
   private drawBuildings(ctx: CanvasRenderingContext2D, dpr: number) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -805,6 +879,47 @@ export class GameClient {
       const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
       if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue; // вне экрана
+      if (b.type === 'silo') {
+        const buildingP = b.progress < 1;
+        const upgrading = b.upProgress > 0 && b.upProgress < 1;
+        ctx.globalAlpha = buildingP ? 0.55 : 1;
+        ctx.fillStyle = '#2a0f0f';
+        ctx.strokeStyle = playerColorCSS(b.owner);
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = `${r * 1.1}px sans-serif`;
+        ctx.fillText('🚀', sx, sy + 1);
+        // заряд/залп справа-сверху (напр. 2/3) — только достроенная
+        if (!buildingP) {
+          const fs = Math.max(9, r * 0.85);
+          ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+          ctx.lineWidth = Math.max(2, fs / 5);
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+          ctx.fillStyle = b.ammo > 0 ? '#ffd27a' : '#ff6a55';
+          const txt = `${b.ammo}/${b.level}`;
+          ctx.strokeText(txt, sx + r, sy - r);
+          ctx.fillText(txt, sx + r, sy - r);
+        }
+        ctx.globalAlpha = 1;
+        if (buildingP || upgrading) {
+          const prog = buildingP ? b.progress : b.upProgress;
+          const bw = r * 2.4;
+          const bh = Math.max(3, r * 0.35);
+          const bx = sx - bw / 2;
+          const by = sy - r - bh - 3;
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = buildingP ? '#ff7a2a' : '#4dd2ff';
+          ctx.fillRect(bx, by, bw * prog, bh);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        continue;
+      }
       if (b.type === 'city') {
         const buildingP = b.progress < 1;
         ctx.globalAlpha = buildingP ? 0.55 : 1;
@@ -934,20 +1049,22 @@ export class GameClient {
         ctx.fillText(Math.ceil(b.fuse) + 'с', sx, sy - r - fs * 0.7);
       }
     }
-    // вспышки взрыва (расширяющийся круг, ~0.6с)
-    this.flashes = this.flashes.filter((f) => now - f.t0 < 600);
+    // вспышки взрыва (расширяющийся круг). Ядерка — крупнее и дольше.
+    this.flashes = this.flashes.filter((f) => now - f.t0 < (f.nuke ? 1000 : 600));
     for (const f of this.flashes) {
-      const p = (now - f.t0) / 600;
+      const dur = f.nuke ? 1000 : 600;
+      const p = (now - f.t0) / dur;
       const sx = this.panX + (f.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((f.cell / this.w | 0) + 0.5) * this.zoom;
-      const maxR = (f.big ? HQ_EXPLODE_RADIUS : r / this.zoom + 2) * this.zoom;
+      const cellsR = f.nuke ? HQ_EXPLODE_RADIUS * 2 : f.big ? HQ_EXPLODE_RADIUS : r / this.zoom + 2;
+      const maxR = cellsR * this.zoom;
       ctx.globalAlpha = (1 - p) * 0.8;
       ctx.beginPath();
       ctx.arc(sx, sy, maxR * (0.3 + p * 0.7), 0, Math.PI * 2);
-      ctx.fillStyle = f.big ? 'rgba(255,120,40,0.5)' : 'rgba(255,180,60,0.5)';
+      ctx.fillStyle = f.nuke ? 'rgba(255,90,20,0.55)' : f.big ? 'rgba(255,120,40,0.5)' : 'rgba(255,180,60,0.5)';
       ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#ff8a2a';
+      ctx.lineWidth = f.nuke ? 5 : 3;
+      ctx.strokeStyle = f.nuke ? '#ffdd55' : '#ff8a2a';
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
@@ -1070,6 +1187,31 @@ export class GameClient {
       ctx.fillText('🛡', sx, sy + 1);
       ctx.globalAlpha = 1;
     }
+    // наведение ядерного удара: прицел + радиус поражения под курсором
+    if (this.nukeMode && this.hoverCell >= 0) {
+      const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
+      const blast = NUKES.basic.radius * this.zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, blast, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,60,30,0.18)';
+      ctx.fill();
+      ctx.setLineDash([6, 5]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,80,40,0.9)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // перекрестие
+      const cr = Math.max(8, this.zoom * 3);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ff4d22';
+      ctx.beginPath();
+      ctx.moveTo(sx - cr, sy);
+      ctx.lineTo(sx + cr, sy);
+      ctx.moveTo(sx, sy - cr);
+      ctx.lineTo(sx, sy + cr);
+      ctx.stroke();
+    }
   }
 
   private drawMinimap() {
@@ -1182,6 +1324,7 @@ export class GameClient {
         this.drawNames(ctx, dpr);
         this.drawShips(ctx, dpr);
         this.drawBuildings(ctx, dpr);
+        this.drawMissiles(ctx, dpr);
         this.drawMinimap();
       }
       raf = requestAnimationFrame(loop);
@@ -1212,7 +1355,7 @@ export class GameClient {
       return cy * this.w + cx;
     };
     const onMove = (e: PointerEvent) => {
-      if (this.buildMode) this.hoverCell = cellUnder(e); // предпросмотр здания
+      if (this.buildMode || this.nukeMode) this.hoverCell = cellUnder(e); // предпросмотр здания/цели
       if (!down) return;
       if (panning || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
         panning = true;

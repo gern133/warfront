@@ -17,6 +17,8 @@ import {
   PORT_BUILD_COST,
   cityCost,
   cityTroopBonus,
+  SILO_COST,
+  NUKES,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
@@ -59,7 +61,7 @@ const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
   { icon: '🏭', bt: null, name: 'Завод' },
   { icon: '⚓', bt: 'port', name: 'Торговый порт' },
   { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
-  { icon: '🎯', bt: null, name: 'Ракета' },
+  { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },
   { icon: '📡', bt: null, name: 'Радар' },
   { icon: '🚢', bt: null, name: 'Флот' },
   { icon: '☢️', bt: null, name: 'Ядерка' },
@@ -81,6 +83,7 @@ export default function App() {
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
+  const [nukeMode, setNukeMode] = useState(false); // наведение ядерного удара (клик = пуск)
   const [shownMoney, setShownMoney] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [humans, setHumans] = useState(1);
@@ -109,9 +112,13 @@ export default function App() {
   const liveMoney = useRef(0);
   const buildModeRef = useRef<BuildingType | null>(null);
   buildModeRef.current = buildMode;
+  const nukeModeRef = useRef(false);
+  nukeModeRef.current = nukeMode;
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
   const canBuildCityRef = useRef(false);
+  const canBuildSiloRef = useRef(false);
+  const canNukeRef = useRef(false);
   const needFocus = useRef(false); // отложенный автозум к спавну
   const speedRef = useRef(1);
   speedRef.current = speed;
@@ -130,6 +137,7 @@ export default function App() {
   if (!gcRef.current) gcRef.current = new GameClient();
   const gc = gcRef.current;
   gc.buildMode = buildMode; // синхронизируем режим постройки с движком
+  gc.nukeMode = nukeMode; // и режим наведения ядерки
 
   const sendMsg = (msg: object) => wsRef.current?.send(JSON.stringify(msg));
 
@@ -141,7 +149,13 @@ export default function App() {
       if (phaseRef.current === 'spawn') {
         sendMsg({ type: 'spawn', cell });
       } else if (phaseRef.current === 'playing') {
-        // клик по своему штабу — меню прокачки, иначе атака
+        // режим наведения ядерки — клик = пуск в цель, выходим из режима
+        if (nukeModeRef.current) {
+          sendMsg({ type: 'nuke', cell });
+          setNukeMode(false);
+          return;
+        }
+        // клик по своему зданию — меню прокачки, иначе атака
         const myHq = gc.buildingAt(cell);
         if (myHq && myHq.owner === gc.selfId && myHq.progress >= 1) {
           setUpgradeMenu({ cell, x: sx, y: sy, level: myHq.level });
@@ -198,6 +212,7 @@ export default function App() {
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
         gc.setShips(msg.ships ?? []);
+        gc.setMissiles(msg.missiles ?? []);
         gc.addEarnings(msg.earnings ?? []);
         setAttacks(upAttacks);
         setBoats(upBoats);
@@ -310,6 +325,10 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (nukeModeRef.current) {
+          setNukeMode(false);
+          return;
+        }
         if (buildModeRef.current) {
           setBuildMode(null);
           return;
@@ -323,15 +342,24 @@ export default function App() {
         else leaveToMenu();
         return;
       }
-      // хоткеи панели зданий 1–0 (в игре): активны штаб (4) и порт (3)
+      // хоткеи панели 1–0 (в игре): здания (1 город,3 порт,4 штаб,5 шахта) и ядерка (8)
       if (phaseRef.current === 'playing' && /^[0-9]$/.test(e.key)) {
         const idx = e.key === '0' ? 9 : +e.key - 1;
+        if (idx === 7) {
+          // ☢️ — режим наведения ядерного удара
+          if (canNukeRef.current) setNukeMode((v) => !v);
+          return;
+        }
         const bt = TOOLS[idx]?.bt;
         // не хватает денег — префаб выбрать нельзя
         if (bt === 'hq' && !canBuildHqRef.current) return;
         if (bt === 'port' && !canBuildPortRef.current) return;
         if (bt === 'city' && !canBuildCityRef.current) return;
-        if (bt) setBuildMode((bm) => (bm === bt ? null : bt));
+        if (bt === 'silo' && !canBuildSiloRef.current) return;
+        if (bt) {
+          setNukeMode(false);
+          setBuildMode((bm) => (bm === bt ? null : bt));
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -369,6 +397,13 @@ export default function App() {
   const myHqs = buildings.filter((b) => b.owner === gc.selfId && b.type === 'hq').length;
   const myPorts = buildings.filter((b) => b.owner === gc.selfId && b.type === 'port').length;
   const myCities = buildings.filter((b) => b.owner === gc.selfId && b.type === 'city').length;
+  const mySilos = buildings.filter((b) => b.owner === gc.selfId && b.type === 'silo').length;
+  // суммарный заряд достроенных шахт (сколько ракет готово к пуску)
+  const nukeAmmo = buildings.reduce(
+    (s, b) => (b.owner === gc.selfId && b.type === 'silo' && b.progress >= 1 ? s + b.ammo : s),
+    0
+  );
+  const nukeReady = nukeAmmo > 0;
   // суммарный уровень моих городов → цена следующей покупки города (в общем)
   const myCityLevels = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'city')
@@ -386,6 +421,10 @@ export default function App() {
   canBuildPortRef.current = shownMoney >= Math.min(PORT_BUILD_COST, cheapestPortUpg);
   // город (клавиша 1): и постройка, и апгрейд стоят одинаково — по сумме уровней
   canBuildCityRef.current = shownMoney >= nextCityCost;
+  // шахта (клавиша 5): постройка и апгрейд по 1млн
+  canBuildSiloRef.current = shownMoney >= SILO_COST;
+  // ядерка (клавиша 8): нужна заряженная шахта и деньги на пуск
+  canNukeRef.current = nukeReady && shownMoney >= NUKES.basic.cost;
 
   return (
     <div className="app">
@@ -515,6 +554,16 @@ export default function App() {
               Кликните в глубине своей земли — город (+лимит войск); рядом с городом — апгрейд (Esc)
             </div>
           )}
+          {buildMode === 'silo' && (
+            <div className="build-hint">
+              Кликните в глубине своей земли — ракетная шахта; рядом с шахтой — апгрейд (Esc)
+            </div>
+          )}
+          {nukeMode && (
+            <div className="build-hint nuke-hint">
+              ☢️ Кликните цель — ракета вылетит из ближайшей шахты ({fmtK(NUKES.basic.cost)}). Esc — отмена
+            </div>
+          )}
           <div className="panel hud">
             <div className="hud-top">
               <span className="growth-chip">
@@ -552,20 +601,39 @@ export default function App() {
 
             <div className="toolbar">
               {TOOLS.map((t, i) => {
-                const active = t.bt === 'hq' || t.bt === 'port' || t.bt === 'city';
-                const cost =
-                  t.bt === 'port' ? PORT_BUILD_COST : t.bt === 'city' ? nextCityCost : nextHqCost;
-                const count =
-                  t.bt === 'port' ? myPorts : t.bt === 'city' ? myCities : t.bt === 'hq' ? myHqs : 0;
-                // порт/город доступны, если хватает на новый ИЛИ на апгрейд своего
-                const afford =
-                  t.bt === 'port'
+                const isNuke = i === 7; // ☢️ — действие (пуск), не постройка
+                const active = isNuke || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo';
+                const cost = isNuke
+                  ? NUKES.basic.cost
+                  : t.bt === 'port'
+                    ? PORT_BUILD_COST
+                    : t.bt === 'city'
+                      ? nextCityCost
+                      : t.bt === 'silo'
+                        ? SILO_COST
+                        : nextHqCost;
+                const count = isNuke
+                  ? nukeAmmo
+                  : t.bt === 'port'
+                    ? myPorts
+                    : t.bt === 'city'
+                      ? myCities
+                      : t.bt === 'silo'
+                        ? mySilos
+                        : t.bt === 'hq'
+                          ? myHqs
+                          : 0;
+                const afford = isNuke
+                  ? canNukeRef.current
+                  : t.bt === 'port'
                     ? canBuildPortRef.current
                     : t.bt === 'city'
                       ? canBuildCityRef.current
-                      : shownMoney >= cost;
+                      : t.bt === 'silo'
+                        ? canBuildSiloRef.current
+                        : shownMoney >= cost;
                 const usable = active && afford;
-                const selected = buildMode === t.bt && active;
+                const selected = isNuke ? nukeMode : buildMode === t.bt && active;
                 return (
                   <button
                     key={i}
@@ -575,10 +643,19 @@ export default function App() {
                     disabled={!usable}
                     title={
                       active
-                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : ' — не хватает денег'}`
+                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (isNuke ? ' — нужна заряженная шахта' : ' — не хватает денег')}`
                         : `${t.name} — скоро`
                     }
-                    onClick={() => usable && t.bt && setBuildMode(selected ? null : t.bt)}
+                    onClick={() => {
+                      if (!usable) return;
+                      if (isNuke) {
+                        setBuildMode(null);
+                        setNukeMode((v) => !v);
+                      } else if (t.bt) {
+                        setNukeMode(false);
+                        setBuildMode(selected ? null : t.bt);
+                      }
+                    }}
                   >
                     <span className="tool-key">{(i + 1) % 10}</span>
                     <span className="tool-icon">{t.icon}</span>
@@ -858,6 +935,31 @@ export default function App() {
             {(() => {
               const b = gc.buildingAt(upgradeMenu.cell);
               const lvl = b?.level ?? upgradeMenu.level;
+              if (b?.type === 'silo') {
+                const upgrading = (b.upProgress ?? 0) > 0;
+                return (
+                  <>
+                    <div className="ctx-title">🚀 Ракетная шахта · ур. {lvl}</div>
+                    <div className="ctx-note">
+                      Залп: {b.ammo}/{lvl} ракет · апгрейд +1 к залпу
+                    </div>
+                    {upgrading ? (
+                      <div className="ctx-note">Улучшается…</div>
+                    ) : (
+                      <button
+                        className="ctx-btn"
+                        disabled={shownMoney < SILO_COST}
+                        onClick={() => {
+                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                          setUpgradeMenu(null);
+                        }}
+                      >
+                        ⚡ До {lvl + 1} ур. · {fmtK(SILO_COST)} · 5с
+                      </button>
+                    )}
+                  </>
+                );
+              }
               if (b?.type === 'city') {
                 const toLevel = lvl + 1;
                 const cost = nextCityCost;

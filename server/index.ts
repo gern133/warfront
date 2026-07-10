@@ -344,6 +344,13 @@ wss.on('connection', (ws) => {
         if (err) send(ws, { type: 'error', message: err });
         break;
       }
+      case 'nuke': {
+        const room = st.room;
+        if (!room || room.phase !== 'running' || st.playerId === null) return;
+        const err = room.game.launchNuke(st.playerId, msg.cell | 0, msg.kind || 'basic');
+        if (err) send(ws, { type: 'error', message: err });
+        break;
+      }
       case 'propose': {
         const room = st.room;
         if (!room || room.phase !== 'running' || st.playerId === null) return;
@@ -464,6 +471,7 @@ setInterval(() => {
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),
       ships: game.tradeShipsPub(),
+      missiles: game.missilesPub(),
       earnings: game.tradeEarnings,
       speed: room.speed,
       humans: room.clients.size,
