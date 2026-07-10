@@ -54,11 +54,17 @@ export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr:
       ctx.stroke();
       ctx.setLineDash([]);
     }
-    // цвет: ядерка — жёлто-оранжевая, перехватчик ПВО — бирюзовый
-    const trail = m.intercept ? 'rgba(90,230,255,0.6)' : 'rgba(255,215,120,0.55)';
-    const glow = m.intercept ? '#4de1ff' : '#ffcf4d';
-    const head = m.intercept ? '#d6fbff' : '#fff2b0';
-    // трассер 0..prog
+    // цвет/размер: ядерка — жёлто-оранжевая; перехватчик — бирюзовый;
+    // водородная — крупнее (×1.5), ярче, с сильным малиново-оранжевым свечением
+    const hydro = m.kind === 'hydro';
+    const trail = m.intercept
+      ? 'rgba(90,230,255,0.6)'
+      : hydro
+        ? 'rgba(255,140,60,0.8)'
+        : 'rgba(255,215,120,0.55)';
+    const glow = m.intercept ? '#4de1ff' : hydro ? '#ff5a2a' : '#ffcf4d';
+    const head = m.intercept ? '#d6fbff' : hydro ? '#ffffff' : '#fff2b0';
+    // трассер 0..prog (у водородной — толще)
     const steps = 26;
     ctx.beginPath();
     for (let i = 0; i <= steps; i++) {
@@ -66,15 +72,25 @@ export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr:
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
-    ctx.lineWidth = 2;
+    ctx.lineWidth = hydro ? 3.5 : 2;
     ctx.strokeStyle = trail;
     ctx.stroke();
-    // светящаяся голова
+    // светящаяся голова (у водородной — крупнее и с ореолом-свечением)
     const [hx, hy] = pos(Math.min(1, m.prog));
-    const rad = Math.max(3, Math.min(8, z * 1.3));
+    const rad = Math.max(3, Math.min(8, z * 1.3)) * (hydro ? 1.5 : 1);
     ctx.save();
     ctx.shadowColor = glow;
-    ctx.shadowBlur = 18;
+    ctx.shadowBlur = hydro ? 34 : 18;
+    if (hydro) {
+      // мягкий ореол вокруг головы — видно, что летит гидро-бомба
+      const halo = ctx.createRadialGradient(hx, hy, 0, hx, hy, rad * 3);
+      halo.addColorStop(0, 'rgba(255,120,50,0.55)');
+      halo.addColorStop(1, 'rgba(255,120,50,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(hx, hy, rad * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.beginPath();
     ctx.arc(hx, hy, rad, 0, Math.PI * 2);
     ctx.fillStyle = head;

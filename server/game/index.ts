@@ -1889,15 +1889,17 @@ export class Game {
           }
         }
       }
-      // пуск ядерки по врагу: если есть заряженная шахта, деньги и цель рядом.
-      // редко (гейт), цель — вглубь врага, чтобы не накрыть себя
+      // пуск ракеты по врагу: если есть заряженная шахта, деньги и цель рядом.
+      // редко (гейт), цель — вглубь врага, чтобы не накрыть себя. Если богат —
+      // иногда бьёт водородной (мощнее и дальнобойнее)
       if (
         enemyTo >= 0 &&
         Math.random() < 0.15 &&
         p.money >= NUKES.basic.cost &&
         this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
       ) {
-        const R = NUKES.basic.radius;
+        const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.35 ? 'hydro' : 'basic';
+        const R = NUKES[kind].radius;
         const fx = enemyFrom % this.w;
         const fy = (enemyFrom / this.w) | 0;
         const ex = enemyTo % this.w;
@@ -1908,7 +1910,7 @@ export class Game {
         // сдвигаем цель на ~радиус вглубь территории врага
         const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
         const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
-        this.launchNuke(p.id, ty * this.w + tx);
+        this.launchNuke(p.id, ty * this.w + tx, kind);
       }
     }
 

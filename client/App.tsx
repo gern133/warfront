@@ -44,7 +44,7 @@ export default function App() {
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
-  const [nukeMode, setNukeMode] = useState(false); // наведение ядерного удара (клик = пуск)
+  const [nukeKind, setNukeKind] = useState<string | null>(null); // выбранная ракета для наведения
   const [shownMoney, setShownMoney] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [humans, setHumans] = useState(1);
@@ -73,14 +73,14 @@ export default function App() {
   const liveMoney = useRef(0);
   const buildModeRef = useRef<BuildingType | null>(null);
   buildModeRef.current = buildMode;
-  const nukeModeRef = useRef(false);
-  nukeModeRef.current = nukeMode;
+  const nukeKindRef = useRef<string | null>(null);
+  nukeKindRef.current = nukeKind;
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
   const canBuildCityRef = useRef(false);
   const canBuildSiloRef = useRef(false);
   const canBuildSamRef = useRef(false);
-  const canNukeRef = useRef(false);
+  const nukeAffordRef = useRef<Record<string, boolean>>({}); // по типу ракеты: хватает ли на пуск
   const needFocus = useRef(false); // отложенный автозум к спавну
   const speedRef = useRef(1);
   speedRef.current = speed;
@@ -99,7 +99,7 @@ export default function App() {
   if (!gcRef.current) gcRef.current = new GameClient();
   const gc = gcRef.current;
   gc.buildMode = buildMode; // синхронизируем режим постройки с движком
-  gc.nukeMode = nukeMode; // и режим наведения ядерки
+  gc.nukeKind = nukeKind; // и режим наведения ракеты (тип или null)
 
   const sendMsg = (msg: object) => wsRef.current?.send(JSON.stringify(msg));
 
@@ -111,10 +111,10 @@ export default function App() {
       if (phaseRef.current === 'spawn') {
         sendMsg({ type: 'spawn', cell });
       } else if (phaseRef.current === 'playing') {
-        // режим наведения ядерки — клик = пуск в цель, выходим из режима
-        if (nukeModeRef.current) {
-          sendMsg({ type: 'nuke', cell });
-          setNukeMode(false);
+        // режим наведения ракеты — клик = пуск выбранного типа в цель
+        if (nukeKindRef.current) {
+          sendMsg({ type: 'nuke', cell, kind: nukeKindRef.current });
+          setNukeKind(null);
           return;
         }
         // клик по своему зданию — меню прокачки, иначе атака
@@ -287,8 +287,8 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (nukeModeRef.current) {
-          setNukeMode(false);
+        if (nukeKindRef.current) {
+          setNukeKind(null);
           return;
         }
         if (buildModeRef.current) {
@@ -304,12 +304,16 @@ export default function App() {
         else leaveToMenu();
         return;
       }
-      // хоткеи панели 1–0 (в игре): здания (1 город,3 порт,4 штаб,5 шахта) и ядерка (8)
+      // хоткеи панели 1–0 (в игре): здания (1 город,3 порт,4 штаб,5 шахта,6 ПВО) и ракеты (8,9)
       if (phaseRef.current === 'playing' && /^[0-9]$/.test(e.key)) {
         const idx = e.key === '0' ? 9 : +e.key - 1;
-        if (idx === 7) {
-          // ☢️ — режим наведения ядерного удара
-          if (canNukeRef.current) setNukeMode((v) => !v);
+        const nk = TOOLS[idx]?.nuke;
+        if (nk) {
+          // ☢️/💥 — режим наведения выбранной ракеты
+          if (nukeAffordRef.current[nk]) {
+            setBuildMode(null);
+            setNukeKind((k) => (k === nk ? null : nk));
+          }
           return;
         }
         const bt = TOOLS[idx]?.bt;
@@ -320,7 +324,7 @@ export default function App() {
         if (bt === 'silo' && !canBuildSiloRef.current) return;
         if (bt === 'sam' && !canBuildSamRef.current) return;
         if (bt) {
-          setNukeMode(false);
+          setNukeKind(null);
           setBuildMode((bm) => (bm === bt ? null : bt));
         }
       }
@@ -394,8 +398,11 @@ export default function App() {
   canBuildSiloRef.current = shownMoney >= SILO_COST;
   // ПВО (клавиша 6): постройка/апгрейд по сумме уровней
   canBuildSamRef.current = shownMoney >= nextSamCost;
-  // ядерка (клавиша 8): нужна заряженная шахта и деньги на пуск
-  canNukeRef.current = nukeReady && shownMoney >= NUKES.basic.cost;
+  // ракеты (8/9): нужна заряженная шахта и деньги на пуск конкретного типа
+  nukeAffordRef.current = {
+    basic: nukeReady && shownMoney >= NUKES.basic.cost,
+    hydro: nukeReady && shownMoney >= NUKES.hydro.cost,
+  };
 
   return (
     <div className="app">
@@ -535,9 +542,9 @@ export default function App() {
               Кликните в глубине своей земли — ПВО (сбивает ракеты); рядом с ПВО — апгрейд (Esc)
             </div>
           )}
-          {nukeMode && (
+          {nukeKind && (
             <div className="build-hint nuke-hint">
-              ☢️ Кликните цель — ракета вылетит из ближайшей шахты ({fmtK(NUKES.basic.cost)}). Esc — отмена
+              🎯 Цель для «{NUKES[nukeKind].name}» — вылетит из ближайшей шахты ({fmtK(NUKES[nukeKind].cost)}). Esc — отмена
             </div>
           )}
           <div className="panel hud">
@@ -577,11 +584,11 @@ export default function App() {
 
             <div className="toolbar">
               {TOOLS.map((t, i) => {
-                const isNuke = i === 7; // ☢️ — действие (пуск), не постройка
+                const nk = t.nuke; // тип ракеты (☢️/💥) — действие пуска
                 const active =
-                  isNuke || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
-                const cost = isNuke
-                  ? NUKES.basic.cost
+                  !!nk || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
+                const cost = nk
+                  ? NUKES[nk].cost
                   : t.bt === 'port'
                     ? PORT_BUILD_COST
                     : t.bt === 'city'
@@ -591,7 +598,7 @@ export default function App() {
                         : t.bt === 'sam'
                           ? nextSamCost
                           : nextHqCost;
-                const count = isNuke
+                const count = nk
                   ? nukeAmmo
                   : t.bt === 'port'
                     ? myPorts
@@ -604,8 +611,8 @@ export default function App() {
                           : t.bt === 'hq'
                             ? myHqs
                             : 0;
-                const afford = isNuke
-                  ? canNukeRef.current
+                const afford = nk
+                  ? nukeAffordRef.current[nk]
                   : t.bt === 'port'
                     ? canBuildPortRef.current
                     : t.bt === 'city'
@@ -616,7 +623,7 @@ export default function App() {
                           ? canBuildSamRef.current
                           : shownMoney >= cost;
                 const usable = active && afford;
-                const selected = isNuke ? nukeMode : buildMode === t.bt && active;
+                const selected = nk ? nukeKind === nk : buildMode === t.bt && active;
                 return (
                   <button
                     key={i}
@@ -626,16 +633,16 @@ export default function App() {
                     disabled={!usable}
                     title={
                       active
-                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (isNuke ? ' — нужна заряженная шахта' : ' — не хватает денег')}`
+                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (nk ? ' — нужна заряженная шахта' : ' — не хватает денег')}`
                         : `${t.name} — скоро`
                     }
                     onClick={() => {
                       if (!usable) return;
-                      if (isNuke) {
+                      if (nk) {
                         setBuildMode(null);
-                        setNukeMode((v) => !v);
+                        setNukeKind((k) => (k === nk ? null : nk));
                       } else if (t.bt) {
-                        setNukeMode(false);
+                        setNukeKind(null);
                         setBuildMode(selected ? null : t.bt);
                       }
                     }}

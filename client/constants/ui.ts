@@ -14,8 +14,8 @@ export const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
   earth: { name: 'Земля', desc: 'реальные материки и острова' },
 };
 
-// панель зданий/вооружений (1–0)
-export const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
+// панель зданий/вооружений (1–0). bt — тип постройки, nuke — тип запускаемой ракеты
+export const TOOLS: { icon: string; bt: BuildingType | null; name: string; nuke?: string }[] = [
   { icon: '🏙️', bt: 'city', name: 'Город' },
   { icon: '🏭', bt: null, name: 'Завод' },
   { icon: '⚓', bt: 'port', name: 'Торговый порт' },
@@ -23,7 +23,7 @@ export const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = 
   { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },
   { icon: '🛰️', bt: 'sam', name: 'ПВО' },
   { icon: '🚢', bt: null, name: 'Флот' },
-  { icon: '☢️', bt: null, name: 'Ядерка' },
-  { icon: '💥', bt: null, name: 'Удар' },
+  { icon: '☢️', bt: null, name: 'Ядерка', nuke: 'basic' },
+  { icon: '💥', bt: null, name: 'Водородная бомба', nuke: 'hydro' },
   { icon: '💣', bt: null, name: 'Бомба' },
 ];

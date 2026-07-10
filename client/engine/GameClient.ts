@@ -42,7 +42,7 @@ export class GameClient {
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
   buildMode: BuildingType | null = null;
-  nukeMode = false; // режим наведения ядерного удара (клик = пуск)
+  nukeKind: string | null = null; // выбранный тип ракеты для наведения (null = нет)
   private hoverCell = -1;
   missiles: MissilePub[] = []; // ракеты в полёте (читает engine/render)
   private buildings: BuildingPub[] = [];
@@ -1186,7 +1186,7 @@ export class GameClient {
       ctx.globalAlpha = 1;
     }
     // при наведении ядерки — красные полупрозрачные зоны ВСЕХ ПВО (там ракету собьют)
-    if (this.nukeMode) {
+    if (this.nukeKind) {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       const rr = SAM_RANGE * this.zoom;
@@ -1204,11 +1204,11 @@ export class GameClient {
         ctx.stroke();
       }
     }
-    // наведение ядерного удара: прицел + радиус поражения под курсором
-    if (this.nukeMode && this.hoverCell >= 0) {
+    // наведение ядерного удара: прицел + радиус поражения выбранной ракеты
+    if (this.nukeKind && this.hoverCell >= 0) {
       const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
-      const blast = NUKES.basic.radius * this.zoom;
+      const blast = (NUKES[this.nukeKind]?.radius ?? NUKES.basic.radius) * this.zoom;
       ctx.beginPath();
       ctx.arc(sx, sy, blast, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(255,60,30,0.18)';
@@ -1372,7 +1372,7 @@ export class GameClient {
       return cy * this.w + cx;
     };
     const onMove = (e: PointerEvent) => {
-      if (this.buildMode || this.nukeMode) this.hoverCell = cellUnder(e); // предпросмотр здания/цели
+      if (this.buildMode || this.nukeKind) this.hoverCell = cellUnder(e); // предпросмотр здания/цели
       if (!down) return;
       if (panning || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
         panning = true;
