@@ -24,6 +24,9 @@ import {
   portUpgradeCost,
   tradeValue,
   shipsForLevel,
+  CITY_BUILD_TICKS,
+  cityCost,
+  cityTroopBonus,
 } from '../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from './earthmap';
 
@@ -672,7 +675,9 @@ export class Game {
     if (to > 0 && this.relation(playerId, to) === 'allied') return false;
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return false;
-    const r = Math.min(1, Math.max(0.05, ratio || 0));
+    // потолок 50%: дома всегда остаётся минимум половина армии, чтобы десант
+    // (общий ползунок с наземной атакой) не сливал почти всю армию
+    const r = Math.min(0.5, Math.max(0.05, ratio || 0));
     return this.launchBoat(playerId, cell, Math.floor(p.troops * r));
   }
 
@@ -838,8 +843,11 @@ export class Game {
       }
     }
     p.troops = Math.min(999999, p.troops + Math.floor(b.troops * 0.3));
-    // остаток десанта продолжает наступление вглубь берега
-    this.launchAttackOwner(b.player, target, Math.floor(b.troops * 0.6));
+    // остаток десанта наступает вглубь берега. Войска берём ИЗ ЛОДКИ (они уже
+    // сняты с домашней армии при отправке) — иначе списывалось бы дважды
+    if (target <= 0 || this.relation(b.player, target) !== 'allied') {
+      this.pushAttack(b.player, target, Math.floor(b.troops * 0.6));
+    }
   }
 
   // Разрешено ли строить в клетке: своя суша и НЕ граница (все соседи — свои),
@@ -858,6 +866,13 @@ export class Game {
   private hqCount(playerId: number): number {
     let n = 0;
     for (const b of this.buildings) if (b.owner === playerId && b.type === 'hq') n++;
+    return n;
+  }
+
+  // суммарный уровень всех городов игрока — от него растёт цена следующей покупки
+  private cityLevels(playerId: number): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.owner === playerId && b.type === 'city') n += b.level;
     return n;
   }
 
@@ -901,15 +916,28 @@ export class Game {
     return best;
   }
 
-  // ближайший свой порт в радиусе PORT_RADIUS от клетки (для апгрейда вместо новой)
-  private nearbyPort(playerId: number, cell: number): Building | undefined {
+  // ближайшее своё здание данного типа в радиусе PORT_RADIUS (для апгрейда вместо новой)
+  private nearbyOwnType(playerId: number, cell: number, type: BuildingType): Building | undefined {
     const cx = cell % this.w;
     const cy = (cell / this.w) | 0;
     const r2 = PORT_RADIUS * PORT_RADIUS;
     return this.buildings.find(
       (b) =>
-        b.type === 'port' &&
+        b.type === type &&
         b.owner === playerId &&
+        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+    );
+  }
+
+  // есть ли рядом (радиус r) чужое/своё здание указанных типов — для запрета
+  // ставить порты и города впритык друг к другу
+  private buildingNear(cell: number, r: number, types: BuildingType[]): boolean {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const r2 = r * r;
+    return this.buildings.some(
+      (b) =>
+        types.includes(b.type) &&
         (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
     );
   }
@@ -919,14 +947,17 @@ export class Game {
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return 'Нельзя строить';
     if (bt === 'port') {
-      // клик рядом с существующим портом — апгрейд, а не новый порт
-      const near = this.nearbyPort(playerId, cell);
+      // клик рядом со своим портом — апгрейд, а не новый порт
+      const near = this.nearbyOwnType(playerId, cell, 'port');
       if (near) return this.upgrade(playerId, near.cell);
       // притягиваем к ближайшему своему берегу (клик в радиусе PORT_RADIUS от него)
       const shore = this.canBuildPort(playerId, cell)
         ? cell
         : this.nearestOwnCoast(playerId, cell, PORT_RADIUS);
       if (shore < 0) return 'Рядом нет своего берега';
+      // порт нельзя ставить впритык к любому другому строению
+      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port']))
+        return 'Слишком близко к другому зданию';
       if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
       p.money -= PORT_BUILD_COST;
       this.buildings.push({
@@ -944,7 +975,36 @@ export class Game {
       });
       return null;
     }
+    if (bt === 'city') {
+      // клик рядом со своим городом — апгрейд, а не новый город
+      const near = this.nearbyOwnType(playerId, cell, 'city');
+      if (near) return this.upgrade(playerId, near.cell);
+      if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
+      // города нельзя ставить впритык к любому другому строению
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']))
+        return 'Слишком близко к другому зданию';
+      const cost = cityCost(this.cityLevels(playerId));
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      this.buildings.push({
+        id: this.nextBuildingId++,
+        owner: playerId,
+        cell,
+        type: 'city',
+        readyTick: this.tickNo + CITY_BUILD_TICKS,
+        level: 1,
+        fuseTick: 0,
+        upStart: 0,
+        upEnd: 0,
+        nextShipTick: 0,
+        ships: 0,
+      });
+      return null;
+    }
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
+    // штаб нельзя ставить впритык к другому штабу/порту/городу
+    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']))
+      return 'Слишком близко к другому зданию';
     const cost = hqCost(this.hqCount(playerId));
     if (p.money < cost) return 'Недостаточно денег';
     p.money -= cost;
@@ -977,6 +1037,13 @@ export class Game {
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       b.level++; // порт апгрейдится мгновенно, уровней сколько угодно
+      return null;
+    }
+    if (b.type === 'city') {
+      const cost = cityCost(this.cityLevels(playerId)); // по текущей сумме уровней
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      b.level++; // город апгрейдится мгновенно, уровней сколько угодно
       return null;
     }
     if (b.upEnd > 0) return 'Уже улучшается';
@@ -1205,8 +1272,8 @@ export class Game {
     const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
-      // порт: при захвате клетки переходит захватчику (нейтраль/взрыв — сносится)
-      if (b.type === 'port') {
+      // порт/город: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
+      if (b.type === 'port' || b.type === 'city') {
         const now = this.owners[b.cell];
         if (now !== b.owner) {
           if (now > 0 && this.players.get(now)?.alive) {
@@ -1310,7 +1377,7 @@ export class Game {
     const R = HQ_RADIUS;
     const R2 = R * R;
     for (const b of this.buildings) {
-      if (this.tickNo < b.readyTick || b.type === 'port') continue; // строится/порт — не укрепляет
+      if (this.tickNo < b.readyTick || b.type !== 'hq') continue; // укрепляет только штаб
       const cx = b.cell % this.w;
       const cy = (b.cell / this.w) | 0;
       for (let dy = -R; dy <= R; dy++) {
@@ -1339,7 +1406,14 @@ export class Game {
     if (targetOwner > 0 && this.relation(playerId, targetOwner) === 'allied') return;
     troops = Math.min(troops, Math.floor(p.troops));
     if (troops < 10) return;
-    p.troops -= troops;
+    p.troops -= troops; // войска берутся из домашней армии
+    this.pushAttack(playerId, targetOwner, troops);
+  }
+
+  // добавить/усилить атаку БЕЗ списания из домашней армии — для десанта, чьи
+  // войска уже сняты в лодку при отправке (иначе двойное списание)
+  private pushAttack(playerId: number, targetOwner: number, troops: number) {
+    if (troops < 10) return;
     // атака на игрока делает пару враждебной (торговля прекращается)
     if (targetOwner > 0) this.markHostile(playerId, targetOwner);
     const existing = this.attacks.find((a) => a.player === playerId && a.target === targetOwner);
@@ -1361,13 +1435,19 @@ export class Game {
     for (const b of this.buildings) if (b.readyTick === this.tickNo) this.fortDirty = true;
     this.checkBuildings(); // захват/фитиль/взрыв щитов
     if (this.fortDirty) this.rebuildFort();
+    // суммарная прибавка к лимиту войск от достроенных городов (по игрокам)
+    const cityBonus = new Map<number, number>();
+    for (const b of this.buildings) {
+      if (b.type !== 'city' || this.tickNo < b.readyTick) continue;
+      cityBonus.set(b.owner, (cityBonus.get(b.owner) || 0) + cityTroopBonus(b.level));
+    }
     for (const p of this.players.values()) {
       if (!p.alive || !p.spawned) continue;
       // ранний фактор: 1 на старте → 0 через 45с
       const early = Math.max(0, 1 - (this.tickNo - p.spawnTick) / 450);
       // в начале даём запас потолка, чтобы армия росла сразу (а не только
       // территория); к 45с запас исчезает, но реальный потолок уже больше
-      p.maxTroops = (150 + p.cells * 12) * p.maxMul + early * 1500;
+      p.maxTroops = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
       // базовый прирост как в рабочем балансе (пропорционален армии)
       const base = Math.max(0.5, p.troops * 0.006 * p.growthMul);
       // логистическое торможение: до 70% максимума — полный рост, дальше плавно
@@ -1594,6 +1674,31 @@ export class Game {
         if (this.owners[c] === p.id && this.canBuildPort(p.id, c)) {
           this.build(p.id, 'port', c);
           break;
+        }
+      }
+    }
+
+    // Страны строят города (рост лимита войск) и штабы-щиты (оборона) — как игрок.
+    // Ограничиваем число, чтобы не спамить, и гейтим деньгами.
+    if (p.strong) {
+      const myCities = this.buildings.filter((b) => b.owner === p.id && b.type === 'city').length;
+      if (myCities < 3 && p.money >= cityCost(this.cityLevels(p.id))) {
+        for (let i = 0; i < cells.length; i += step) {
+          const c = cells[i];
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port'])) {
+            this.build(p.id, 'city', c);
+            break;
+          }
+        }
+      }
+      const myHqs = this.hqCount(p.id);
+      if (myHqs < 2 && p.money >= hqCost(myHqs)) {
+        for (let i = 0; i < cells.length; i += step) {
+          const c = cells[i];
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port'])) {
+            this.build(p.id, 'hq', c);
+            break;
+          }
         }
       }
     }

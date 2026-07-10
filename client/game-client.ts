@@ -318,7 +318,7 @@ export class GameClient {
     const R = HQ_RADIUS;
     const R2 = R * R;
     for (const b of this.buildings) {
-      if (b.progress < 1 || b.type === 'port') continue; // строится/порт — не укрепляет
+      if (b.progress < 1 || b.type !== 'hq') continue; // укрепляет только штаб
       const cx = b.cell % this.w;
       const cy = (b.cell / this.w) | 0;
       for (let dy = -R; dy <= R; dy++) {
@@ -394,17 +394,46 @@ export class GameClient {
     return best;
   }
 
-  // свой порт в радиусе PORT_RADIUS от клетки (клик туда апгрейдит его)
-  nearbyPort(cell: number): BuildingPub | undefined {
+  // своё здание типа type в радиусе PORT_RADIUS от клетки (клик туда апгрейдит)
+  nearbyOwnType(cell: number, type: BuildingType): BuildingPub | undefined {
     const cx = cell % this.w;
     const cy = (cell / this.w) | 0;
     const r2 = PORT_RADIUS * PORT_RADIUS;
     return this.buildings.find(
       (b) =>
-        b.type === 'port' &&
+        b.type === type &&
         b.owner === this.selfId &&
         ((b.cell % this.w) - cx) ** 2 + (((b.cell / this.w) | 0) - cy) ** 2 <= r2
     );
+  }
+
+  nearbyPort(cell: number): BuildingPub | undefined {
+    return this.nearbyOwnType(cell, 'port');
+  }
+
+  // есть ли рядом (радиус r) здание из types — для запрета/предпросмотра города
+  buildingNear(cell: number, r: number, types: BuildingType[]): boolean {
+    const cx = cell % this.w;
+    const cy = (cell / this.w) | 0;
+    const r2 = r * r;
+    return this.buildings.some(
+      (b) =>
+        types.includes(b.type) &&
+        ((b.cell % this.w) - cx) ** 2 + (((b.cell / this.w) | 0) - cy) ** 2 <= r2
+    );
+  }
+
+  // можно ли поставить город: своя внутренняя клетка (как штаб) и рядом нет
+  // никакого другого строения
+  canBuildCityAt(cell: number): boolean {
+    if (!this.canBuildAt(cell)) return false;
+    return !this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']);
+  }
+
+  // штаб: внутренняя клетка и рядом нет другого строения
+  canBuildHqAt(cell: number): boolean {
+    if (!this.canBuildAt(cell)) return false;
+    return !this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port']);
   }
 
   // Центрируем камеру на клетке (фокус на агрессоре), с приближением
@@ -776,6 +805,43 @@ export class GameClient {
       const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
       if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue; // вне экрана
+      if (b.type === 'city') {
+        const buildingP = b.progress < 1;
+        ctx.globalAlpha = buildingP ? 0.55 : 1;
+        ctx.fillStyle = '#241a10';
+        ctx.strokeStyle = playerColorCSS(b.owner); // цвет владельца (переходит при захвате)
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = `${r * 1.1}px sans-serif`;
+        ctx.fillText('🏙️', sx, sy + 1);
+        if (b.level > 1 && !buildingP) {
+          const fs = Math.max(10, r * 0.9);
+          ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+          ctx.lineWidth = Math.max(2, fs / 5);
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+          ctx.fillStyle = '#ffd27a';
+          ctx.strokeText(String(b.level), sx + r, sy - r);
+          ctx.fillText(String(b.level), sx + r, sy - r);
+        }
+        ctx.globalAlpha = 1;
+        if (buildingP) {
+          const bw = r * 2.4;
+          const bh = Math.max(3, r * 0.35);
+          const bx = sx - bw / 2;
+          const by = sy - r - bh - 3;
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = '#ffd27a';
+          ctx.fillRect(bx, by, bw * b.progress, bh);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        continue;
+      }
       if (b.type === 'port') {
         const buildingP = b.progress < 1;
         ctx.globalAlpha = buildingP ? 0.55 : 1;
@@ -939,9 +1005,45 @@ export class GameClient {
         ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
       }
       ctx.globalAlpha = 1;
+    } else if (this.buildMode === 'city' && this.hoverCell >= 0) {
+      // предпросмотр города: апгрейд существующего или новый (радиус запрета)
+      const near = this.nearbyOwnType(this.hoverCell, 'city');
+      const cellFor = near ? near.cell : this.hoverCell;
+      const ok = near ? true : this.canBuildCityAt(this.hoverCell);
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
+      // зона запрета застройки рядом (радиус PORT_RADIUS)
+      const rangePx = PORT_RADIUS * this.zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rangePx, 0, Math.PI * 2);
+      ctx.setLineDash([6, 5]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = ok ? 'rgba(255,210,122,0.7)' : 'rgba(160,160,160,0.6)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = ok ? 'rgba(255,210,122,0.3)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#ffd27a' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `${r * 1.1}px sans-serif`;
+      ctx.fillText('🏙️', sx, sy + 1);
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#ffd27a';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
+      ctx.globalAlpha = 1;
     } else if (this.buildMode && this.hoverCell >= 0) {
       // предпросмотр штаба
-      const ok = this.canBuildAt(this.hoverCell);
+      const ok = this.canBuildHqAt(this.hoverCell);
       const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
       // зона покрытия штаба — полупрозрачная плёнка радиуса HQ_RADIUS

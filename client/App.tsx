@@ -15,6 +15,8 @@ import {
   portUpgradeCost,
   shipsForLevel,
   PORT_BUILD_COST,
+  cityCost,
+  cityTroopBonus,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './game-client';
@@ -53,7 +55,7 @@ function fmtK(n: number): string {
 
 // панель зданий/вооружений (1–0); активен только штаб обороны, остальные — позже
 const TOOLS: { icon: string; bt: BuildingType | null; name: string }[] = [
-  { icon: '🏢', bt: null, name: 'Город' },
+  { icon: '🏙️', bt: 'city', name: 'Город' },
   { icon: '🏭', bt: null, name: 'Завод' },
   { icon: '⚓', bt: 'port', name: 'Торговый порт' },
   { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
@@ -109,6 +111,7 @@ export default function App() {
   buildModeRef.current = buildMode;
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
+  const canBuildCityRef = useRef(false);
   const needFocus = useRef(false); // отложенный автозум к спавну
   const speedRef = useRef(1);
   speedRef.current = speed;
@@ -327,6 +330,7 @@ export default function App() {
         // не хватает денег — префаб выбрать нельзя
         if (bt === 'hq' && !canBuildHqRef.current) return;
         if (bt === 'port' && !canBuildPortRef.current) return;
+        if (bt === 'city' && !canBuildCityRef.current) return;
         if (bt) setBuildMode((bm) => (bm === bt ? null : bt));
       }
     };
@@ -364,6 +368,12 @@ export default function App() {
   // экономика: мои штабы, цена следующего, сколько войск уйдёт в атаку
   const myHqs = buildings.filter((b) => b.owner === gc.selfId && b.type === 'hq').length;
   const myPorts = buildings.filter((b) => b.owner === gc.selfId && b.type === 'port').length;
+  const myCities = buildings.filter((b) => b.owner === gc.selfId && b.type === 'city').length;
+  // суммарный уровень моих городов → цена следующей покупки города (в общем)
+  const myCityLevels = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'city')
+    .reduce((s, b) => s + b.level, 0);
+  const nextCityCost = cityCost(myCityLevels);
   const nextHqCost = hqCost(myHqs);
   // превью выделенных на атаку — от ЖИВОГО числа войск (обновляется каждый тик),
   // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
@@ -374,6 +384,8 @@ export default function App() {
     .filter((b) => b.owner === gc.selfId && b.type === 'port')
     .reduce((min, b) => Math.min(min, portUpgradeCost(b.level + 1)), Infinity);
   canBuildPortRef.current = shownMoney >= Math.min(PORT_BUILD_COST, cheapestPortUpg);
+  // город (клавиша 1): и постройка, и апгрейд стоят одинаково — по сумме уровней
+  canBuildCityRef.current = shownMoney >= nextCityCost;
 
   return (
     <div className="app">
@@ -498,6 +510,11 @@ export default function App() {
               Кликните по своему берегу — порт; рядом с портом — апгрейд (Esc — отмена)
             </div>
           )}
+          {buildMode === 'city' && (
+            <div className="build-hint">
+              Кликните в глубине своей земли — город (+лимит войск); рядом с городом — апгрейд (Esc)
+            </div>
+          )}
           <div className="panel hud">
             <div className="hud-top">
               <span className="growth-chip">
@@ -535,11 +552,18 @@ export default function App() {
 
             <div className="toolbar">
               {TOOLS.map((t, i) => {
-                const active = t.bt === 'hq' || t.bt === 'port';
-                const cost = t.bt === 'port' ? PORT_BUILD_COST : nextHqCost;
-                const count = t.bt === 'port' ? myPorts : t.bt === 'hq' ? myHqs : 0;
-                // порт доступен, если хватает на новый ИЛИ на апгрейд своего
-                const afford = t.bt === 'port' ? canBuildPortRef.current : shownMoney >= cost;
+                const active = t.bt === 'hq' || t.bt === 'port' || t.bt === 'city';
+                const cost =
+                  t.bt === 'port' ? PORT_BUILD_COST : t.bt === 'city' ? nextCityCost : nextHqCost;
+                const count =
+                  t.bt === 'port' ? myPorts : t.bt === 'city' ? myCities : t.bt === 'hq' ? myHqs : 0;
+                // порт/город доступны, если хватает на новый ИЛИ на апгрейд своего
+                const afford =
+                  t.bt === 'port'
+                    ? canBuildPortRef.current
+                    : t.bt === 'city'
+                      ? canBuildCityRef.current
+                      : shownMoney >= cost;
                 const usable = active && afford;
                 const selected = buildMode === t.bt && active;
                 return (
@@ -754,7 +778,7 @@ export default function App() {
                         setInvadeMenu(null);
                       }}
                     >
-                      🚢 Морское вторжение · {ratio}%
+                      🚢 Морское вторжение · {Math.min(50, ratio)}%
                     </button>
                   )}
                   {owner > 0 && rel === 'allied' && (
@@ -834,6 +858,28 @@ export default function App() {
             {(() => {
               const b = gc.buildingAt(upgradeMenu.cell);
               const lvl = b?.level ?? upgradeMenu.level;
+              if (b?.type === 'city') {
+                const toLevel = lvl + 1;
+                const cost = nextCityCost;
+                return (
+                  <>
+                    <div className="ctx-title">🏙️ Город · ур. {lvl}</div>
+                    <div className="ctx-note">
+                      Лимит войск: +{fmtK(cityTroopBonus(lvl))} → +{fmtK(cityTroopBonus(toLevel))}
+                    </div>
+                    <button
+                      className="ctx-btn"
+                      disabled={shownMoney < cost}
+                      onClick={() => {
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        setUpgradeMenu(null);
+                      }}
+                    >
+                      ⚡ До {toLevel} ур. · {fmtK(cost)}
+                    </button>
+                  </>
+                );
+              }
               if (b?.type === 'port') {
                 const toLevel = lvl + 1;
                 const cost = portUpgradeCost(toLevel);

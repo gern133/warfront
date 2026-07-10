@@ -20,8 +20,8 @@ export interface PlayerPub {
 
 export const START_MONEY = 40000;
 
-// Здания: штаб обороны и торговый порт.
-export type BuildingType = 'hq' | 'port';
+// Здания: штаб обороны, торговый порт, город.
+export type BuildingType = 'hq' | 'port' | 'city';
 
 export interface BuildingPub {
   id: number;
@@ -29,9 +29,24 @@ export interface BuildingPub {
   cell: number;
   type: BuildingType;
   progress: number; // 0..1 — прогресс постройки (1 = достроено)
-  level: number; // hq: 1..3; port: любой (влияет на кол-во кораблей и цену)
+  level: number; // hq: 1..3; port/city: любой
   fuse: number; // секунд до взрыва после захвата (0 = не тикает)
   upProgress: number; // 0..1 — прогресс апгрейда (0 = не улучшается)
+}
+
+// Город: даёт прибавку к лимиту войск; апгрейд мгновенный и бесконечный.
+// Цена растёт «в общем» — от суммарного уровня ВСЕХ твоих городов (не по каждому
+// зданию): первые покупки по нарастающей, дальше фиксированно 1млн. Каждая
+// следующая покупка (постройка нового города ИЛИ апгрейд любого) берёт цену по
+// текущей сумме уровней: 0→50к, 1→75к, 2→100к, 3→250к, 4→500к, 5+→1млн.
+export const CITY_BUILD_TICKS = 50; // 5с на постройку
+const CITY_COSTS = [50000, 75000, 100000, 250000, 500000, 1000000];
+export function cityCost(ownedLevels: number): number {
+  return CITY_COSTS[Math.min(Math.max(0, ownedLevels), CITY_COSTS.length - 1)];
+}
+// прибавка к максимуму войск от города данного уровня
+export function cityTroopBonus(level: number): number {
+  return 10000 * level;
 }
 
 // Торговый порт
