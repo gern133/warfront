@@ -149,6 +149,7 @@ export default function App() {
     wsRef.current = ws;
     ws.onopen = () => setConnected(true);
     ws.onclose = () => setConnected(false);
+    let hudTick = 0; // троттлинг React-обновлений HUD (canvas берёт данные из gc)
     ws.onmessage = (ev) => {
       const msg: ServerMsg = JSON.parse(ev.data);
       if (msg.type === 'lobby') {
@@ -176,11 +177,15 @@ export default function App() {
         gc.setShips(msg.ships ?? []);
         gc.setMissiles(msg.missiles ?? []);
         gc.addEarnings(msg.earnings ?? []);
-        setAttacks(upAttacks);
-        setBoats(upBoats);
-        setBuildings(upBuildings);
-        setSpeed(msg.speed ?? 1);
-        setHumans(msg.humans ?? 1);
+        // HUD (панели React) обновляем через раз (~5 Гц) — canvas рисует из gc и
+        // остаётся плавным, а полная перерисовка App реже нагружает главный поток
+        if ((hudTick++ & 1) === 0) {
+          setAttacks(upAttacks);
+          setBoats(upBoats);
+          setBuildings(upBuildings);
+          setSpeed(msg.speed ?? 1);
+          setHumans(msg.humans ?? 1);
+        }
         // список игроков сервер шлёт реже (раз в 500мс) — обрабатываем, когда есть
         const pl = msg.players;
         if (pl && pl.length) {

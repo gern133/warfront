@@ -65,6 +65,11 @@ export class GameClient {
   private labels = new Map<number, { x: number; y: number }>();
   private miniCanvas: HTMLCanvasElement | null = null;
   private miniCtx: CanvasRenderingContext2D | null = null;
+  private emojiCache = new Map<string, HTMLCanvasElement>(); // спрайты иконок (кэш)
+  private miniScale = 1; // масштаб миникарты (её пиксели / клетки карты)
+  private miniPanX = NaN; // камера на последней отрисовке миникарты (для пропуска кадров)
+  private miniPanY = NaN;
+  private miniZoom = NaN;
 
   private attacks: AttackPub[] = [];
   private boats: BoatPub[] = [];
@@ -110,11 +115,7 @@ export class GameClient {
       this.img = new ImageData(w, h);
       this.off.width = w;
       this.off.height = h;
-      if (this.miniCanvas) {
-        this.miniCanvas.width = w;
-        this.miniCanvas.height = h;
-        this.miniCanvas.style.aspectRatio = `${w} / ${h}`;
-      }
+      this.sizeMinimap();
     }
     rleDecode(terrainRle, this.terrain);
     rleDecode(ownersRle, this.owners);
@@ -588,13 +589,18 @@ export class GameClient {
         [r, g, b] = WAR; // наша сторона фронта
       } else if (this.warSet.has(o) && this.neighborIs(c, this.selfId)) {
         [r, g, b] = WAR; // сторона противника
-      } else if (this.isBorder(c, o)) {
-        [r, g, b] = playerColorRGB(o);
-        r = (r * 0.55) | 0;
-        g = (g * 0.55) | 0;
-        b = (b * 0.55) | 0;
       } else {
-        [r, g, b] = playerColorRGB(o);
+        // владение полупрозрачно поверх рельефа: цвет игрока смешиваем с биомом
+        // клетки (neutralRGB), чтобы был виден рельеф карты. Граница — темнее.
+        const [pr, pg, pb] = playerColorRGB(o);
+        const k = this.isBorder(c, o) ? 0.55 : 1; // затемнение границы
+        const tr = this.neutralRGB[c * 3];
+        const tg = this.neutralRGB[c * 3 + 1];
+        const tb = this.neutralRGB[c * 3 + 2];
+        const A = 0.68; // доля цвета игрока (остальное — рельеф)
+        r = (pr * k * A + tr * (1 - A)) | 0;
+        g = (pg * k * A + tg * (1 - A)) | 0;
+        b = (pb * k * A + tb * (1 - A)) | 0;
       }
     }
     d[i] = r;
@@ -786,12 +792,34 @@ export class GameClient {
   }
 
 
+  // Иконка через кэш-спрайт: эмодзи рисуется один раз в маленький canvas, дальше
+  // дешёвый drawImage. Критично при сотнях зданий на экране (иначе fillText-эмодзи
+  // каждый кадр роняет FPS). Внешне идентично прежнему fillText.
+  private drawEmoji(ctx: CanvasRenderingContext2D, emoji: string, cx: number, cy: number, fontPx: number) {
+    let s = this.emojiCache.get(emoji);
+    if (!s) {
+      const S = 64;
+      s = document.createElement('canvas');
+      s.width = S;
+      s.height = S;
+      const c = s.getContext('2d')!;
+      c.font = `${Math.round(S * 0.82)}px sans-serif`;
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      c.fillText(emoji, S / 2, S / 2 + S * 0.06);
+      this.emojiCache.set(emoji, s);
+    }
+    const d = fontPx / 0.82; // видимый размер эмодзи ≈ fontPx (как у прежнего font)
+    ctx.drawImage(s, cx - d / 2, cy + 1 - d / 2, d, d);
+  }
+
   // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
   private drawBuildings(ctx: CanvasRenderingContext2D, dpr: number) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const r = Math.max(5, Math.min(16, this.zoom * 2.2));
+    const badge = r >= 9; // мелкие цифры-бейджи при отдалении не читаются — не рисуем
     const now = performance.now();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -810,10 +838,9 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        ctx.font = `${r * 1.1}px sans-serif`;
-        ctx.fillText('🚀', sx, sy + 1);
-        // заряд/залп справа-сверху (напр. 2/3) — только достроенная
-        if (!buildingP) {
+        this.drawEmoji(ctx, '🚀', sx, sy, r * 1.1);
+        // заряд/залп справа-сверху (напр. 2/3) — только достроенная и не мелко
+        if (badge && !buildingP) {
           const fs = Math.max(9, r * 0.85);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
           ctx.lineWidth = Math.max(2, fs / 5);
@@ -851,9 +878,8 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        ctx.font = `${r * 1.05}px sans-serif`;
-        ctx.fillText('🛰️', sx, sy + 1);
-        if (!buildingP) {
+        this.drawEmoji(ctx, '🛰️', sx, sy, r * 1.05);
+        if (badge && !buildingP) {
           const fs = Math.max(9, r * 0.85);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
           ctx.lineWidth = Math.max(2, fs / 5);
@@ -890,9 +916,8 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        ctx.font = `${r * 1.1}px sans-serif`;
-        ctx.fillText('🏙️', sx, sy + 1);
-        if (b.level > 1 && !buildingP) {
+        this.drawEmoji(ctx, '🏙️', sx, sy, r * 1.1);
+        if (badge && b.level > 1 && !buildingP) {
           const fs = Math.max(10, r * 0.9);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
           ctx.lineWidth = Math.max(2, fs / 5);
@@ -927,10 +952,9 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        ctx.font = `${r * 1.1}px sans-serif`;
-        ctx.fillText('⚓', sx, sy + 1);
+        this.drawEmoji(ctx, '⚓', sx, sy, r * 1.1);
         // номер уровня справа-сверху
-        if (b.level > 1 && !buildingP) {
+        if (badge && b.level > 1 && !buildingP) {
           const fs = Math.max(10, r * 0.9);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
           ctx.lineWidth = Math.max(2, fs / 5);
@@ -973,8 +997,7 @@ export class GameClient {
         ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
-      ctx.font = `${r * 1.2}px sans-serif`;
-      ctx.fillText(b.level >= 2 ? '🛡️' : '🛡', sx, sy + 1);
+      this.drawEmoji(ctx, b.level >= 2 ? '🛡️' : '🛡', sx, sy, r * 1.2);
       ctx.globalAlpha = 1;
       // прогресс-бар постройки/апгрейда над зданием
       if (building || upgrading) {
@@ -1231,28 +1254,47 @@ export class GameClient {
     }
   }
 
-  private drawMinimap() {
-    if (!this.miniCtx || !this.w) return;
-    this.miniCtx.drawImage(this.off, 0, 0);
-    // рамка видимой области
-    this.miniCtx.strokeStyle = 'rgba(15,20,30,0.9)';
-    this.miniCtx.lineWidth = Math.max(1.5, this.w / 300);
-    this.miniCtx.strokeRect(
-      -this.panX / this.zoom,
-      -this.panY / this.zoom,
-      window.innerWidth / this.zoom,
-      window.innerHeight / this.zoom
+  // Миникарта пониженного разрешения (≤300px) — иначе копирование полного
+  // битмапа карты (до 1920×900) каждый кадр съедает FPS.
+  private sizeMinimap() {
+    if (!this.miniCanvas || !this.w) return;
+    const MINI_W = 300;
+    this.miniScale = Math.min(1, MINI_W / this.w);
+    this.miniCanvas.width = Math.max(1, Math.round(this.w * this.miniScale));
+    this.miniCanvas.height = Math.max(1, Math.round(this.h * this.miniScale));
+    this.miniCanvas.style.aspectRatio = `${this.w} / ${this.h}`;
+    this.miniPanX = NaN; // форсируем перерисовку
+  }
+
+  // mapChanged — битмап карты изменился в этом кадре. Перерисовываем миникарту
+  // только когда изменилась карта ИЛИ подвинулась камера (не каждый кадр).
+  private drawMinimap(mapChanged: boolean) {
+    const mc = this.miniCtx;
+    if (!mc || !this.w) return;
+    const moved = this.panX !== this.miniPanX || this.panY !== this.miniPanY || this.zoom !== this.miniZoom;
+    if (!mapChanged && !moved) return;
+    this.miniPanX = this.panX;
+    this.miniPanY = this.panY;
+    this.miniZoom = this.zoom;
+    const mw = this.miniCanvas!.width;
+    const mh = this.miniCanvas!.height;
+    const s = this.miniScale;
+    mc.drawImage(this.off, 0, 0, mw, mh); // даунскейл всей карты за одну операцию
+    // рамка видимой области (в координатах миникарты)
+    mc.strokeStyle = 'rgba(15,20,30,0.9)';
+    mc.lineWidth = Math.max(1, 2);
+    mc.strokeRect(
+      (-this.panX / this.zoom) * s,
+      (-this.panY / this.zoom) * s,
+      (window.innerWidth / this.zoom) * s,
+      (window.innerHeight / this.zoom) * s
     );
   }
 
   attachMinimap(canvas: HTMLCanvasElement): () => void {
     this.miniCanvas = canvas;
     this.miniCtx = canvas.getContext('2d');
-    if (this.w) {
-      canvas.width = this.w;
-      canvas.height = this.h;
-      canvas.style.aspectRatio = `${this.w} / ${this.h}`;
-    }
+    this.sizeMinimap();
     const toCenter = (e: PointerEvent) => {
       if (!this.w) return;
       const r = canvas.getBoundingClientRect();
@@ -1329,6 +1371,7 @@ export class GameClient {
       ctx.fillStyle = '#05070d';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (this.w && this.img) {
+        const mapChanged = this.dirty;
         if (this.dirty) {
           this.offCtx.putImageData(this.img, 0, 0);
           this.dirty = false;
@@ -1342,7 +1385,7 @@ export class GameClient {
         drawShips(this, ctx, dpr);
         this.drawBuildings(ctx, dpr);
         drawMissiles(this, ctx, dpr);
-        this.drawMinimap();
+        this.drawMinimap(mapChanged);
       }
       raf = requestAnimationFrame(loop);
     };
