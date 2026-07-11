@@ -126,11 +126,37 @@ export default function App() {
         }
       }
     };
-    // правый клик / два пальца по суше — меню морского вторжения
+    // правый клик / два пальца по суше — меню морского вторжения.
+    // Если попали в воду у берега (мелкий остров легко промахнуться) — подтягиваем
+    // к ближайшей клетке суши в небольшом радиусе, чтобы десант на Ирландию и
+    // прочие острова не срывался из-за промаха на пиксель.
     gc.onCellRightClick = (cell, sx, sy) => {
       if (phaseRef.current !== 'playing') return;
-      if (!gc.terrain[cell] || gc.owners[cell] === gc.selfId) return;
-      setInvadeMenu({ cell, x: sx, y: sy });
+      let c = cell;
+      if (!gc.terrain[c]) {
+        const cx = c % gc.w;
+        const cy = (c / gc.w) | 0;
+        let best = -1;
+        let bestD = Infinity;
+        for (let dy = -4; dy <= 4; dy++) {
+          for (let dx = -4; dx <= 4; dx++) {
+            const x = cx + dx;
+            const y = cy + dy;
+            if (x < 0 || y < 0 || x >= gc.w || y >= gc.h) continue;
+            const n = y * gc.w + x;
+            if (!gc.terrain[n]) continue;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) {
+              bestD = d;
+              best = n;
+            }
+          }
+        }
+        if (best < 0) return; // рядом суши нет — это открытое море
+        c = best;
+      }
+      if (gc.owners[c] === gc.selfId) return;
+      setInvadeMenu({ cell: c, x: sx, y: sy });
     };
     // клик в режиме постройки — ставим здание и выходим из режима
     gc.onBuild = (cell) => {

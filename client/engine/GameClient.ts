@@ -137,28 +137,102 @@ export class GameClient {
   // травой, песком, камнем и снегом
   private buildNeutralColors() {
     this.neutralRGB = new Uint8ClampedArray(this.cells * 3);
-    for (let y = 0; y < this.h; y++) {
-      for (let x = 0; x < this.w; x++) {
-        const c = y * this.w + x;
-        if (!this.terrain[c]) continue;
-        let r = 0, g = 0, b = 0, n = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= this.w || ny >= this.h) continue;
-            const t = this.terrain[ny * this.w + nx];
-            if (!t) continue;
-            const col = TERRAIN[t] ?? TERRAIN[1];
-            r += col[0];
-            g += col[1];
-            b += col[2];
-            n++;
+    const w = this.w, h = this.h;
+    // карта Земли (крупная) — рельефная закраска с тенями; случайная — плоские
+    // биомы со сглаживанием (как раньше, чтобы не трогать рандом-генерацию)
+    if (w < 1000) {
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const c = y * w + x;
+          if (!this.terrain[c]) continue;
+          let r = 0, g = 0, b = 0, n = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+              const t = this.terrain[ny * w + nx];
+              if (!t) continue;
+              const col = TERRAIN[t] ?? TERRAIN[1];
+              r += col[0]; g += col[1]; b += col[2]; n++;
+            }
           }
+          this.neutralRGB[c * 3] = r / n;
+          this.neutralRGB[c * 3 + 1] = g / n;
+          this.neutralRGB[c * 3 + 2] = b / n;
         }
-        this.neutralRGB[c * 3] = r / n;
-        this.neutralRGB[c * 3 + 1] = g / n;
-        this.neutralRGB[c * 3 + 2] = b / n;
+      }
+      return;
+    }
+    this.buildReliefColors();
+  }
+
+  // --- Рельефная закраска карты Земли (hillshade) ---
+  private static hash2(ix: number, iy: number): number {
+    const s = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453;
+    return s - Math.floor(s);
+  }
+  private static vnoise(x: number, y: number): number {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const fx = x - ix, fy = y - iy;
+    const H = GameClient.hash2;
+    const a = H(ix, iy), b = H(ix + 1, iy), c = H(ix, iy + 1), d = H(ix + 1, iy + 1);
+    const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  }
+  private static fbm(x: number, y: number): number {
+    const V = GameClient.vnoise;
+    return V(x, y) * 0.55 + V(x * 2.3 + 37, y * 2.3 + 91) * 0.3 + V(x * 5.1 + 11, y * 5.1 + 7) * 0.15;
+  }
+
+  private buildReliefColors() {
+    const w = this.w, h = this.h, N = this.cells;
+    const T = this.terrain;
+    // «горность» из биома (камень/снег), размытая — плавно приподнимает горы
+    const mf = new Float32Array(N);
+    for (let c = 0; c < N; c++) mf[c] = T[c] === 3 || T[c] === 4 ? 1 : 0;
+    const tmp = new Float32Array(N);
+    for (let it = 0; it < 3; it++) {
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+          let s = 0, n = 0;
+          for (let d = -2; d <= 2; d++) { const nx = x + d; if (nx < 0 || nx >= w) continue; s += mf[y * w + nx]; n++; }
+          tmp[y * w + x] = s / n;
+        }
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+          let s = 0, n = 0;
+          for (let d = -2; d <= 2; d++) { const ny = y + d; if (ny < 0 || ny >= h) continue; s += tmp[ny * w + x]; n++; }
+          mf[y * w + x] = s / n;
+        }
+    }
+    // высота один раз в массив (шум + приподнятые горы с хаотичными грядами)
+    const F = GameClient.fbm;
+    const E = new Float32Array(N);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const c = y * w + x;
+        if (!T[c]) { E[c] = -0.5; continue; }
+        // ridged-шум — острые гребни; в горах даёт хаотичный хребтовый рельеф
+        const ridged = 1 - Math.abs(F(x / 9 + 21, y / 9 + 8) * 2 - 1);
+        E[c] = F(x / 55 + 9, y / 55 + 4) * 0.5 + F(x / 16 + 31, y / 16 + 7) * 0.3 +
+          F(x / 6 + 99, y / 6 + 55) * 0.2 + mf[c] * 0.75 + mf[c] * ridged * 0.9;
+      }
+    const SHADE = 6;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = y * w + x;
+        if (!T[c]) continue;
+        const base = TERRAIN[T[c]] ?? TERRAIN[1];
+        const e = E[c];
+        const eR = x + 1 < w && T[c + 1] ? E[c + 1] : e;
+        const eD = y + 1 < h && T[c + w] ? E[c + w] : e;
+        // свет с северо-запада: склоны, поднимающиеся к юго-востоку (обращённые к
+        // свету), светлее — вершины выглядят приподнятыми, а не утопленными
+        let sh = 1 + ((eR - e) + (eD - e)) * SHADE;
+        sh = Math.max(0.68, Math.min(1.35, sh));
+        this.neutralRGB[c * 3] = Math.min(255, base[0] * sh);
+        this.neutralRGB[c * 3 + 1] = Math.min(255, base[1] * sh);
+        this.neutralRGB[c * 3 + 2] = Math.min(255, base[2] * sh);
       }
     }
   }
