@@ -85,3 +85,37 @@ export function chaikin(pts: number[]): number[] {
   out.push(pts[pts.length - 2], pts[pts.length - 1]);
   return out;
 }
+
+// Прореживание ломаной по Дугласу–Пекеру: выкидываем точки, отклонение которых
+// от хорды меньше eps. Плотный путь становится компактным, но остаётся в пределах
+// eps от оригинала — то есть не «срезает» углы больше чем на eps (пиксель-другой).
+export function dpSimplify(pts: number[], eps: number): number[] {
+  const n = pts.length / 2;
+  if (n < 3) return pts.slice();
+  const keep = new Uint8Array(n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+  const stack: number[] = [0, n - 1];
+  const e2 = eps * eps;
+  while (stack.length) {
+    const b = stack.pop()!;
+    const a = stack.pop()!;
+    const ax = pts[a * 2], ay = pts[a * 2 + 1];
+    const bx = pts[b * 2], by = pts[b * 2 + 1];
+    const dxl = bx - ax, dyl = by - ay;
+    const len2 = dxl * dxl + dyl * dyl || 1;
+    let dmax = -1, idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const px = pts[i * 2], py = pts[i * 2 + 1];
+      let t = ((px - ax) * dxl + (py - ay) * dyl) / len2;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      const cx = ax + t * dxl, cy = ay + t * dyl;
+      const d = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+      if (d > dmax) { dmax = d; idx = i; }
+    }
+    if (dmax > e2 && idx > 0) { keep[idx] = 1; stack.push(a, idx, idx, b); }
+  }
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i * 2], pts[i * 2 + 1]);
+  return out;
+}

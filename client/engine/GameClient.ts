@@ -51,7 +51,7 @@ export class GameClient {
   private flashes: { cell: number; t0: number; big: boolean; nuke?: boolean }[] = []; // вспышки взрыва
   private boatCum = new Map<
     number,
-    { len: number; cum: number[]; total: number; wob: Float64Array }
+    { len: number; cum: number[]; total: number; wob: number[] }
   >();
   private boatProg = new Map<number, number>(); // интерполированный прогресс лодок
 
@@ -351,11 +351,10 @@ export class GameClient {
     }
   }
 
-  // Предрасчёт маршрута лодки: накопленная длина + волнистые мировые координаты
-  // каждой точки (покачивание зависит только от дистанции → статично)
+  // Предрасчёт маршрута лодки: накопленная длина. Сам след повторяет маршрут (он
+  // уже строго по воде на сервере) — без бокового «волнения», иначе линия вылезала
+  // бы на сушу. Лёгкое покачивание даём самой лодке во времени при отрисовке.
   private buildBoatPath(path: number[], pts: number) {
-    const WOB_AMP = 10;
-    const WOB_FREQ = 0.08;
     const cum = new Array(pts);
     cum[0] = 0;
     for (let i = 1; i < pts; i++) {
@@ -364,19 +363,7 @@ export class GameClient {
         Math.hypot(path[i * 2] - path[(i - 1) * 2], path[i * 2 + 1] - path[(i - 1) * 2 + 1]);
     }
     const total = cum[pts - 1] || 1;
-    const wob = new Float64Array(pts * 2);
-    for (let i = 0; i < pts; i++) {
-      const ia = Math.max(0, i - 1);
-      const ib = Math.min(pts - 1, i + 1);
-      const dxn = path[ib * 2] - path[ia * 2];
-      const dyn = path[ib * 2 + 1] - path[ia * 2 + 1];
-      const len = Math.hypot(dxn, dyn) || 1;
-      const taper = Math.sin(Math.PI * (cum[i] / total));
-      const w = Math.sin(cum[i] * WOB_FREQ) * WOB_AMP * taper;
-      wob[i * 2] = path[i * 2] - (dyn / len) * w;
-      wob[i * 2 + 1] = path[i * 2 + 1] + (dxn / len) * w;
-    }
-    return { len: path.length, cum, total, wob };
+    return { len: path.length, cum, total, wob: path };
   }
 
   setBuildings(buildings: BuildingPub[]) {
@@ -789,8 +776,9 @@ export class GameClient {
         ctx.fillText('🤝', sx, sy - size * 1.4);
       }
     }
-    // морские десанты: волнистый маршрут статичен (зависит только от дистанции)
-    // — считаем один раз и кэшируем; позицию интерполируем между апдейтами
+    // морские десанты: след повторяет маршрут (строго по воде), позицию
+    // интерполируем между апдейтами, лодку слегка покачиваем по времени
+    const now = performance.now();
     for (const b of this.boats) {
       const pts = b.path.length / 2;
       if (pts < 2) continue;
@@ -829,8 +817,11 @@ export class GameClient {
       ctx.lineTo(bx, by);
       ctx.stroke();
       const rad = Math.max(5, Math.min(11, this.zoom * 1.6));
+      // лёгкое плавное покачивание самой лодки на волнах (по времени, не по маршруту)
+      const bob = Math.sin(now * 0.0035 + b.id * 1.7) * Math.min(2.5, rad * 0.22);
+      const cyb = by + bob;
       ctx.beginPath();
-      ctx.arc(bx, by, rad, 0, Math.PI * 2);
+      ctx.arc(bx, cyb, rad, 0, Math.PI * 2);
       ctx.fillStyle = col;
       ctx.fill();
       ctx.lineWidth = 2;
@@ -842,8 +833,8 @@ export class GameClient {
       ctx.lineWidth = Math.max(2, fs / 5);
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
       ctx.fillStyle = '#fff';
-      ctx.strokeText(label, bx, by - rad - fs * 0.7);
-      ctx.fillText(label, bx, by - rad - fs * 0.7);
+      ctx.strokeText(label, bx, cyb - rad - fs * 0.7);
+      ctx.fillText(label, bx, cyb - rad - fs * 0.7);
     }
 
     // выделенные войска у линии фронта — тоже скрыты при отдалении

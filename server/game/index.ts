@@ -59,6 +59,7 @@ import {
   weakNames,
   pickShuffled,
   chaikin,
+  dpSimplify,
 } from './constants';
 
 // Реэкспорт для внешних потребителей (совместимость с прежним API game.ts)
@@ -104,6 +105,14 @@ export class Game {
   private ch = 0;
   private ck = 1; // коэффициент огрубления
   private cwater: Uint8Array = new Uint8Array(0); // 1 = проходимая вода
+  // переиспользуемые буферы для пиксельного A*-поиска морского пути (строго по воде)
+  private finePrev: Int32Array = new Int32Array(0);
+  private fineDisc: Int32Array = new Int32Array(0); // «поколение» открытия клетки
+  private fineClosed: Int32Array = new Int32Array(0);
+  private fineG: Int32Array = new Int32Array(0); // стоимость пути до клетки
+  private heapCell: Int32Array = new Int32Array(0);
+  private heapKey: Int32Array = new Int32Array(0);
+  private fineGen = 0;
   changed = new Map<number, number>(); // cell -> новый владелец, копится за тик
   deaths: number[] = [];
   tickNo = 0;
@@ -244,6 +253,158 @@ export class Game {
       }
     }
     return -1;
+  }
+
+  // ближайшая клетка настоящей ВОДЫ к точке (px,py) в пределах радиуса. Нужно,
+  // чтобы точки маршрута лодки сидели на воде, а не на суше: центр грубого блока
+  // в узком проливе часто попадает на сушу, и лодка «резала» бы берег
+  private nearestWaterFine(px: number, py: number, maxR: number): [number, number] {
+    if (px >= 0 && py >= 0 && px < this.w && py < this.h && !this.terrain[py * this.w + px]) return [px, py];
+    for (let r = 1; r <= maxR; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = px + dx;
+          const y = py + dy;
+          if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
+          if (!this.terrain[y * this.w + x]) return [x, y];
+        }
+      }
+    }
+    return [px, py];
+  }
+
+  // ближайшая клетка СУШИ к точке (px,py) в пределах радиуса (−1, если нет)
+  private nearestLandCell(px: number, py: number, maxR: number): number {
+    for (let r = 0; r <= maxR; r++) {
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = px + dx, y = py + dy;
+          if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
+          if (this.terrain[y * this.w + x]) return y * this.w + x;
+        }
+    }
+    return -1;
+  }
+
+  // клетка воды считается «прибрежной», если рядом (4-соседство) есть суша
+  private isCoastalCell(x: number, y: number): boolean {
+    const w = this.w, t = this.terrain;
+    return (
+      (x > 0 && !!t[y * w + x - 1]) ||
+      (x < w - 1 && !!t[y * w + x + 1]) ||
+      (y > 0 && !!t[(y - 1) * w + x]) ||
+      (y < this.h - 1 && !!t[(y + 1) * w + x])
+    );
+  }
+
+  // Пиксельный A*-поиск морского пути СТРОГО по воде от нашего берега (sx,sy) до
+  // воды, примыкающей к материку цели (targetLand), ближайшей к точке клика (cx,cy).
+  // Засев — вся вода в диске радиуса R у нашего берега; финиш — вода у берега цели.
+  // Путь начинается/кончается вплотную к берегам, держится открытой воды, проходит
+  // проливы, по суше НЕ идёт. null — берег цели морем недостижим (напр. Каспий).
+  private waterPathFine(sx: number, sy: number, targetLand: number, cx: number, cy: number): number[] | null {
+    const w = this.w, h = this.h, N = w * h, ck = this.ck;
+    const gx = cx, gy = cy; // эвристика тянет к точке клика
+    const R = 3; // радиус диска засева у нашего берега (близко к берегу — старт у суши)
+    if (this.finePrev.length !== N) {
+      this.finePrev = new Int32Array(N);
+      this.fineDisc = new Int32Array(N);
+      this.fineClosed = new Int32Array(N);
+      this.fineG = new Int32Array(N);
+      this.heapCell = new Int32Array(N + 1);
+      this.heapKey = new Int32Array(N + 1);
+    }
+    const gen = ++this.fineGen;
+    const prev = this.finePrev, disc = this.fineDisc, closed = this.fineClosed, g = this.fineG;
+    const hc = this.heapCell, hk = this.heapKey;
+    let hn = 0;
+    const cheb = (c: number) => {
+      const dx = Math.abs((c % w) - gx), dy = Math.abs(((c / w) | 0) - gy);
+      return dx > dy ? dx : dy;
+    };
+    const siftUp = (i: number) => {
+      while (i > 1) {
+        const p = i >> 1;
+        if (hk[p] <= hk[i]) break;
+        const tc = hc[p]; hc[p] = hc[i]; hc[i] = tc;
+        const tk = hk[p]; hk[p] = hk[i]; hk[i] = tk;
+        i = p;
+      }
+    };
+    const siftDown = (i: number) => {
+      for (;;) {
+        let m = i;
+        const l = i << 1, r = l + 1;
+        if (l <= hn && hk[l] < hk[m]) m = l;
+        if (r <= hn && hk[r] < hk[m]) m = r;
+        if (m === i) break;
+        const tc = hc[m]; hc[m] = hc[i]; hc[i] = tc;
+        const tk = hk[m]; hk[m] = hk[i]; hk[i] = tk;
+        i = m;
+      }
+    };
+    // единичная стоимость шага + лёгкий штраф за прибрежную клетку. Каждую клетку
+    // кладём в кучу лишь раз (без пере-релаксации) — куча не переполняется и поиск
+    // быстр; путь получается по воде, у берега — только когда огибает сушу/пролив.
+    const COAST = 3;
+    const R2 = R * R;
+    // засев: вся вода в диске радиуса R у нашего берега
+    for (let dy = -R; dy <= R; dy++)
+      for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dy * dy > R2) continue;
+        const x = sx + dx, y = sy + dy;
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const c = y * w + x;
+        if (!this.terrain[c]) { disc[c] = gen; g[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c); }
+      }
+    if (hn === 0) return null;
+    // вода примыкает к материку цели? (4-соседство — клетка суши с landId=targetLand)
+    const touchesTarget = (x: number, y: number) =>
+      (x > 0 && this.terrain[y * w + x - 1] === 1 && this.landId[y * w + x - 1] === targetLand) ||
+      (x < w - 1 && this.terrain[y * w + x + 1] === 1 && this.landId[y * w + x + 1] === targetLand) ||
+      (y > 0 && this.terrain[(y - 1) * w + x] === 1 && this.landId[(y - 1) * w + x] === targetLand) ||
+      (y < h - 1 && this.terrain[(y + 1) * w + x] === 1 && this.landId[(y + 1) * w + x] === targetLand);
+    let endCell = -1, bestCell = -1, bestD = Infinity, explored = 0;
+    // страховка от «недостижимого» берега: если исследовали слишком много воды и
+    // так и не коснулись цели — считаем недостижимым (обычному маршруту хватает тысяч)
+    const EXPLORE_CAP = 300_000;
+    while (hn > 0) {
+      const c = hc[1];
+      hc[1] = hc[hn]; hk[1] = hk[hn]; hn--;
+      if (hn) siftDown(1);
+      if (closed[c] === gen) continue;
+      closed[c] = gen;
+      if (++explored > EXPLORE_CAP) break;
+      const x = c % w, y = (c / w) | 0;
+      if (touchesTarget(x, y)) { // вода у берега цели — кандидат на точку высадки
+        const ex = x - gx, ey = y - gy, ed = ex * ex + ey * ey;
+        if (ed < bestD) { bestD = ed; bestCell = c; }
+        if (ed <= R2) { endCell = c; break; } // прямо у точки клика — финиш
+      }
+      const gc = g[c];
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const nc = ny * w + nx;
+          if (this.terrain[nc] || disc[nc] === gen) continue; // кладём клетку один раз
+          // не срезаем угол суши по диагонали
+          if (dx && dy && (this.terrain[y * w + nx] || this.terrain[ny * w + x])) continue;
+          disc[nc] = gen; g[nc] = gc + 1 + (this.isCoastalCell(nx, ny) ? COAST : 0); prev[nc] = c;
+          hc[++hn] = nc; hk[hn] = g[nc] + cheb(nc); siftUp(hn);
+        }
+    }
+    // не дошли вплотную к клику, но касание цели было (фьорд/изрезанный берег) —
+    // берём ближайшую к клику воду у берега цели
+    if (endCell < 0) endCell = bestCell;
+    if (endCell < 0) return null; // берега цели морем не достичь
+    const path: number[] = [];
+    for (let c = endCell; c !== -1; c = prev[c]) path.push(c);
+    path.reverse();
+    return path;
   }
 
   // Связные материки/острова (4-связность) — чтобы понять, нужен ли морской
@@ -623,7 +784,7 @@ export class Game {
     // берег высадки — кромка целевого материка у самой точки клика (а не у
     // нашего берега), чтобы высаживаться туда, куда целишься, в т.ч. на свой
     // же остров рядом с врагом
-    const landCell = this.landingShore(targetCell, tx, ty);
+    let landCell = this.landingShore(targetCell, tx, ty);
     const lx = landCell % this.w;
     const ly = (landCell / this.w) | 0;
     // отправная точка — ближайший берег игрока именно к точке высадки
@@ -631,21 +792,29 @@ export class Game {
     if (src < 0) return false; // нет выхода к морю
     const sx = src % this.w;
     const sy = (src / this.w) | 0;
-    // маршрут по грубой водной сетке
-    const startC = this.nearestWaterCoarse(sx, sy);
-    const goalC = this.nearestWaterCoarse(lx, ly);
-    if (startC < 0 || goalC < 0) return false;
-    const coarse = this.waterPath(startC, goalC);
-    if (!coarse) return false; // морем не добраться
-    // грубые клетки → центры карты; берём каждую 2-ю, концы — реальные берега
+    // Маршрут — пиксельный A* строго по воде от нашего берега к воде у берега цели.
+    // Лодка НИКОГДА не идёт по суше, держится открытой воды, проходит проливы. null
+    // означает «морем не добраться» (напр. бессточный Каспий) — десант отменяется.
+    const targetLand = this.landId[landCell];
+    const fine = this.waterPathFine(sx, sy, targetLand, lx, ly);
+    if (!fine) return false;
+    // фактическая клетка высадки — суша цели у конца маршрута (лодка могла прийти
+    // не точно в кликнутую точку, если та в отрезанном фьорде)
+    const arr = fine[fine.length - 1];
+    const near = this.nearestLandCell(arr % this.w, (arr / this.w) | 0, this.ck * 2);
+    if (near >= 0) landCell = near;
+    // Путь: наш берег → клетки A* (строго вода) → берег высадки. Засев A* рядом с
+    // берегом, поэтому переход берег↔вода — всего пара клеток (лодка стартует ОТ
+    // берега и причаливает К берегу), а вся середина маршрута идёт по воде.
     const raw: number[] = [sx + 0.5, sy + 0.5];
-    for (let i = 0; i < coarse.length; i += 2) {
-      const cc = coarse[i];
-      raw.push((cc % this.cw) * this.ck + this.ck / 2, ((cc / this.cw) | 0) * this.ck + this.ck / 2);
+    for (let i = 0; i < fine.length; i++) {
+      const c = fine[i];
+      raw.push((c % this.w) + 0.5, ((c / this.w) | 0) + 0.5);
     }
-    raw.push(lx + 0.5, ly + 0.5);
-    // сглаживаем ломаный путь (Чайкин 2×) — плавная кривая без изломов
-    const path = chaikin(chaikin(raw));
+    raw.push((landCell % this.w) + 0.5, ((landCell / this.w) | 0) + 0.5);
+    // сглаживаем плотный водный путь (держится воды), затем прорежаем по Дугласу–
+    // Пекеру — компактно и в пределах ~пикселя от воды, без «вылезаний» на сушу
+    const path = dpSimplify(chaikin(raw), 0.8);
     // накопленная длина маршрута
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2) {
@@ -663,7 +832,7 @@ export class Game {
       traveled: 0,
       returning: false,
       landCell,
-      x: sx + 0.5,
+      x: sx + 0.5, // старт лодки — от нашего берега
       y: sy + 0.5,
     });
     return true;
