@@ -299,15 +299,15 @@ export class Game {
     );
   }
 
-  // Пиксельный A*-поиск морского пути СТРОГО по воде от нашего берега (sx,sy) до
-  // воды, примыкающей к материку цели (targetLand), ближайшей к точке клика (cx,cy).
-  // Засев — вся вода в диске радиуса R у нашего берега; финиш — вода у берега цели.
-  // Путь начинается/кончается вплотную к берегам, держится открытой воды, проходит
-  // проливы, по суше НЕ идёт. null — берег цели морем недостижим (напр. Каспий).
-  private waterPathFine(sx: number, sy: number, targetLand: number, cx: number, cy: number): number[] | null {
-    const w = this.w, h = this.h, N = w * h, ck = this.ck;
+  // Пиксельный A*-поиск морского пути СТРОГО по воде от ЛЮБОЙ водной клетки-засева
+  // (seeds — вся вода у берега игрока) до воды, примыкающей к материку цели
+  // (targetLand), ближайшей к точке клика (cx,cy). Засев всем берегом устойчив к
+  // «запертым» фьордам/проливам у одной клетки. Путь держится открытой воды,
+  // проходит проливы, по суше НЕ идёт. null — берег цели морем недостижим (Каспий).
+  private waterPathFine(seeds: number[], targetLand: number, cx: number, cy: number): number[] | null {
+    const w = this.w, h = this.h, N = w * h;
     const gx = cx, gy = cy; // эвристика тянет к точке клика
-    const R = 3; // радиус диска засева у нашего берега (близко к берегу — старт у суши)
+    const R2 = 25; // окно «дошли вплотную к клику» (5 клеток)
     if (this.finePrev.length !== N) {
       this.finePrev = new Int32Array(N);
       this.fineDisc = new Int32Array(N);
@@ -349,23 +349,20 @@ export class Game {
     // кладём в кучу лишь раз (без пере-релаксации) — куча не переполняется и поиск
     // быстр; путь получается по воде, у берега — только когда огибает сушу/пролив.
     const COAST = 3;
-    const R2 = R * R;
-    // засев: вся вода в диске радиуса R у нашего берега
-    for (let dy = -R; dy <= R; dy++)
-      for (let dx = -R; dx <= R; dx++) {
-        if (dx * dx + dy * dy > R2) continue;
-        const x = sx + dx, y = sy + dy;
-        if (x < 0 || y < 0 || x >= w || y >= h) continue;
-        const c = y * w + x;
-        if (!this.terrain[c]) { disc[c] = gen; g[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c); }
-      }
+    // засев: все переданные водные клетки у берега игрока
+    for (const c of seeds) {
+      if (c < 0 || c >= N || this.terrain[c] || disc[c] === gen) continue;
+      disc[c] = gen; g[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c);
+    }
     if (hn === 0) return null;
-    // вода примыкает к материку цели? (4-соседство — клетка суши с landId=targetLand)
+    // вода примыкает к материку цели? (4-соседство — любая клетка СУШИ (terrain>0:
+    // трава/песок/камень/снег) с landId=targetLand). Важно: снег (Антарктида,
+    // арктические острова) — тоже суша, поэтому проверяем >0, а не ===1
     const touchesTarget = (x: number, y: number) =>
-      (x > 0 && this.terrain[y * w + x - 1] === 1 && this.landId[y * w + x - 1] === targetLand) ||
-      (x < w - 1 && this.terrain[y * w + x + 1] === 1 && this.landId[y * w + x + 1] === targetLand) ||
-      (y > 0 && this.terrain[(y - 1) * w + x] === 1 && this.landId[(y - 1) * w + x] === targetLand) ||
-      (y < h - 1 && this.terrain[(y + 1) * w + x] === 1 && this.landId[(y + 1) * w + x] === targetLand);
+      (x > 0 && this.terrain[y * w + x - 1] > 0 && this.landId[y * w + x - 1] === targetLand) ||
+      (x < w - 1 && this.terrain[y * w + x + 1] > 0 && this.landId[y * w + x + 1] === targetLand) ||
+      (y > 0 && this.terrain[(y - 1) * w + x] > 0 && this.landId[(y - 1) * w + x] === targetLand) ||
+      (y < h - 1 && this.terrain[(y + 1) * w + x] > 0 && this.landId[(y + 1) * w + x] === targetLand);
     let endCell = -1, bestCell = -1, bestD = Infinity, explored = 0;
     // страховка от «недостижимого» берега: если исследовали слишком много воды и
     // так и не коснулись цели — считаем недостижимым (обычному маршруту хватает тысяч)
@@ -730,26 +727,19 @@ export class Game {
     return this.launchBoat(playerId, cell, Math.floor(p.troops * r));
   }
 
-  // ближайшая береговая клетка игрока (сосед — вода) к точке (tx,ty)
-  private nearestCoast(playerId: number, tx: number, ty: number): number {
-    let best = -1;
-    let bestD = Infinity;
-    for (let c = 0; c < this.cells; c++) {
+  // все водные клетки, примыкающие к берегу игрока — засев для морского маршрута
+  private coastalWaterOf(playerId: number): number[] {
+    const out: number[] = [];
+    const w = this.w, h = this.h;
+    for (const c of this.playerCells(playerId)) {
       if (this.owners[c] !== playerId) continue;
-      let coastal = false;
-      this.forNeighbors(c, (n) => {
-        if (!this.terrain[n]) coastal = true;
-      });
-      if (!coastal) continue;
-      const dx = (c % this.w) - tx;
-      const dy = ((c / this.w) | 0) - ty;
-      const d = dx * dx + dy * dy;
-      if (d < bestD) {
-        bestD = d;
-        best = c;
-      }
+      const x = c % w, y = (c / w) | 0;
+      if (x > 0 && !this.terrain[c - 1]) out.push(c - 1);
+      if (x < w - 1 && !this.terrain[c + 1]) out.push(c + 1);
+      if (y > 0 && !this.terrain[c - w]) out.push(c - w);
+      if (y < h - 1 && !this.terrain[c + w]) out.push(c + w);
     }
-    return best;
+    return out;
   }
 
   // берег материка клетки targetCell, ближайший к (fromX,fromY) — точка высадки
@@ -787,25 +777,29 @@ export class Game {
     let landCell = this.landingShore(targetCell, tx, ty);
     const lx = landCell % this.w;
     const ly = (landCell / this.w) | 0;
-    // отправная точка — ближайший берег игрока именно к точке высадки
-    const src = this.nearestCoast(playerId, lx, ly);
-    if (src < 0) return false; // нет выхода к морю
-    const sx = src % this.w;
-    const sy = (src / this.w) | 0;
-    // Маршрут — пиксельный A* строго по воде от нашего берега к воде у берега цели.
-    // Лодка НИКОГДА не идёт по суше, держится открытой воды, проходит проливы. null
-    // означает «морем не добраться» (напр. бессточный Каспий) — десант отменяется.
+    // Засев: ВСЯ вода у берега игрока (устойчиво к «запертым» фьордам/проливам у
+    // одной клетки — лодка выйдет с той части берега, откуда есть путь к цели).
+    const seeds = this.coastalWaterOf(playerId);
+    if (seeds.length === 0) return false; // нет выхода к морю
+    // Маршрут — пиксельный A* строго по воде к воде у берега цели. Лодка НИКОГДА не
+    // идёт по суше, держится открытой воды, проходит проливы. null = морем не
+    // добраться (напр. бессточный Каспий) — десант отменяется.
     const targetLand = this.landId[landCell];
-    const fine = this.waterPathFine(sx, sy, targetLand, lx, ly);
+    const fine = this.waterPathFine(seeds, targetLand, lx, ly);
     if (!fine) return false;
     // фактическая клетка высадки — суша цели у конца маршрута (лодка могла прийти
     // не точно в кликнутую точку, если та в отрезанном фьорде)
     const arr = fine[fine.length - 1];
     const near = this.nearestLandCell(arr % this.w, (arr / this.w) | 0, this.ck * 2);
     if (near >= 0) landCell = near;
-    // Путь: наш берег → клетки A* (строго вода) → берег высадки. Засев A* рядом с
-    // берегом, поэтому переход берег↔вода — всего пара клеток (лодка стартует ОТ
-    // берега и причаливает К берегу), а вся середина маршрута идёт по воде.
+    // точка старта = наш берег рядом с началом маршрута
+    const startCell = fine[0];
+    const embark = this.nearestLandCell(startCell % this.w, (startCell / this.w) | 0, this.ck * 2);
+    const sx = embark >= 0 ? embark % this.w : startCell % this.w;
+    const sy = embark >= 0 ? (embark / this.w) | 0 : (startCell / this.w) | 0;
+    // Путь: наш берег → клетки A* (строго вода) → берег высадки. Засев A* у берега,
+    // поэтому переход берег↔вода — всего пара клеток (лодка стартует ОТ берега и
+    // причаливает К берегу), а вся середина маршрута идёт по воде.
     const raw: number[] = [sx + 0.5, sy + 0.5];
     for (let i = 0; i < fine.length; i++) {
       const c = fine[i];
@@ -1766,16 +1760,22 @@ export class Game {
       // в начале даём запас потолка, чтобы армия росла сразу (а не только
       // территория); к 45с запас исчезает, но реальный потолок уже больше
       p.maxTroops = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
-      // базовый прирост как в рабочем балансе (пропорционален армии)
-      const base = Math.max(0.5, p.troops * 0.006 * p.growthMul);
+      // Прирост зависит от ТЕРРИТОРИИ (потолка), а не от текущего размера армии.
+      // Иначе «богатый» с большой армией восполняет потраченное быстрее «бедного»
+      // (рост ∝ армии — снежный ком). Теперь два игрока с равной территорией
+      // восполняют войска одинаково быстро, независимо от того, сколько у них
+      // сейчас войск — у выбитого/обороняющегося есть реальный шанс отыграться.
+      const base = Math.max(0.5, p.maxTroops * 0.004 * p.growthMul);
       // логистическое торможение: до 70% максимума — полный рост, дальше плавно
       const frac = p.maxTroops > 0 ? p.troops / p.maxTroops : 1;
       const taper =
         frac <= GROWTH_SLOW_FROM
           ? 1
           : Math.max(0.03, 1 - ((frac - GROWTH_SLOW_FROM) / (1 - GROWTH_SLOW_FROM)) * 0.97);
-      // при малой армии набираем быстрее: <10% лимита — ×2, 10–30% — ×1.5
-      const boost = frac < 0.1 ? 2 : frac < 0.3 ? 1.5 : 1;
+      // догоняющий буст: чем сильнее выбита армия (мала доля от потолка), тем
+      // быстрее восполнение. frac 0 → ×2.6, frac 0.6 и выше → ×1. Так проигрывающий
+      // догоняет, а копящий у потолка армию — тормозит (невыгодно сидеть на золоте)
+      const boost = 1 + 1.6 * Math.max(0, 1 - frac / 0.6);
       // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает
       const growth = (base * (1 + early) + early * 20) * taper * boost;
       p.troops = Math.min(p.maxTroops, p.troops + growth);
