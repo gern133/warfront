@@ -109,6 +109,12 @@ export class Game {
   private nextWarshipId = 1;
   trucks: Truck[] = []; // грузовики заводов на дорогах
   private nextTruckId = 1;
+  // дорожная сеть по владельцам (кэш): узлы — заводы/города/порты, рёбра — пути по
+  // суше между инфраструктурой в радиусе завода. Пересчёт при изменении зданий.
+  private roadVer = 0;
+  private roadSig = 0; // подпись набора дорожной инфраструктуры (для инвалидации кэша)
+  private roadNet = new Map<number, { ver: number; adj: Map<number, number[]>; edge: Map<number, number[]>; revenue: Set<number> }>();
+  private roadsCache: { ver: number; data: number[][] } | null = null;
   bullets: Bullet[] = []; // пули кораблей в полёте
   private nextBulletId = 1;
   missiles: Missile[] = []; // ракеты в полёте
@@ -175,6 +181,9 @@ export class Game {
     this.tradeShips = [];
     this.warships = [];
     this.trucks = [];
+    this.roadNet.clear();
+    this.roadsCache = null;
+    this.roadVer++;
     this.bullets = [];
     this.missiles = [];
     this.tradeEarnings = [];
@@ -1204,34 +1213,219 @@ export class Game {
     }));
   }
 
+  // Дорога по СУШЕ между зданиями: A* с дешёвой сушей и дорогой водой — путь идёт
+  // по земле, а короткие проливы пересекает (штраф не даёт бежать по открытой воде).
+  private landPathFine(fromCell: number, toCell: number): number[] | null {
+    const w = this.w, h = this.h, N = w * h, t = this.terrain;
+    const sx = fromCell % w, sy = (fromCell / w) | 0, gx = toCell % w, gy = (toCell / w) | 0;
+    const pad = 24;
+    const minx = Math.max(0, Math.min(sx, gx) - pad), maxx = Math.min(w - 1, Math.max(sx, gx) + pad);
+    const miny = Math.max(0, Math.min(sy, gy) - pad), maxy = Math.min(h - 1, Math.max(sy, gy) + pad);
+    if (this.finePrev.length !== N) {
+      this.finePrev = new Int32Array(N); this.fineDisc = new Int32Array(N);
+      this.fineClosed = new Int32Array(N); this.fineG = new Int32Array(N);
+      this.heapCell = new Int32Array(N + 1); this.heapKey = new Int32Array(N + 1);
+    }
+    const gen = ++this.fineGen;
+    const prev = this.finePrev, disc = this.fineDisc, closed = this.fineClosed, g = this.fineG;
+    const hc = this.heapCell, hk = this.heapKey;
+    let hn = 0;
+    const cheb = (c: number) => { const dx = Math.abs((c % w) - gx), dy = Math.abs(((c / w) | 0) - gy); return dx > dy ? dx : dy; };
+    const up = (i: number) => { while (i > 1) { const p = i >> 1; if (hk[p] <= hk[i]) break; const tc = hc[p]; hc[p] = hc[i]; hc[i] = tc; const tk = hk[p]; hk[p] = hk[i]; hk[i] = tk; i = p; } };
+    const down = (i: number) => { for (;;) { let m = i; const l = i << 1, r = l + 1; if (l <= hn && hk[l] < hk[m]) m = l; if (r <= hn && hk[r] < hk[m]) m = r; if (m === i) break; const tc = hc[m]; hc[m] = hc[i]; hc[i] = tc; const tk = hk[m]; hk[m] = hk[i]; hk[i] = tk; i = m; } };
+    const WATER_PEN = 12;
+    disc[fromCell] = gen; g[fromCell] = 0; prev[fromCell] = -1; hc[++hn] = fromCell; hk[hn] = cheb(fromCell);
+    let found = false;
+    while (hn > 0) {
+      const c = hc[1]; hc[1] = hc[hn]; hk[1] = hk[hn]; hn--; if (hn) down(1);
+      if (closed[c] === gen) continue;
+      closed[c] = gen;
+      if (c === toCell) { found = true; break; }
+      const x = c % w, y = (c / w) | 0, gc = g[c];
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < minx || ny < miny || nx > maxx || ny > maxy) continue;
+          const nc = ny * w + nx;
+          if (closed[nc] === gen) continue;
+          const ng = gc + (t[nc] ? 1 : WATER_PEN);
+          if (disc[nc] !== gen || ng < g[nc]) {
+            disc[nc] = gen; g[nc] = ng; prev[nc] = c;
+            if (hn < N) { hc[++hn] = nc; hk[hn] = ng + cheb(nc); up(hn); }
+          }
+        }
+    }
+    if (!found) return null;
+    const path: number[] = [];
+    for (let c = toCell; c !== -1; c = prev[c]) path.push(c);
+    path.reverse();
+    return path;
+  }
+
+  // Прямой отрезок по одной оси: возвращает true и заполняет cells, если весь
+  // путь идёт по суше (все клетки — земля).
+  private hvSeg(x0: number, y0: number, x1: number, y1: number, cells: number[]): boolean {
+    const t = this.terrain, w = this.w;
+    if (x0 === x1) {
+      const s = y0 <= y1 ? 1 : -1;
+      for (let y = y0; ; y += s) { const c = y * w + x0; if (!t[c]) return false; cells.push(c); if (y === y1) break; }
+    } else {
+      const s = x0 <= x1 ? 1 : -1;
+      for (let x = x0; ; x += s) { const c = y0 * w + x; if (!t[c]) return false; cells.push(c); if (x === x1) break; }
+    }
+    return true;
+  }
+
+  // Ребро дороги с прямыми углами: пробуем Г-образный путь (одно колено под 90°)
+  // по суше; если ни одно колено не помещается на земле — падаем на A* по суше
+  // (пересечение пролива). Так на одном материке дороги ровные, углы прямые.
+  private orthEdge(a: number, b: number): number[] | null {
+    const w = this.w;
+    const ax = a % w, ay = (a / w) | 0, bx = b % w, by = (b / w) | 0;
+    const c1: number[] = [], c2: number[] = [];
+    if (this.hvSeg(ax, ay, bx, ay, c1) && this.hvSeg(bx, ay, bx, by, c2)) return c1.concat(c2.slice(1));
+    const d1: number[] = [], d2: number[] = [];
+    if (this.hvSeg(ax, ay, ax, by, d1) && this.hvSeg(ax, by, bx, by, d2)) return d1.concat(d2.slice(1));
+    return this.landPathFine(a, b);
+  }
+
+  // Дорожная сеть игрока (кэш). Узлы — заводы/города/порты. Строим связующее
+  // дерево с прямыми углами: от завода отходит максимум 4 дороги (перекрёсток),
+  // остальные здания цепляются здание-к-зданию. Общее здание двух зон связывает
+  // зоны в одну компоненту (грузовик объезжает весь связанный участок).
+  private getRoadNet(owner: number) {
+    const cached = this.roadNet.get(owner);
+    if (cached && cached.ver === this.roadVer) return cached;
+    const R2 = FACTORY_RANGE * FACTORY_RANGE;
+    const nodes: number[] = [];
+    const facSet = new Set<number>();
+    const revenue = new Set<number>();
+    for (const b of this.buildings) {
+      if (b.owner !== owner || this.tickNo < b.readyTick) continue;
+      if (b.type === 'factory') { nodes.push(b.cell); facSet.add(b.cell); }
+      else if (b.type === 'city' || b.type === 'port') { nodes.push(b.cell); revenue.add(b.cell); }
+    }
+    const adj = new Map<number, number[]>();
+    const edge = new Map<number, number[]>();
+    const key = (a: number, b: number) => (a < b ? a * this.cells + b : b * this.cells + a);
+    const w = this.w;
+    // кандидаты рёбер: пары узлов в радиусе завода, по возрастанию расстояния
+    const cand: { a: number; b: number; d: number }[] = [];
+    for (let i = 0; i < nodes.length; i++)
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = (a % w) - (b % w), dy = ((a / w) | 0) - ((b / w) | 0);
+        const d = dx * dx + dy * dy;
+        if (d > R2) continue;
+        cand.push({ a, b, d });
+      }
+    cand.sort((p, q) => p.d - q.d);
+    // Краскал со связью через union-find и лимитом степени завода = 4
+    const uf = new Map<number, number>(); for (const n of nodes) uf.set(n, n);
+    const find = (x: number): number => { while (uf.get(x) !== x) { uf.set(x, uf.get(uf.get(x)!)!); x = uf.get(x)!; } return x; };
+    const deg = new Map<number, number>();
+    for (const { a, b } of cand) {
+      if (find(a) === find(b)) continue; // уже в одной компоненте — не плодим циклы
+      if (facSet.has(a) && (deg.get(a) ?? 0) >= 4) continue; // перекрёсток: максимум 4 дороги
+      if (facSet.has(b) && (deg.get(b) ?? 0) >= 4) continue;
+      const path = this.orthEdge(a, b);
+      if (!path) continue;
+      edge.set(key(a, b), path);
+      (adj.get(a) ?? adj.set(a, []).get(a)!).push(b);
+      (adj.get(b) ?? adj.set(b, []).get(b)!).push(a);
+      uf.set(find(a), find(b));
+      deg.set(a, (deg.get(a) ?? 0) + 1);
+      deg.set(b, (deg.get(b) ?? 0) + 1);
+    }
+    const net = { ver: this.roadVer, adj, edge, revenue };
+    this.roadNet.set(owner, net);
+    return net;
+  }
+
+  // Маршрут грузовика: обход (эйлеров тур) связной компоненты дорог от завода,
+  // посещая ВСЕ достижимые города/порты (в т.ч. в чужих зонах, если есть дорога),
+  // и возврат на завод. Оплата 10к — при первом заходе на каждое здание.
+  private buildTruckTour(owner: number, factoryCell: number):
+    { cells: number[]; pay: { at: number; cell: number }[] } | null {
+    const net = this.getRoadNet(owner);
+    if (!net.adj.has(factoryCell)) return null;
+    // остовное дерево BFS от завода
+    const parent = new Map<number, number>([[factoryCell, -1]]);
+    const children = new Map<number, number[]>();
+    const q = [factoryCell];
+    for (let hd = 0; hd < q.length; hd++) {
+      const c = q[hd];
+      for (const nb of net.adj.get(c) || []) {
+        if (parent.has(nb)) continue;
+        parent.set(nb, c);
+        (children.get(c) ?? children.set(c, []).get(c)!).push(nb);
+        q.push(nb);
+      }
+    }
+    const key = (a: number, b: number) => (a < b ? a * this.cells + b : b * this.cells + a);
+    const cells: number[] = [factoryCell];
+    const pay: { at: number; cell: number }[] = [];
+    const paid = new Set<number>();
+    const appendEdge = (a: number, b: number) => {
+      let p = net.edge.get(key(a, b));
+      if (!p) { cells.push(b); return; }
+      if (p[0] !== a) p = [...p].reverse();
+      for (let i = 1; i < p.length; i++) cells.push(p[i]); // без дубля стартовой клетки
+    };
+    // итеративный DFS (стек кадров: node + индекс ребёнка)
+    const stack: { node: number; ci: number }[] = [{ node: factoryCell, ci: 0 }];
+    if (net.revenue.has(factoryCell) && !paid.has(factoryCell)) { paid.add(factoryCell); pay.push({ at: cells.length - 1, cell: factoryCell }); }
+    while (stack.length) {
+      const fr = stack[stack.length - 1];
+      const kids = children.get(fr.node) || [];
+      if (fr.ci < kids.length) {
+        const ch = kids[fr.ci++];
+        appendEdge(fr.node, ch);
+        if (net.revenue.has(ch) && !paid.has(ch)) { paid.add(ch); pay.push({ at: cells.length - 1, cell: ch }); }
+        stack.push({ node: ch, ci: 0 });
+      } else {
+        stack.pop();
+        if (stack.length) appendEdge(fr.node, stack[stack.length - 1].node); // возврат к родителю
+      }
+    }
+    return { cells, pay };
+  }
+
   // Грузовики заводов: выпуск. Каждый достроенный завод раз в интервал шлёт
   // грузовик по дорогам к своим городам/портам в радиусе и обратно.
   private spawnTrucks() {
-    const R2 = FACTORY_RANGE * FACTORY_RANGE;
     for (const b of this.buildings) {
       if (b.type !== 'factory' || this.tickNo < b.readyTick) continue;
       if (this.tickNo < b.nextShipTick) continue;
       if (this.trucks.some((t) => t.factoryCell === b.cell && t.owner === b.owner)) continue;
-      const fx = b.cell % this.w, fy = (b.cell / this.w) | 0;
-      const infra: { cell: number; d: number }[] = [];
-      for (const o of this.buildings) {
-        if (o.owner !== b.owner || (o.type !== 'city' && o.type !== 'port') || this.tickNo < o.readyTick) continue;
-        const d = ((o.cell % this.w) - fx) ** 2 + (((o.cell / this.w) | 0) - fy) ** 2;
-        if (d <= R2) infra.push({ cell: o.cell, d });
-      }
       b.nextShipTick = this.tickNo + TRUCK_INTERVAL;
-      if (!infra.length) continue; // нет соединённых зданий — груз возить некому
-      infra.sort((a, z) => a.d - z.d);
-      const stops = infra.map((i) => i.cell);
-      stops.push(b.cell); // возврат на завод
+      const tour = this.buildTruckTour(b.owner, b.cell);
+      if (!tour || tour.pay.length === 0) continue; // нет соединённых зданий
+      // клетки маршрута → мировые точки + накопленная длина
+      const path: number[] = [];
+      const cum: number[] = [0];
+      for (let i = 0; i < tour.cells.length; i++) {
+        const c = tour.cells[i];
+        const px = (c % this.w) + 0.5, py = ((c / this.w) | 0) + 0.5;
+        path.push(px, py);
+        if (i > 0) cum.push(cum[cum.length - 1] + Math.hypot(px - path[(i - 1) * 2], py - path[(i - 1) * 2 + 1]));
+      }
+      const payDist = tour.pay.map((p2) => cum[p2.at]);
+      const payCell = tour.pay.map((p2) => p2.cell);
       this.trucks.push({
         id: this.nextTruckId++,
         owner: b.owner,
         factoryCell: b.cell,
-        stops,
-        ti: 0,
-        x: fx + 0.5,
-        y: fy + 0.5,
+        path,
+        cum,
+        totalLen: cum[cum.length - 1] || 1,
+        traveled: 0,
+        payDist,
+        payCell,
+        payIdx: 0,
+        x: path[0],
+        y: path[1],
         done: false,
       });
     }
@@ -1243,36 +1437,55 @@ export class Game {
       const p = this.players.get(t.owner);
       const fac = this.buildings.find((b) => b.cell === t.factoryCell && b.owner === t.owner && b.type === 'factory');
       if (!p?.alive || !fac) { t.done = true; any = true; continue; }
-      const dst = t.stops[t.ti];
-      const tx = (dst % this.w) + 0.5, ty = ((dst / this.w) | 0) + 0.5;
-      const dx = tx - t.x, dy = ty - t.y;
-      if (Math.abs(dx) <= 0.5 && Math.abs(dy) <= 0.5) {
-        t.x = tx; t.y = ty;
-        if (t.ti >= t.stops.length - 1) {
-          // вернулся на завод — рейс окончен, следующий через интервал
-          fac.nextShipTick = this.tickNo + TRUCK_INTERVAL;
-          t.done = true; any = true;
-        } else {
-          // приехал к зданию — 10к, если оно ещё стоит и наше
-          if (this.buildings.some((bd) => bd.cell === dst && bd.owner === t.owner)) {
-            p.money += TRUCK_REWARD;
-            if (!p.bot) this.tradeEarnings.push({ x: tx, y: ty, amount: TRUCK_REWARD, owner: t.owner });
-          }
-          t.ti++;
+      t.traveled += TRUCK_SPEED;
+      // оплата за пройденные здания (10к, если здание ещё наше)
+      while (t.payIdx < t.payDist.length && t.traveled >= t.payDist[t.payIdx]) {
+        const cell = t.payCell[t.payIdx];
+        if (this.buildings.some((bd) => bd.cell === cell && bd.owner === t.owner)) {
+          p.money += TRUCK_REWARD;
+          if (!p.bot) this.tradeEarnings.push({ x: (cell % this.w) + 0.5, y: ((cell / this.w) | 0) + 0.5, amount: TRUCK_REWARD, owner: t.owner });
         }
-      } else if (Math.abs(dx) > 0.5) {
-        // сначала едем по горизонтали (как дорога с прямыми углами)
-        t.x += Math.sign(dx) * Math.min(TRUCK_SPEED, Math.abs(dx));
-      } else {
-        // затем по вертикали
-        t.y += Math.sign(dy) * Math.min(TRUCK_SPEED, Math.abs(dy));
+        t.payIdx++;
       }
+      if (t.traveled >= t.totalLen) {
+        // вернулся на завод — рейс окончен, следующий через интервал
+        fac.nextShipTick = this.tickNo + TRUCK_INTERVAL;
+        t.done = true; any = true;
+        continue;
+      }
+      // позиция вдоль ломаной
+      const d = t.traveled;
+      let seg = 0;
+      while (seg < t.cum.length - 2 && t.cum[seg + 1] < d) seg++;
+      const segLen = (t.cum[seg + 1] - t.cum[seg]) || 1;
+      const f = (d - t.cum[seg]) / segLen;
+      t.x = t.path[seg * 2] + (t.path[(seg + 1) * 2] - t.path[seg * 2]) * f;
+      t.y = t.path[seg * 2 + 1] + (t.path[(seg + 1) * 2 + 1] - t.path[seg * 2 + 1]) * f;
     }
     if (any) this.trucks = this.trucks.filter((t) => !t.done);
   }
 
   trucksPub(): TruckPub[] {
     return this.trucks.map((t) => ({ x: +t.x.toFixed(1), y: +t.y.toFixed(1), owner: t.owner }));
+  }
+
+  // Дороги для отрисовки: рёбра дорожных сетей всех игроков (проложены по суше),
+  // прорежены для компактности. Кэшируются по версии сети.
+  roadsPub(): number[][] {
+    if (this.roadsCache && this.roadsCache.ver === this.roadVer) return this.roadsCache.data;
+    const out: number[][] = [];
+    const owners = new Set<number>();
+    for (const b of this.buildings) if (b.type === 'factory' && this.tickNo >= b.readyTick) owners.add(b.owner);
+    for (const o of owners) {
+      const net = this.getRoadNet(o);
+      for (const path of net.edge.values()) {
+        const flat: number[] = [];
+        for (const c of path) flat.push(+((c % this.w) + 0.5).toFixed(1), +(((c / this.w) | 0) + 0.5).toFixed(1));
+        out.push(dpSimplify(flat, 1.2));
+      }
+    }
+    this.roadsCache = { ver: this.roadVer, data: out };
+    return out;
   }
 
   private stepBoats() {
@@ -1458,7 +1671,7 @@ export class Game {
         : this.nearestOwnCoast(playerId, cell, PORT_RADIUS);
       if (shore < 0) return 'Рядом нет своего берега';
       // порт нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+      if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
       if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
       p.money -= PORT_BUILD_COST;
@@ -1486,7 +1699,7 @@ export class Game {
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       // города нельзя ставить впритык к любому другому строению
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
       const cost = cityCost(this.cityLevels(playerId));
       if (p.money < cost) return 'Недостаточно денег';
@@ -1542,7 +1755,7 @@ export class Game {
       const near = this.nearbyOwnType(playerId, cell, 'silo');
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
       if (p.money < SILO_COST) return 'Недостаточно денег';
       p.money -= SILO_COST;
@@ -1569,7 +1782,7 @@ export class Game {
       const near = this.nearbyOwnType(playerId, cell, 'sam');
       if (near) return this.upgrade(playerId, near.cell);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
-      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
       const cost = samCost(this.samLevels(playerId));
       if (p.money < cost) return 'Недостаточно денег';
@@ -1594,7 +1807,7 @@ export class Game {
     }
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
     // штаб нельзя ставить впритык к другому штабу/порту/городу/шахте
-    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam']))
+    if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
       return 'Слишком близко к другому зданию';
     const cost = hqCost(this.hqCount(playerId));
     if (p.money < cost) return 'Недостаточно денег';
@@ -2245,6 +2458,13 @@ export class Game {
     for (const b of this.buildings) if (b.readyTick === this.tickNo) this.fortDirty = true;
     this.checkBuildings(); // захват/фитиль/взрыв щитов
     if (this.fortDirty) this.rebuildFort();
+    // инвалидация дорожной сети при изменении набора заводов/городов/портов
+    // (постройка/захват/снос/готовность) — подпись меняется → пересчёт кэша
+    let rsig = 0;
+    for (const b of this.buildings)
+      if (b.type === 'factory' || b.type === 'city' || b.type === 'port')
+        rsig = (rsig * 131 + b.cell * 7 + b.owner * 3 + (this.tickNo >= b.readyTick ? 1 : 0)) | 0;
+    if (rsig !== this.roadSig) { this.roadSig = rsig; this.roadVer++; }
     // суммарная прибавка к лимиту войск от достроенных городов (по игрокам)
     const cityBonus = new Map<number, number>();
     // заводы: число и суммарный % ускорения регена по игрокам (деньги — через грузовики)
@@ -2646,7 +2866,7 @@ export class Game {
       if (myHqs < 2 && p.money >= hqCost(myHqs)) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
             this.build(p.id, 'hq', c);
             break;
           }
@@ -2657,7 +2877,7 @@ export class Game {
       if (mySilos < 1 && p.money >= SILO_COST) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
             this.build(p.id, 'silo', c);
             break;
           }
@@ -2668,7 +2888,7 @@ export class Game {
       if (mySams < 1 && p.money >= samCost(0)) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
             this.build(p.id, 'sam', c);
             break;
           }

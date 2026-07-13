@@ -109,6 +109,7 @@ setInterval(() => {
       buildings: game.buildingsPub(),
       ships: game.tradeShipsPub(),
       trucks: game.trucksPub(),
+      roads: sendPlayers ? game.roadsPub() : undefined, // дороги — раз в 500мс
       warships: game.warshipsPub(),
       shots: game.bulletsPub(),
       missiles: game.missilesPub(),

@@ -62,6 +62,7 @@ export type ServerMsg =
       buildings: BuildingPub[];
       ships: TradeShipPub[]; // трейд-корабли (кружки без следа)
       trucks: TruckPub[]; // грузовики заводов на дорогах
+      roads?: number[][]; // дороги (ломаные [x,y,...]) — шлём реже (меняются редко)
       warships: WarshipPub[]; // боевые корабли
       shots: number[]; // выстрелы кораблей за тик: [sx,sy,tx,ty,hit,...] (для трассеров)
       missiles: MissilePub[]; // ракеты в полёте

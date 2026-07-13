@@ -85,6 +85,7 @@ export class GameClient {
   private boats: BoatPub[] = [];
   ships: TradeShipPub[] = []; // трейд-корабли (читает engine/render)
   trucks: TruckPub[] = []; // грузовики заводов на дорогах
+  roadLines: number[][] = []; // дороги от сервера: ломаные [x,y,...] в клетках
   private moneyPops: { x: number; y: number; amount: number; t0: number }[] = []; // всплывашки заработка
   allies = new Set<number>(); // мои союзники
   enemies = new Set<number>(); // мои враги (нельзя торговать)
@@ -308,38 +309,27 @@ export class GameClient {
     this.trucks = trucks ?? [];
   }
 
+  setRoads(roads: number[][]) {
+    this.roadLines = roads ?? [];
+  }
+
   // Дороги от завода к его городам/портам в радиусе + грузовики на них. Рисуем
   // ПОД зданиями. Порядок соединения тот же, что у грузовика (по возрастанию
   // дистанции), чтобы дорога совпадала с маршрутом.
   private drawRoads(ctx: CanvasRenderingContext2D, dpr: number) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const z = this.zoom, px = this.panX, py = this.panY, R2 = FACTORY_RANGE * FACTORY_RANGE;
-    const factories = this.buildings.filter((b) => b.type === 'factory' && b.progress >= 1);
-    if (factories.length) {
+    const z = this.zoom, px = this.panX, py = this.panY;
+    // дороги приходят с сервера (проложены по суше, пересекают проливы)
+    if (this.roadLines.length) {
       ctx.lineWidth = Math.max(2, z * 0.7);
-      ctx.strokeStyle = 'rgba(214,208,190,0.9)'; // светлая дорога, сплошная линия
+      ctx.strokeStyle = 'rgba(214,208,190,0.9)'; // светлая сплошная дорога
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      const S = (x: number) => px + (x + 0.5) * z;
-      const T = (y: number) => py + (y + 0.5) * z;
-      for (const f of factories) {
-        const fx = f.cell % this.w, fy = (f.cell / this.w) | 0;
-        const infra = this.buildings
-          .filter((o) => o.owner === f.owner && (o.type === 'city' || o.type === 'port') && o.progress >= 1 &&
-            ((o.cell % this.w - fx) ** 2 + ((o.cell / this.w | 0) - fy) ** 2) <= R2)
-          .map((o) => ({ x: o.cell % this.w, y: (o.cell / this.w) | 0, d: (o.cell % this.w - fx) ** 2 + ((o.cell / this.w | 0) - fy) ** 2 }))
-          .sort((a, b) => a.d - b.d);
-        if (!infra.length) continue;
-        // маршрут завод → B1 → ... → Bk → завод; колена под прямым углом (сначала
-        // по горизонтали, потом по вертикали) — как настоящие дороги (см. фото)
-        const route = [{ x: fx, y: fy }, ...infra, { x: fx, y: fy }];
+      for (const line of this.roadLines) {
+        if (line.length < 4) continue;
         ctx.beginPath();
-        for (let i = 0; i + 1 < route.length; i++) {
-          const a = route[i], b = route[i + 1];
-          ctx.moveTo(S(a.x), T(a.y));
-          ctx.lineTo(S(b.x), T(a.y)); // горизонтальное колено
-          ctx.lineTo(S(b.x), T(b.y)); // вертикальное колено
-        }
+        ctx.moveTo(px + line[0] * z, py + line[1] * z);
+        for (let i = 2; i + 1 < line.length; i += 2) ctx.lineTo(px + line[i] * z, py + line[i + 1] * z);
         ctx.stroke();
       }
     }

@@ -222,6 +222,7 @@ export default function App() {
         gc.setBuildings(upBuildings);
         gc.setShips(msg.ships ?? []);
         gc.setTrucks(msg.trucks ?? []);
+        if (msg.roads) gc.setRoads(msg.roads);
         gc.setWarships(msg.warships ?? []);
         gc.setShots(msg.shots ?? []);
         gc.setMissiles(msg.missiles ?? []);

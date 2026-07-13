@@ -121,8 +121,13 @@ export interface Truck {
   id: number;
   owner: number;
   factoryCell: number; // домашний завод
-  stops: number[]; // клетки-остановки: [здание1..зданиеK, завод] (последняя — возврат)
-  ti: number; // индекс текущей цели в stops
+  path: number[]; // ломаная по дорогам [x0,y0,x1,y1,...] (клетки), обход всей сети
+  cum: number[]; // накопленная длина в каждой точке
+  totalLen: number;
+  traveled: number;
+  payDist: number[]; // дистанции вдоль пути, где платить за здание
+  payCell: number[]; // клетка здания для каждой payDist (параллельно)
+  payIdx: number; // индекс следующей оплаты
   x: number;
   y: number;
   done: boolean; // рейс завершён / грузовик снят — на удаление
