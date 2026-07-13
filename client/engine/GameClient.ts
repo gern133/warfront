@@ -5,6 +5,7 @@ import {
   BuildingPub,
   BuildingType,
   TradeShipPub,
+  WarshipPub,
   TradeEarn,
   MissilePub,
   NUKES,
@@ -25,7 +26,7 @@ import {
   TERRAIN,
 } from './constants';
 import { fmtTroops, fmtMoney } from '../lib/format';
-import { drawShips, drawMissiles } from './render/projectiles';
+import { drawShips, drawMissiles, drawFleet } from './render/projectiles';
 
 export class GameClient {
   w = 0;
@@ -39,10 +40,17 @@ export class GameClient {
   onCellClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
   onCellRightClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
   onBuild: ((cell: number) => void) | null = null;
+  onFleetMove: ((cell: number) => void) | null = null; // приказ выделенным кораблям
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
   buildMode: BuildingType | null = null;
   nukeKind: string | null = null; // выбранный тип ракеты для наведения (null = нет)
+  active = false; // рисуем карту только в игре (в меню/лобби — не жжём кадры впустую)
+  fleetMode = false; // выбран инструмент «Флот» — клик выпускает боевой корабль
+  warships: WarshipPub[] = []; // боевые корабли (читает engine/render)
+  selectedWarships = new Set<number>(); // выделенные свои корабли (RTS-выделение)
+  bullets: number[] = []; // пули кораблей в полёте: [x0,y0,x1,y1,...] (клетки)
+  selBox: { x0: number; y0: number; x1: number; y1: number } | null = null; // рамка выделения
   private hoverCell = -1;
   missiles: MissilePub[] = []; // ракеты в полёте (читает engine/render)
   private buildings: BuildingPub[] = [];
@@ -291,6 +299,34 @@ export class GameClient {
 
   setShips(ships: TradeShipPub[]) {
     this.ships = ships ?? [];
+  }
+
+  setWarships(warships: WarshipPub[]) {
+    this.warships = warships ?? [];
+    // чистим выделение от исчезнувших (потопленных) кораблей
+    if (this.selectedWarships.size) {
+      const live = new Set(this.warships.map((w) => w.id));
+      for (const id of [...this.selectedWarships]) if (!live.has(id)) this.selectedWarships.delete(id);
+    }
+  }
+
+  // позиции пуль в полёте: [x0,y0,x1,y1,...] (клетки) — рисуем пикселями
+  setShots(flat: number[]) {
+    this.bullets = flat ?? [];
+  }
+
+  // id своего боевого корабля под курсором (экранные координаты) или -1
+  myWarshipUnder(clientX: number, clientY: number): number {
+    const rad = Math.max(11, Math.min(30, this.zoom * 4.5)) + 5;
+    let best = -1, bestD = rad * rad;
+    for (const wship of this.warships) {
+      if (wship.owner !== this.selfId) continue;
+      const sx = this.panX + wship.x * this.zoom;
+      const sy = this.panY + wship.y * this.zoom;
+      const d = (sx - clientX) ** 2 + (sy - clientY) ** 2;
+      if (d < bestD) { bestD = d; best = wship.id; }
+    }
+    return best;
   }
 
   setMissiles(missiles: MissilePub[]) {
@@ -1398,6 +1434,17 @@ export class GameClient {
     let raf = 0;
     let down: { x: number; y: number } | null = null;
     let panning = false;
+    // движение камеры на WASD (плавно, в цикле по зажатым клавишам)
+    const heldKeys = new Set<string>();
+    const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return; // не мешаем вводу
+      const k = e.key.toLowerCase();
+      if (k === 'w' || k === 'a' || k === 's' || k === 'd') heldKeys.add(k);
+    };
+    const onKeyUp = (e: KeyboardEvent) => heldKeys.delete(e.key.toLowerCase());
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -1431,11 +1478,21 @@ export class GameClient {
         this.clampPan();
         if (p >= 1) this.anim = null;
       }
+      // камера на WASD
+      if (this.active && heldKeys.size) {
+        const step = 16;
+        if (heldKeys.has('w')) this.panY += step;
+        if (heldKeys.has('s')) this.panY -= step;
+        if (heldKeys.has('a')) this.panX += step;
+        if (heldKeys.has('d')) this.panX -= step;
+        this.anim = null; // ручное управление отменяет автозум
+        this.clampPan();
+      }
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = '#05070d';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      if (this.w && this.img) {
+      if (this.active && this.w && this.img) {
         const mapChanged = this.dirty;
         if (this.dirty) {
           this.offCtx.putImageData(this.img, 0, 0);
@@ -1449,6 +1506,7 @@ export class GameClient {
         this.drawNames(ctx, dpr);
         drawShips(this, ctx, dpr);
         this.drawBuildings(ctx, dpr);
+        drawFleet(this, ctx, dpr);
         drawMissiles(this, ctx, dpr);
         this.drawMinimap(mapChanged);
       }
@@ -1456,11 +1514,14 @@ export class GameClient {
     };
     raf = requestAnimationFrame(loop);
 
+    let selecting = false; // тянем рамку выделения кораблей (Shift+drag)
     const onDown = (e: PointerEvent) => {
       if (e.button === 2) return; // правый клик — контекстное меню, не пан/атака
       this.anim = null; // пользователь взял управление — стоп автозум
       down = { x: e.clientX, y: e.clientY };
       panning = false;
+      selecting = e.shiftKey; // Shift — выделение своих кораблей рамкой
+      if (selecting) this.selBox = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
       canvas.setPointerCapture(e.pointerId);
     };
     // правый клик / два пальца на тачпаде → морское вторжение
@@ -1480,8 +1541,13 @@ export class GameClient {
       return cy * this.w + cx;
     };
     const onMove = (e: PointerEvent) => {
-      if (this.buildMode || this.nukeKind) this.hoverCell = cellUnder(e); // предпросмотр здания/цели
+      if (this.buildMode || this.nukeKind || this.fleetMode) this.hoverCell = cellUnder(e); // предпросмотр
       if (!down) return;
+      if (selecting && this.selBox) {
+        this.selBox.x1 = e.clientX;
+        this.selBox.y1 = e.clientY;
+        return; // при выделении карту не тянем
+      }
       if (panning || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
         panning = true;
         this.panX += e.movementX;
@@ -1490,11 +1556,52 @@ export class GameClient {
       }
     };
     const onUp = (e: PointerEvent) => {
+      if (selecting && this.selBox) {
+        const b = this.selBox;
+        const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1);
+        const y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+        const tiny = x1 - x0 < 5 && y1 - y0 < 5;
+        if (tiny) {
+          // Shift+клик по кораблю — добавить/убрать из выделения
+          const id = this.myWarshipUnder(e.clientX, e.clientY);
+          if (id >= 0) {
+            if (this.selectedWarships.has(id)) this.selectedWarships.delete(id);
+            else this.selectedWarships.add(id);
+          }
+        } else {
+          // Shift+рамка — добавить корабли в рамке к выделению
+          for (const wship of this.warships) {
+            if (wship.owner !== this.selfId) continue;
+            const sx = this.panX + wship.x * this.zoom;
+            const sy = this.panY + wship.y * this.zoom;
+            if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) this.selectedWarships.add(wship.id);
+          }
+        }
+        this.selBox = null;
+        selecting = false;
+        down = null;
+        panning = false;
+        return;
+      }
       if (down && !panning && this.w) {
-        const cell = cellUnder(e);
-        if (cell >= 0) {
-          if (this.buildMode) this.onBuild?.(cell); // ставим здание
-          else this.onCellClick?.(cell, e.clientX, e.clientY);
+        // обычный клик по своему кораблю — выделить его одного
+        const id = this.myWarshipUnder(e.clientX, e.clientY);
+        if (id >= 0) {
+          this.selectedWarships.clear();
+          this.selectedWarships.add(id);
+        } else {
+          const cell = cellUnder(e);
+          if (cell >= 0) {
+            if (this.buildMode) this.onBuild?.(cell); // ставим здание
+            else if (this.selectedWarships.size && !this.nukeKind && !this.fleetMode && !this.terrain[cell]) {
+              // корабли выделены + клик по ВОДЕ = приказ флоту идти туда
+              this.onFleetMove?.(cell);
+            } else {
+              // клик по суше/территории (или без выделения) — сбрасываем флот и обычное действие (атака)
+              if (this.selectedWarships.size) this.selectedWarships.clear();
+              this.onCellClick?.(cell, e.clientX, e.clientY);
+            }
+          }
         }
       }
       down = null;
@@ -1521,6 +1628,8 @@ export class GameClient {
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', resize);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerup', onUp);

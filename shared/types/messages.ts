@@ -7,6 +7,7 @@ import {
   PlayerPub,
   TradeEarn,
   TradeShipPub,
+  WarshipPub,
 } from './dto';
 
 export type ClientMsg =
@@ -24,6 +25,8 @@ export type ClientMsg =
   | { type: 'build'; bt: BuildingType; cell: number } // построить здание
   | { type: 'upgrade'; cell: number } // прокачать здание
   | { type: 'nuke'; cell: number; kind?: string } // пуск ракеты в точку (с ближайшей шахты)
+  | { type: 'warship'; cell: number } // выпустить боевой корабль из ближайшего порта в зону
+  | { type: 'warshipMove'; ids: number[]; cell: number } // приказ выделенным кораблям идти в точку
   | { type: 'setSpeed'; speed: number } // скорость игры (0 пауза,1,2,3,10)
   | { type: 'propose'; cell: number } // предложить союз владельцу клетки
   | { type: 'allianceResponse'; from: number; accept: boolean } // ответ на предложение
@@ -57,6 +60,8 @@ export type ServerMsg =
       boats: BoatPub[];
       buildings: BuildingPub[];
       ships: TradeShipPub[]; // трейд-корабли (кружки без следа)
+      warships: WarshipPub[]; // боевые корабли
+      shots: number[]; // выстрелы кораблей за тик: [sx,sy,tx,ty,hit,...] (для трассеров)
       missiles: MissilePub[]; // ракеты в полёте
       earnings: TradeEarn[]; // заработок портов за интервал (для всплывашек)
       speed: number; // текущая скорость игры

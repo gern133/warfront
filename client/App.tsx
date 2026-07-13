@@ -45,6 +45,7 @@ export default function App() {
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
   const [nukeKind, setNukeKind] = useState<string | null>(null); // выбранная ракета для наведения
+  const [fleetMode, setFleetMode] = useState(false); // выбран инструмент «Боевой флот»
   const [shownMoney, setShownMoney] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [humans, setHumans] = useState(1);
@@ -52,7 +53,7 @@ export default function App() {
   const [winner, setWinner] = useState<{ name: string; you: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [ratio, setRatio] = useState(30);
+  const [ratio, setRatio] = useState(15);
   const [connected, setConnected] = useState(false);
   const [invadeMenu, setInvadeMenu] = useState<{ cell: number; x: number; y: number } | null>(null);
   const [upgradeMenu, setUpgradeMenu] = useState<
@@ -75,6 +76,9 @@ export default function App() {
   buildModeRef.current = buildMode;
   const nukeKindRef = useRef<string | null>(null);
   nukeKindRef.current = nukeKind;
+  const fleetModeRef = useRef(false);
+  fleetModeRef.current = fleetMode;
+  const canFleetRef = useRef(false); // хватает ли денег на боевой корабль
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
   const canBuildCityRef = useRef(false);
@@ -100,6 +104,9 @@ export default function App() {
   const gc = gcRef.current;
   gc.buildMode = buildMode; // синхронизируем режим постройки с движком
   gc.nukeKind = nukeKind; // и режим наведения ракеты (тип или null)
+  gc.fleetMode = fleetMode; // и режим выпуска боевого корабля
+  // карту рисуем только в игре — в меню/лобби канвас не перерисовываем (экономим кадры)
+  gc.active = phase === 'spawn' || phase === 'playing' || phase === 'dead';
 
   const sendMsg = (msg: object) => wsRef.current?.send(JSON.stringify(msg));
 
@@ -115,6 +122,12 @@ export default function App() {
         if (nukeKindRef.current) {
           sendMsg({ type: 'nuke', cell, kind: nukeKindRef.current });
           setNukeKind(null);
+          return;
+        }
+        // режим флота — клик = выпустить боевой корабль из ближайшего порта в зону
+        if (fleetModeRef.current) {
+          sendMsg({ type: 'warship', cell });
+          setFleetMode(false);
           return;
         }
         // клик по своему зданию — меню прокачки, иначе атака
@@ -163,6 +176,11 @@ export default function App() {
       if (buildModeRef.current) sendMsg({ type: 'build', bt: buildModeRef.current, cell });
       setBuildMode(null);
     };
+    // приказ выделенным боевым кораблям — идти в точку (и патрулировать её)
+    gc.onFleetMove = (cell) => {
+      const ids = [...gc.selectedWarships];
+      if (ids.length) sendMsg({ type: 'warshipMove', ids, cell });
+    };
 
     // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
     // Без неё — старое поведение: через https-туннель (cloudflared/ngrok) wss на том же хосте.
@@ -201,6 +219,8 @@ export default function App() {
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
         gc.setShips(msg.ships ?? []);
+        gc.setWarships(msg.warships ?? []);
+        gc.setShots(msg.shots ?? []);
         gc.setMissiles(msg.missiles ?? []);
         gc.addEarnings(msg.earnings ?? []);
         // HUD (панели React) обновляем через раз (~5 Гц) — canvas рисует из gc и
@@ -326,6 +346,14 @@ export default function App() {
           setBuildMode(null);
           return;
         }
+        if (fleetModeRef.current) {
+          setFleetMode(false);
+          return;
+        }
+        if (gc.selectedWarships.size) {
+          gc.selectedWarships.clear(); // снять выделение флота
+          return;
+        }
         // в игре Esc — переключатель паузы (второй раз продолжает игру)
         if (phaseRef.current === 'playing') {
           sendMsg({ type: 'setSpeed', speed: speedRef.current === 0 ? 1 : 0 });
@@ -344,6 +372,15 @@ export default function App() {
           if (nukeAffordRef.current[nk]) {
             setBuildMode(null);
             setNukeKind((k) => (k === nk ? null : nk));
+          }
+          return;
+        }
+        if (TOOLS[idx]?.fleet) {
+          // 🚢 — режим выпуска боевого корабля
+          if (canFleetRef.current) {
+            setBuildMode(null);
+            setNukeKind(null);
+            setFleetMode((f) => !f);
           }
           return;
         }
@@ -434,6 +471,11 @@ export default function App() {
     basic: nukeReady && shownMoney >= NUKES.basic.cost,
     hydro: nukeReady && shownMoney >= NUKES.hydro.cost,
   };
+  // боевой флот (7): 1-й 250к, 2-й 500к, дальше по 1млн; нужен свой порт
+  const myWarshipCount = gc.warships.filter((w) => w.owner === gc.selfId).length;
+  const nextWarshipCost =
+    myWarshipCount === 0 ? 250_000 : myWarshipCount === 1 ? 500_000 : 1_000_000;
+  canFleetRef.current = shownMoney >= nextWarshipCost && myPorts > 0;
 
   return (
     <div className="app">
@@ -578,6 +620,11 @@ export default function App() {
               🎯 Цель для «{NUKES[nukeKind].name}» — вылетит из ближайшей шахты ({fmtK(NUKES[nukeKind].cost)}). Esc — отмена
             </div>
           )}
+          {fleetMode && (
+            <div className="build-hint">
+              🚢 Кликните точку в море — боевой корабль выйдет из ближайшего порта и займёт зону ({fmtK(nextWarshipCost)}). Клик по кораблю — выделить, Shift+клик — несколько, затем клик по точке — приказ идти. Esc — отмена
+            </div>
+          )}
           <div className="panel hud">
             <div className="hud-top">
               <span className="growth-chip">
@@ -617,44 +664,50 @@ export default function App() {
               {TOOLS.map((t, i) => {
                 const nk = t.nuke; // тип ракеты (☢️/💥) — действие пуска
                 const active =
-                  !!nk || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
+                  !!nk || !!t.fleet || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
                 const cost = nk
                   ? NUKES[nk].cost
-                  : t.bt === 'port'
-                    ? PORT_BUILD_COST
-                    : t.bt === 'city'
-                      ? nextCityCost
-                      : t.bt === 'silo'
-                        ? SILO_COST
-                        : t.bt === 'sam'
-                          ? nextSamCost
-                          : nextHqCost;
+                  : t.fleet
+                    ? nextWarshipCost
+                    : t.bt === 'port'
+                      ? PORT_BUILD_COST
+                      : t.bt === 'city'
+                        ? nextCityCost
+                        : t.bt === 'silo'
+                          ? SILO_COST
+                          : t.bt === 'sam'
+                            ? nextSamCost
+                            : nextHqCost;
                 const count = nk
                   ? nukeAmmo
-                  : t.bt === 'port'
-                    ? myPorts
-                    : t.bt === 'city'
-                      ? myCities
-                      : t.bt === 'silo'
-                        ? mySilos
-                        : t.bt === 'sam'
-                          ? mySams
-                          : t.bt === 'hq'
-                            ? myHqs
-                            : 0;
+                  : t.fleet
+                    ? myWarshipCount
+                    : t.bt === 'port'
+                      ? myPorts
+                      : t.bt === 'city'
+                        ? myCities
+                        : t.bt === 'silo'
+                          ? mySilos
+                          : t.bt === 'sam'
+                            ? mySams
+                            : t.bt === 'hq'
+                              ? myHqs
+                              : 0;
                 const afford = nk
                   ? nukeAffordRef.current[nk]
-                  : t.bt === 'port'
-                    ? canBuildPortRef.current
-                    : t.bt === 'city'
-                      ? canBuildCityRef.current
-                      : t.bt === 'silo'
-                        ? canBuildSiloRef.current
-                        : t.bt === 'sam'
-                          ? canBuildSamRef.current
-                          : shownMoney >= cost;
+                  : t.fleet
+                    ? canFleetRef.current
+                    : t.bt === 'port'
+                      ? canBuildPortRef.current
+                      : t.bt === 'city'
+                        ? canBuildCityRef.current
+                        : t.bt === 'silo'
+                          ? canBuildSiloRef.current
+                          : t.bt === 'sam'
+                            ? canBuildSamRef.current
+                            : shownMoney >= cost;
                 const usable = active && afford;
-                const selected = nk ? nukeKind === nk : buildMode === t.bt && active;
+                const selected = nk ? nukeKind === nk : t.fleet ? fleetMode : buildMode === t.bt && active;
                 return (
                   <button
                     key={i}
@@ -671,9 +724,15 @@ export default function App() {
                       if (!usable) return;
                       if (nk) {
                         setBuildMode(null);
+                        setFleetMode(false);
                         setNukeKind((k) => (k === nk ? null : nk));
+                      } else if (t.fleet) {
+                        setBuildMode(null);
+                        setNukeKind(null);
+                        setFleetMode((f) => !f);
                       } else if (t.bt) {
                         setNukeKind(null);
+                        setFleetMode(false);
                         setBuildMode(selected ? null : t.bt);
                       }
                     }}

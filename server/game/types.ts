@@ -90,3 +90,38 @@ export interface Boat {
   x: number; // текущая позиция на маршруте
   y: number;
 }
+
+// Боевой корабль: идёт к зоне по маршруту path, затем патрулирует её по кругу,
+// стреляя по вражеским (hostile) судам в радиусе
+export interface Warship {
+  id: number;
+  owner: number;
+  x: number; // текущая позиция (клетки)
+  y: number;
+  path: number[]; // маршрут к зоне патруля [x0,y0,...]
+  cum: number[];
+  totalLen: number;
+  traveled: number;
+  moving: boolean; // true — идёт к зоне; false — патрулирует
+  patrolX: number; // центр зоны патруля
+  patrolY: number;
+  patrolAng: number; // текущий угол на орбите
+  hp: number; // здоровье (0..WARSHIP_HP)
+  cooldown: number; // тиков до следующего выстрела
+  hits: number; // сколько пуль прилетело с прошлой полной починки (время ремонта)
+  repairing: boolean; // идёт в порт чиниться / стоит на ремонте
+  healTicks: number; // тиков ремонта осталось (0 = не чинится)
+  healRate: number; // прибавка hp за тик во время ремонта
+}
+
+// Пуля боевого корабля: летит пикселем и догоняет цель, при попадании — урон
+export interface Bullet {
+  id: number;
+  owner: number;
+  fromId: number; // id выпустившего корабля (лимит активных пуль на корабль)
+  x: number;
+  y: number;
+  targetId: number; // id цели
+  targetKind: 'war' | 'trade' | 'boat'; // тип цели
+  dmg: number;
+}

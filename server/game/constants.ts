@@ -6,6 +6,22 @@ export const BOAT_SPEED = 0.6;
 // Максимум своих десантных кораблей в пути одновременно
 export const MAX_BOATS = 3;
 
+// Боевые корабли
+export const WARSHIP_SPEED = 0.7; // скорость хода (клеток/тик)
+export const WARSHIP_HP = 100; // здоровье
+export const WARSHIP_RANGE = 59; // радиус стрельбы (клетки)
+export const WARSHIP_COOLDOWN = 8; // тиков между выстрелами
+export const WARSHIP_DAMAGE = 25; // урон по кораблю: 4 попадания топят (трейдер — с одного)
+export const WARSHIP_PATROL_R = 11; // радиус орбиты патруля (клетки)
+export const WARSHIP_PATROL_SPD = 0.06; // угловая скорость патруля (рад/тик)
+export const BULLET_SPEED = 1.75; // скорость пули (клеток/тик)
+export const WARSHIP_REPAIR_AT = 0.5; // при hp ≤ этой доли уходит в порт чиниться
+export const REPAIR_TICKS_PER_HIT = 50; // 5с (при 10 тик/с) починки за каждое попадание
+// стоимость n-го корабля: 1-й 250к, 2-й 500к, дальше по 1 млн
+export function warshipCost(owned: number): number {
+  return owned === 0 ? 250_000 : owned === 1 ? 500_000 : 1_000_000;
+}
+
 // Случайная карта и общий баланс симуляции
 export const RANDOM_W = 560;
 export const RANDOM_H = 560;

@@ -23,6 +23,71 @@ export function drawShips(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
   }
 }
 
+// Боевые корабли: крупные (≈×5 трейдера) кружки с «башней», полоской здоровья,
+// кольцом выделения; пули-пиксели и рамка выделения
+export function drawFleet(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const px = gc.panX, py = gc.panY, z = gc.zoom;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // пули — маленькие яркие пиксели, летят к цели
+  const bl = gc.bullets;
+  if (bl.length) {
+    const br = Math.max(1.5, Math.min(4, z * 0.6));
+    ctx.fillStyle = '#ffe14d';
+    for (let i = 0; i + 1 < bl.length; i += 2) {
+      const bx = px + bl[i] * z, by = py + bl[i + 1] * z;
+      if (bx < -10 || by < -10 || bx > vw + 10 || by > vh + 10) continue;
+      ctx.beginPath();
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const rad = Math.max(11, Math.min(30, z * 4.5)); // ≈×5 от трейд-кораблей
+  for (const wship of gc.warships) {
+    const sx = px + wship.x * z, sy = py + wship.y * z;
+    if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue;
+    if (wship.owner === gc.selfId && gc.selectedWarships.has(wship.id)) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffe14d';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+    ctx.fillStyle = playerColorCSS(wship.owner);
+    ctx.fill();
+    ctx.lineWidth = Math.max(2, rad * 0.18);
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.stroke();
+    // «башня» — тёмный внутренний круг
+    ctx.beginPath();
+    ctx.arc(sx, sy, rad * 0.42, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(18,22,30,0.85)';
+    ctx.fill();
+    // полоска здоровья над кораблём (если ранен)
+    if (wship.hp < 1) {
+      const bw = rad * 2, bh = Math.max(3, rad * 0.2);
+      const bx = sx - rad, by = sy - rad - bh - 3;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+      ctx.fillStyle = wship.hp > 0.5 ? '#4caf50' : wship.hp > 0.25 ? '#ffb300' : '#e53935';
+      ctx.fillRect(bx, by, bw * wship.hp, bh);
+    }
+  }
+  // рамка выделения (RTS)
+  if (gc.selBox) {
+    const b = gc.selBox;
+    const x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
+    const w = Math.abs(b.x1 - b.x0), h = Math.abs(b.y1 - b.y0);
+    ctx.fillStyle = 'rgba(255,225,77,0.12)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255,225,77,0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, w, h);
+  }
+}
+
 // Ракеты: баллистическая дуга, трассер за головой, светящийся кружок, кольцо
 // радиуса поражения в цели
 export function drawMissiles(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {

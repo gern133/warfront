@@ -143,6 +143,19 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       if (err) send(ws, { type: 'error', message: err });
       break;
     }
+    case 'warship': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      const err = room.game.launchWarship(st.playerId, msg.cell | 0);
+      if (err) send(ws, { type: 'error', message: err });
+      break;
+    }
+    case 'warshipMove': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      room.game.moveWarships(st.playerId, (msg.ids || []).map((n) => n | 0), msg.cell | 0);
+      break;
+    }
     case 'propose': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;

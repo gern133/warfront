@@ -34,6 +34,15 @@ export interface TradeShipPub {
   y: number;
 }
 
+// Боевой корабль: плывёт к зоне и патрулирует её, стреляя по вражеским судам
+export interface WarshipPub {
+  id: number;
+  owner: number;
+  x: number;
+  y: number;
+  hp: number; // 0..1 — доля здоровья (для полоски)
+}
+
 // Всплывающий заработок (для показа КПД игроку) — в точке, где корабль заработал
 export interface TradeEarn {
   x: number; // позиция корабля в момент выплаты (чужой порт / свой при возврате)

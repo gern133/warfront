@@ -16,6 +16,7 @@ import {
   hqUpgradeCost,
   hqUpgradeTicks,
   TradeShipPub,
+  WarshipPub,
   TradeEarn,
   PORT_BUILD_COST,
   PORT_BUILD_TICKS,
@@ -39,11 +40,22 @@ import {
   samCost,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
-import { Player, Building, TradeShip, Missile, Attack, Boat } from './types';
+import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet } from './types';
 import {
   TRADE_SPEED,
   BOAT_SPEED,
   MAX_BOATS,
+  WARSHIP_SPEED,
+  WARSHIP_HP,
+  WARSHIP_RANGE,
+  WARSHIP_COOLDOWN,
+  WARSHIP_DAMAGE,
+  WARSHIP_PATROL_R,
+  WARSHIP_PATROL_SPD,
+  BULLET_SPEED,
+  WARSHIP_REPAIR_AT,
+  REPAIR_TICKS_PER_HIT,
+  warshipCost,
   RANDOM_W,
   RANDOM_H,
   LAND_RATIO,
@@ -84,6 +96,10 @@ export class Game {
   private nextBuildingId = 1;
   tradeShips: TradeShip[] = [];
   private nextShipId = 1;
+  warships: Warship[] = []; // боевые корабли
+  private nextWarshipId = 1;
+  bullets: Bullet[] = []; // пули кораблей в полёте
+  private nextBulletId = 1;
   missiles: Missile[] = []; // ракеты в полёте
   private nextMissileId = 1;
   tradeEarnings: TradeEarn[] = []; // заработок портов за интервал (чистится в index)
@@ -146,6 +162,8 @@ export class Game {
     this.boats = [];
     this.buildings = [];
     this.tradeShips = [];
+    this.warships = [];
+    this.bullets = [];
     this.missiles = [];
     this.tradeEarnings = [];
     this.allies.clear();
@@ -300,15 +318,16 @@ export class Game {
     );
   }
 
-  // Пиксельный A*-поиск морского пути СТРОГО по воде от ЛЮБОЙ водной клетки-засева
-  // (seeds — вся вода у берега игрока) до воды, примыкающей к материку цели
-  // (targetLand), ближайшей к точке клика (cx,cy). Засев всем берегом устойчив к
-  // «запертым» фьордам/проливам у одной клетки. Путь держится открытой воды,
-  // проходит проливы, по суше НЕ идёт. null — берег цели морем недостижим (Каспий).
+  // Пиксельный A*-поиск морского пути СТРОГО по воде от водных клеток-засева
+  // (seeds) до цели. Цель двух видов: targetLand >= 0 — вода, примыкающая к
+  // материку с этим landId (десант к берегу); targetLand < 0 — сама точка (cx,cy)
+  // (боевой корабль идёт в морскую зону). Путь держится открытой воды, проходит
+  // проливы, по суше НЕ идёт. null — цель морем недостижима.
   private waterPathFine(seeds: number[], targetLand: number, cx: number, cy: number): number[] | null {
     const w = this.w, h = this.h, N = w * h;
-    const gx = cx, gy = cy; // эвристика тянет к точке клика
-    const R2 = 25; // окно «дошли вплотную к клику» (5 клеток)
+    const gx = cx, gy = cy; // эвристика тянет к точке цели
+    const R2 = 25; // окно «дошли вплотную к цели» (5 клеток)
+    const pointMode = targetLand < 0; // цель — точка в море, а не берег материка
     if (this.finePrev.length !== N) {
       this.finePrev = new Int32Array(N);
       this.fineDisc = new Int32Array(N);
@@ -376,8 +395,12 @@ export class Game {
       closed[c] = gen;
       if (++explored > EXPLORE_CAP) break;
       const x = c % w, y = (c / w) | 0;
-      if (touchesTarget(x, y)) { // вода у берега цели — кандидат на точку высадки
-        const ex = x - gx, ey = y - gy, ed = ex * ex + ey * ey;
+      const ex = x - gx, ey = y - gy, ed = ex * ex + ey * ey;
+      if (pointMode) {
+        // цель — морская точка: ближайшую всегда помним, финиш вплотную
+        if (ed < bestD) { bestD = ed; bestCell = c; }
+        if (ed <= 4) { endCell = c; break; }
+      } else if (touchesTarget(x, y)) { // вода у берега цели — кандидат на высадку
         if (ed < bestD) { bestD = ed; bestCell = c; }
         if (ed <= R2) { endCell = c; break; } // прямо у точки клика — финиш
       }
@@ -637,6 +660,8 @@ export class Game {
     this.boats = this.boats.filter((b) => b.player !== id);
     this.buildings = this.buildings.filter((b) => b.owner !== id);
     this.tradeShips = this.tradeShips.filter((s) => s.owner !== id);
+    this.warships = this.warships.filter((s) => s.owner !== id);
+    this.bullets = this.bullets.filter((b) => b.owner !== id);
     this.clearRelations(id);
     this.fortDirty = true;
     this.cellsOf.delete(id);
@@ -688,6 +713,8 @@ export class Game {
     if (killer?.alive) killer.money += p.money;
     p.money = 0;
     this.tradeShips = this.tradeShips.filter((s) => s.owner !== p.id);
+    this.warships = this.warships.filter((s) => s.owner !== p.id);
+    this.bullets = this.bullets.filter((b) => b.owner !== p.id);
     this.clearRelations(p.id);
     // здания НЕ сносим тут: их клетки уже захвачены, и checkBuildings корректно
     // взорвёт щит (обычный мгновенно, прокачанный через фитиль)
@@ -797,6 +824,10 @@ export class Game {
     const arr = fine[fine.length - 1];
     const near = this.nearestLandCell(arr % this.w, (arr / this.w) | 0, this.ck * 2);
     if (near >= 0) landCell = near;
+    // отправка десанта на чужую территорию — уже объявление войны: жертва
+    // становится врагом сразу (её корабли начинают бить наш десант в пути)
+    const victim = this.owners[landCell];
+    if (victim > 0 && victim !== playerId) this.markHostile(playerId, victim);
     // точка старта = наш берег рядом с началом маршрута
     const startCell = fine[0];
     const embark = this.nearestLandCell(startCell % this.w, (startCell / this.w) | 0, this.ck * 2);
@@ -841,6 +872,293 @@ export class Game {
   recallBoat(playerId: number, boatId: number) {
     const b = this.boats.find((x) => x.id === boatId && x.player === playerId);
     if (b) b.returning = true;
+  }
+
+  // сколько боевых кораблей у игрока (для цены следующего)
+  private warshipCount(playerId: number): number {
+    return this.warships.reduce((n, s) => (s.owner === playerId ? n + 1 : n), 0);
+  }
+
+  // Маршрут боевого корабля по воде от точки (fromX,fromY) к морской зоне (wx,wy).
+  // Пиксельный A* (как у десанта) — строго по воде, устойчив к узким проливам.
+  private warRoute(fromX: number, fromY: number, wx: number, wy: number): { path: number[]; cum: number[]; totalLen: number } | null {
+    const w = this.w, h = this.h;
+    const seeds: number[] = [];
+    for (let dy = -4; dy <= 4; dy++)
+      for (let dx = -4; dx <= 4; dx++) {
+        if (dx * dx + dy * dy > 16) continue;
+        const x = fromX + dx, y = fromY + dy;
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const c = y * w + x;
+        if (!this.terrain[c]) seeds.push(c);
+      }
+    if (!seeds.length) return null;
+    const fine = this.waterPathFine(seeds, -1, wx, wy);
+    if (!fine) return null;
+    const raw: number[] = [fromX + 0.5, fromY + 0.5];
+    for (const c of fine) raw.push((c % w) + 0.5, ((c / w) | 0) + 0.5);
+    raw.push(wx + 0.5, wy + 0.5);
+    const path = dpSimplify(chaikin(raw), 0.8);
+    const cum: number[] = [0];
+    for (let i = 2; i < path.length; i += 2)
+      cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+    return { path, cum, totalLen: cum[cum.length - 1] || 1 };
+  }
+
+  // Выпустить боевой корабль из ближайшего порта в зону (клетка клика). Корабль
+  // доплывёт до зоны и будет патрулировать её, стреляя по вражеским судам.
+  launchWarship(playerId: number, cell: number): string | null {
+    const p = this.players.get(playerId);
+    if (!p?.alive || !p.spawned) return 'Сначала выберите старт';
+    if (cell < 0 || cell >= this.cells) return null;
+    // центр зоны — ближайшая вода к точке клика
+    const [wx, wy] = this.nearestWaterFine(cell % this.w, (cell / this.w) | 0, 40);
+    const targetWater = wy * this.w + wx;
+    if (this.terrain[targetWater]) return 'Рядом нет моря';
+    const cost = warshipCost(this.warshipCount(playerId));
+    if (p.money < cost) return `Нужно ${cost.toLocaleString('ru-RU')}`;
+    // ближайший свой достроенный порт к зоне
+    let port = -1;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'port' || b.owner !== playerId || this.tickNo < b.readyTick) continue;
+      const dx = (b.cell % this.w) - wx;
+      const dy = ((b.cell / this.w) | 0) - wy;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; port = b.cell; }
+    }
+    if (port < 0) return 'Нужен торговый порт';
+    const route = this.warRoute(port % this.w, (port / this.w) | 0, wx, wy);
+    if (!route) return 'Нет морского пути к зоне';
+    p.money -= cost;
+    this.warships.push({
+      id: this.nextWarshipId++,
+      owner: playerId,
+      x: (port % this.w) + 0.5,
+      y: ((port / this.w) | 0) + 0.5,
+      path: route.path,
+      cum: route.cum,
+      totalLen: route.totalLen,
+      traveled: 0,
+      moving: true,
+      patrolX: wx + 0.5,
+      patrolY: wy + 0.5,
+      patrolAng: 0,
+      hp: WARSHIP_HP,
+      cooldown: 0,
+      hits: 0,
+      repairing: false,
+      healTicks: 0,
+      healRate: 0,
+    });
+    return null;
+  }
+
+  // Приказ выделенным кораблям: идти в новую зону (от текущей позиции) и патрулировать
+  moveWarships(playerId: number, ids: number[], cell: number) {
+    if (cell < 0 || cell >= this.cells || !ids?.length) return;
+    const [wx, wy] = this.nearestWaterFine(cell % this.w, (cell / this.w) | 0, 40);
+    if (this.terrain[wy * this.w + wx]) return;
+    const set = new Set(ids);
+    for (const s of this.warships) {
+      if (s.owner !== playerId || !set.has(s.id)) continue;
+      const route = this.warRoute(Math.round(s.x) | 0, Math.round(s.y) | 0, wx, wy);
+      if (!route) continue;
+      s.path = route.path;
+      s.cum = route.cum;
+      s.totalLen = route.totalLen;
+      s.traveled = 0;
+      s.moving = true;
+      s.patrolX = wx + 0.5;
+      s.patrolY = wy + 0.5;
+    }
+  }
+
+  // ближайший свой достроенный порт к точке (x,y), клетка или -1
+  private nearestOwnPort(playerId: number, x: number, y: number): number {
+    let port = -1, bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'port' || b.owner !== playerId || this.tickNo < b.readyTick) continue;
+      const dx = (b.cell % this.w) - x, dy = ((b.cell / this.w) | 0) - y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; port = b.cell; }
+    }
+    return port;
+  }
+
+  private stepWarships() {
+    const R2 = WARSHIP_RANGE * WARSHIP_RANGE;
+    const w = this.w, h = this.h;
+    for (const s of this.warships) {
+      const p = this.players.get(s.owner);
+      if (!p?.alive) { s.hp = 0; continue; }
+      // стоим в порту на ремонте — плавно восполняем hp, потом обратно в зону
+      if (s.healTicks > 0) {
+        s.hp = Math.min(WARSHIP_HP, s.hp + s.healRate);
+        if (--s.healTicks <= 0) {
+          s.hp = WARSHIP_HP;
+          s.hits = 0;
+          s.repairing = false;
+          // возвращаемся патрулировать свою зону
+          const route = this.warRoute(Math.round(s.x) | 0, Math.round(s.y) | 0, Math.round(s.patrolX) | 0, Math.round(s.patrolY) | 0);
+          if (route) { s.path = route.path; s.cum = route.cum; s.totalLen = route.totalLen; s.traveled = 0; s.moving = true; }
+        }
+        continue; // на ремонте не двигается и не стреляет
+      }
+      if (s.moving) {
+        s.traveled += WARSHIP_SPEED;
+        if (s.traveled >= s.totalLen) {
+          s.moving = false;
+          if (s.repairing) {
+            // дошли до порта — встаём на ремонт: 5с за каждое попадание
+            s.healTicks = Math.max(REPAIR_TICKS_PER_HIT, s.hits * REPAIR_TICKS_PER_HIT);
+            s.healRate = (WARSHIP_HP - s.hp) / s.healTicks;
+          }
+        } else {
+          const d = s.traveled;
+          let seg = 0;
+          while (seg < s.cum.length - 2 && s.cum[seg + 1] < d) seg++;
+          const segLen = s.cum[seg + 1] - s.cum[seg] || 1;
+          const t = (d - s.cum[seg]) / segLen;
+          s.x = s.path[seg * 2] + (s.path[(seg + 1) * 2] - s.path[seg * 2]) * t;
+          s.y = s.path[seg * 2 + 1] + (s.path[(seg + 1) * 2 + 1] - s.path[seg * 2 + 1]) * t;
+        }
+      }
+      if (!s.moving && !s.repairing) {
+        // патруль по кругу вокруг центра зоны; держимся воды
+        s.patrolAng += WARSHIP_PATROL_SPD;
+        let tx = s.patrolX + Math.cos(s.patrolAng) * WARSHIP_PATROL_R;
+        let ty = s.patrolY + Math.sin(s.patrolAng) * WARSHIP_PATROL_R;
+        const cx = Math.round(tx), cy = Math.round(ty);
+        if (cx < 0 || cy < 0 || cx >= w || cy >= h || this.terrain[cy * w + cx]) {
+          const [nwx, nwy] = this.nearestWaterFine(
+            Math.max(0, Math.min(w - 1, cx)),
+            Math.max(0, Math.min(h - 1, cy)),
+            WARSHIP_PATROL_R
+          );
+          tx = nwx + 0.5; ty = nwy + 0.5;
+        }
+        const dx = tx - s.x, dy = ty - s.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const step = Math.min(WARSHIP_SPEED, dist);
+        s.x += (dx / dist) * step;
+        s.y += (dy / dist) * step;
+      }
+      // стрельба: по каждой цели — только 1 свой снаряд в полёте; видя несколько
+      // целей сразу, корабль даёт залп по РАЗНЫМ целям (до лимита в 3 пули).
+      if (s.cooldown > 0) { s.cooldown--; continue; }
+      const busy = new Set<number>(); // цели, по которым уже летит наш снаряд (id по типу)
+      let afloat = 0;
+      for (const b of this.bullets) if (b.fromId === s.id) { afloat++; busy.add(b.targetKind.charCodeAt(0) * 1e7 + b.targetId); }
+      let slots = 3 - afloat;
+      if (slots <= 0) continue;
+      // все вражеские цели в радиусе (кроме уже обстреливаемых), ближние первыми
+      const cands: { d: number; kind: 'war' | 'trade' | 'boat'; id: number }[] = [];
+      const key = (k: string, id: number) => k.charCodeAt(0) * 1e7 + id;
+      for (const ts of this.tradeShips) {
+        if (ts.owner === s.owner || this.relation(s.owner, ts.owner) !== 'hostile') continue;
+        const d = (ts.x - s.x) ** 2 + (ts.y - s.y) ** 2;
+        if (d <= R2 && !busy.has(key('t', ts.id))) cands.push({ d, kind: 'trade', id: ts.id });
+      }
+      for (const bt of this.boats) {
+        if (bt.player === s.owner || this.relation(s.owner, bt.player) !== 'hostile') continue;
+        const d = (bt.x - s.x) ** 2 + (bt.y - s.y) ** 2;
+        if (d <= R2 && !busy.has(key('b', bt.id))) cands.push({ d, kind: 'boat', id: bt.id });
+      }
+      for (const w2 of this.warships) {
+        if (w2 === s || w2.owner === s.owner || this.relation(s.owner, w2.owner) !== 'hostile') continue;
+        if (w2.healTicks > 0) continue; // корабль на починке в порту — не атакуем
+        const d = (w2.x - s.x) ** 2 + (w2.y - s.y) ** 2;
+        if (d <= R2 && !busy.has(key('w', w2.id))) cands.push({ d, kind: 'war', id: w2.id });
+      }
+      cands.sort((a, b) => a.d - b.d);
+      let fired = 0;
+      for (const t of cands) {
+        if (slots <= 0) break;
+        this.bullets.push({
+          id: this.nextBulletId++,
+          owner: s.owner,
+          fromId: s.id,
+          x: s.x,
+          y: s.y,
+          targetId: t.id,
+          targetKind: t.kind,
+          dmg: WARSHIP_DAMAGE,
+        });
+        slots--;
+        fired++;
+      }
+      if (fired) s.cooldown = WARSHIP_COOLDOWN;
+    }
+    if (this.warships.some((s) => s.hp <= 0)) {
+      this.warships = this.warships.filter((s) => s.hp > 0);
+    }
+  }
+
+  // Пули: пиксель летит и догоняет цель; при попадании — урон. Урон боевому
+  // кораблю копит попадания (время ремонта) и при ≤50% отправляет его в порт.
+  private stepBullets() {
+    if (!this.bullets.length) return;
+    let boatKilled = false;
+    for (const b of this.bullets) {
+      // цель по типу; если её уже нет (потоплена / десант успел высадиться) — пуля мажет
+      const tgt =
+        b.targetKind === 'war'
+          ? this.warships.find((s) => s.id === b.targetId && s.healTicks <= 0) // на починке — неуязвим
+          : b.targetKind === 'boat'
+            ? this.boats.find((s) => s.id === b.targetId && s.troops >= 1)
+            : this.tradeShips.find((s) => s.id === b.targetId && !s.done);
+      if (!tgt) { b.dmg = 0; continue; } // цель исчезла — пуля гаснет (промах)
+      const dx = tgt.x - b.x, dy = tgt.y - b.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      if (dist <= BULLET_SPEED + 1.5) {
+        // попадание
+        if (b.targetKind === 'war') {
+          const s = tgt as Warship;
+          s.hp -= b.dmg;
+          s.hits++;
+          // при ≤50% и если ещё не чинится — сам плывёт в ближайший свой порт
+          if (!s.repairing && s.hp > 0 && s.hp <= WARSHIP_HP * WARSHIP_REPAIR_AT) {
+            const port = this.nearestOwnPort(s.owner, s.x, s.y);
+            if (port >= 0) {
+              const route = this.warRoute(Math.round(s.x) | 0, Math.round(s.y) | 0, port % this.w, (port / this.w) | 0);
+              if (route) {
+                s.repairing = true;
+                s.path = route.path; s.cum = route.cum; s.totalLen = route.totalLen; s.traveled = 0; s.moving = true;
+              }
+            }
+          }
+        } else if (b.targetKind === 'boat') {
+          (tgt as Boat).troops = 0; // десант потоплен
+          boatKilled = true;
+        } else {
+          (tgt as TradeShip).done = true;
+        }
+        b.dmg = 0; // пуля отработала
+      } else {
+        b.x += (dx / dist) * BULLET_SPEED;
+        b.y += (dy / dist) * BULLET_SPEED;
+      }
+    }
+    this.bullets = this.bullets.filter((b) => b.dmg > 0);
+    this.tradeShips = this.tradeShips.filter((s) => !s.done);
+    if (boatKilled) this.boats = this.boats.filter((b) => b.troops >= 1);
+  }
+
+  bulletsPub(): number[] {
+    const out: number[] = [];
+    for (const b of this.bullets) out.push(+b.x.toFixed(1), +b.y.toFixed(1));
+    return out;
+  }
+
+  warshipsPub(): WarshipPub[] {
+    return this.warships.map((s) => ({
+      id: s.id,
+      owner: s.owner,
+      x: +s.x.toFixed(1),
+      y: +s.y.toFixed(1),
+      hp: Math.max(0, Math.min(1, s.hp / WARSHIP_HP)),
+    }));
   }
 
   private stepBoats() {
@@ -1547,7 +1865,7 @@ export class Game {
       } else if (m.prog >= 1) {
         m.done = true;
         const spec = NUKES[m.kind];
-        this.detonate(m.targetCell, spec?.radius ?? HQ_EXPLODE_RADIUS * 2, spec?.armyFrac ?? 0.25);
+        this.detonate(m.targetCell, spec?.radius ?? HQ_EXPLODE_RADIUS * 2, spec?.armyFrac ?? 0.25, m.owner);
       }
     }
     if (this.missiles.some((m) => m.done)) {
@@ -1655,7 +1973,7 @@ export class Game {
   // каждого задетого игрока. armyFrac >= 0 — фиксированная доля армии; < 0 —
   // пропорционально доле потерянной территории. Параметры варьируются по типу
   // оружия (щит/ядерка/будущие ракеты).
-  private detonate(cell: number, R: number, armyFrac: number) {
+  private detonate(cell: number, R: number, armyFrac: number, attacker = 0) {
     const cx = cell % this.w;
     const cy = (cell / this.w) | 0;
     const R2 = R * R;
@@ -1682,6 +2000,8 @@ export class Game {
         const frac = armyFrac >= 0 ? armyFrac : n / p.cells;
         p.troops = Math.max(0, p.troops - p.troops * frac);
       }
+      // удар по чужой территории делает жертву врагом (как и наземная атака)
+      if (attacker > 0) this.markHostile(attacker, owner);
     }
     for (const n of inBlast) this.setOwner(n, 0);
   }
@@ -1810,6 +2130,8 @@ export class Game {
     this.stepBoats();
     this.spawnTradeShips();
     this.stepTradeShips();
+    this.stepWarships();
+    this.stepBullets();
     this.reloadSilos();
     this.stepMissiles();
     for (const a of this.attacks) this.stepAttack(a);
@@ -1970,6 +2292,68 @@ export class Game {
     }
   }
 
+  // Флот бота: перехват десантов, прикрытие берега/торговых путей, постройка кораблей.
+  // Патруль у своего порта сам стреляет по проходящим вражеским судам (торговля,
+  // десанты) — это и есть «перекрытие пролива/торгового пути» у своих берегов.
+  private botFleet(p: Player) {
+    const ports = this.buildings.filter(
+      (b) => b.owner === p.id && b.type === 'port' && this.tickNo >= b.readyTick
+    );
+    if (!ports.length) return; // без порта корабль не выпустить
+    const myWar = this.warships.filter((s) => s.owner === p.id);
+    // вражеские десанты, идущие к нам (враждебные) — цель для перехвата
+    const threats = this.boats.filter(
+      (b) =>
+        b.player !== p.id &&
+        this.relation(p.id, b.player) === 'hostile' &&
+        (b.target === p.id || this.owners[b.landCell] === p.id)
+    );
+    // перехват: направляем корабли на ближайший десант, но только если ни один
+    // ещё не прикрывает его (иначе зря пересчитываем маршрут каждый тик)
+    if (threats.length && myWar.length) {
+      const t = threats[0];
+      const covered = myWar.some((s) => (s.x - t.x) ** 2 + (s.y - t.y) ** 2 < WARSHIP_RANGE * WARSHIP_RANGE);
+      if (!covered) {
+        const cell = (Math.round(t.y) | 0) * this.w + (Math.round(t.x) | 0);
+        this.moveWarships(p.id, myWar.map((s) => s.id), cell);
+      }
+    }
+    // постройка нового корабля (не больше 3), если хватает денег
+    if (myWar.length < 3 && p.money >= warshipCost(myWar.length)) {
+      let zone = -1;
+      if (threats.length) {
+        const t = threats[0];
+        zone = (Math.round(t.y) | 0) * this.w + (Math.round(t.x) | 0);
+      } else {
+        // иначе — патруль у своего порта (прикрытие подходов с моря и торговли)
+        const port = ports[(Math.random() * ports.length) | 0].cell;
+        const [wx, wy] = this.nearestWaterFine(port % this.w, (port / this.w) | 0, 14);
+        if (!this.terrain[wy * this.w + wx]) zone = wy * this.w + wx;
+      }
+      if (zone >= 0) this.launchWarship(p.id, zone);
+    }
+  }
+
+  // Морской десант бота: найти прибрежную клетку врага (в т.ч. на другом острове)
+  // и высадиться туда (launchInvasion сам проверит морской путь).
+  private botSeaInvade(p: Player) {
+    if (this.boats.filter((b) => b.player === p.id).length >= 2) return; // не спамим
+    const foes = [...this.players.values()].filter(
+      (x) => x.id !== p.id && x.alive && x.cells > 0 && this.relation(p.id, x.id) !== 'allied'
+    );
+    if (!foes.length) return;
+    const foe = foes[(Math.random() * foes.length) | 0];
+    const fcells = this.playerCells(foe.id);
+    if (!fcells.length) return;
+    for (let tries = 0; tries < 24; tries++) {
+      const c = fcells[(Math.random() * fcells.length) | 0];
+      if (this.owners[c] !== foe.id) continue;
+      let coastal = false;
+      this.forNeighbors(c, (n) => { if (!this.terrain[n]) coastal = true; });
+      if (coastal) { this.launchInvasion(p.id, c, 0.4); return; }
+    }
+  }
+
   private botThink(p: Player) {
     // считаем соседей только по своим клеткам (не по всей карте), с выборкой
     const cells = this.playerCells(p.id);
@@ -2086,6 +2470,10 @@ export class Game {
         const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
         this.launchNuke(p.id, ty * this.w + tx, kind);
       }
+      // Флот: строит боевые корабли, прикрывает берег/торговлю, перехватывает
+      // вражеские десанты; изредка сам высаживает десант на чужой берег/остров.
+      if (Math.random() < 0.35) this.botFleet(p);
+      if (Math.random() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
     }
 
     // Страны: агрессия зависит от сложности
