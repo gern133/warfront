@@ -753,15 +753,22 @@ export default function App() {
                   {rel === 'allied' ? (
                     <div className="ctx-note">🤝 Союзник — атаковать нельзя</div>
                   ) : (
-                    <button
-                      className="ctx-btn"
-                      onClick={() => {
-                        sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
-                        setInvadeMenu(null);
-                      }}
-                    >
-                      🚢 Морское вторжение · {Math.min(50, ratio)}%
-                    </button>
+                    <>
+                      <button
+                        className="ctx-btn"
+                        disabled={myBoats.length >= 3}
+                        onClick={() => {
+                          if (myBoats.length >= 3) return;
+                          sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
+                          setInvadeMenu(null);
+                        }}
+                      >
+                        🚢 Морское вторжение · {Math.min(50, ratio)}%
+                      </button>
+                      {myBoats.length >= 3 && (
+                        <div className="ctx-note">🚢 Лимит: 3 корабля в пути</div>
+                      )}
+                    </>
                   )}
                   {owner > 0 && rel === 'allied' && (
                     <button

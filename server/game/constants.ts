@@ -3,6 +3,8 @@ import { Difficulty } from '../../shared/protocol';
 // Скорости движения кружков (клеток за тик)
 export const TRADE_SPEED = 0.6;
 export const BOAT_SPEED = 0.6;
+// Максимум своих десантных кораблей в пути одновременно
+export const MAX_BOATS = 3;
 
 // Случайная карта и общий баланс симуляции
 export const RANDOM_W = 560;

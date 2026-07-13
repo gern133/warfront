@@ -43,6 +43,7 @@ import { Player, Building, TradeShip, Missile, Attack, Boat } from './types';
 import {
   TRADE_SPEED,
   BOAT_SPEED,
+  MAX_BOATS,
   RANDOM_W,
   RANDOM_H,
   LAND_RATIO,
@@ -769,6 +770,10 @@ export class Game {
   private launchBoat(playerId: number, targetCell: number, troops: number): boolean {
     const p = this.players.get(playerId);
     if (!p?.alive || troops < 10) return false;
+    // не больше 3 своих десантных кораблей в пути одновременно
+    let afloat = 0;
+    for (const b of this.boats) if (b.player === playerId && ++afloat >= MAX_BOATS) break;
+    if (afloat >= MAX_BOATS) return false;
     const tx = targetCell % this.w;
     const ty = (targetCell / this.w) | 0;
     // берег высадки — кромка целевого материка у самой точки клика (а не у
