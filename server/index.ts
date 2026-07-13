@@ -147,6 +147,19 @@ setInterval(() => {
       game.relChanged.clear();
     }
 
+    // события союзов (расторжения) — шлём в ленту тому, с кем расторгли
+    if (game.relNotices.length) {
+      for (const n of game.relNotices) {
+        for (const ws of room.clients) {
+          const cst = clients.get(ws);
+          if (cst?.playerId !== n.to) continue;
+          send(ws, { type: 'notice', kind: n.kind, name: n.name });
+          break;
+        }
+      }
+      game.relNotices.length = 0;
+    }
+
     // объявляем победителя один раз; карту НЕ сбрасываем — ждём выбора игрока
     // (Реванш или Продолжить играть) в модалке на клиенте
     if (game.winnerId !== null && room.winnerSent !== game.winnerId) {

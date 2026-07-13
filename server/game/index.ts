@@ -114,6 +114,9 @@ export class Game {
   private roadVer = 0;
   private roadSig = 0; // подпись набора дорожной инфраструктуры (для инвалидации кэша)
   private roadNet = new Map<number, { ver: number; adj: Map<number, number[]>; edge: Map<number, number[]>; revenue: Set<number> }>();
+  // персистентные дороги игрока (ключ ребра → путь): переживают пересчёт, чтобы
+  // существующие маршруты не переприкладывались при постройке нового здания
+  private roadEdges = new Map<number, Map<number, number[]>>();
   private roadsCache: { ver: number; data: number[][] } | null = null;
   bullets: Bullet[] = []; // пули кораблей в полёте
   private nextBulletId = 1;
@@ -125,6 +128,8 @@ export class Game {
   allies = new Map<number, Set<number>>();
   hostiles = new Map<number, Set<number>>();
   relChanged = new Set<number>();
+  // события союзов для ленты (расторжения) — кому и от кого; чистится в index
+  relNotices: { to: number; kind: 'break'; name: string }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
@@ -182,11 +187,13 @@ export class Game {
     this.warships = [];
     this.trucks = [];
     this.roadNet.clear();
+    this.roadEdges.clear();
     this.roadsCache = null;
     this.roadVer++;
     this.bullets = [];
     this.missiles = [];
     this.tradeEarnings = [];
+    this.relNotices = [];
     this.allies.clear();
     this.hostiles.clear();
     this.relChanged.clear();
@@ -1290,27 +1297,48 @@ export class Game {
     return this.landPathFine(a, b);
   }
 
-  // Дорожная сеть игрока (кэш). Узлы — заводы/города/порты. Строим связующее
-  // дерево с прямыми углами: от завода отходит максимум 4 дороги (перекрёсток),
-  // остальные здания цепляются здание-к-зданию. Общее здание двух зон связывает
-  // зоны в одну компоненту (грузовик объезжает весь связанный участок).
+  // Дорожная сеть игрока (кэш). Узлы — заводы/города/порты. Каждый узел —
+  // перекрёсток: до 4 дорог в любую сторону. Сеть НАРАЩИВАЕТСЯ инкрементально:
+  // существующие дороги сохраняются, новое здание лишь ДОБАВЛЯЕТ дорогу к
+  // ближайшему узлу со свободным перекрёстком (маршруты не переприкладываются).
   private getRoadNet(owner: number) {
     const cached = this.roadNet.get(owner);
     if (cached && cached.ver === this.roadVer) return cached;
     const R2 = FACTORY_RANGE * FACTORY_RANGE;
+    const MAX_DEG = 4; // перекрёсток: максимум 4 дороги из любого узла
     const nodes: number[] = [];
-    const facSet = new Set<number>();
+    const nodeSet = new Set<number>();
     const revenue = new Set<number>();
     for (const b of this.buildings) {
       if (b.owner !== owner || this.tickNo < b.readyTick) continue;
-      if (b.type === 'factory') { nodes.push(b.cell); facSet.add(b.cell); }
-      else if (b.type === 'city' || b.type === 'port') { nodes.push(b.cell); revenue.add(b.cell); }
+      if (b.type === 'factory') { nodes.push(b.cell); nodeSet.add(b.cell); }
+      else if (b.type === 'city' || b.type === 'port') { nodes.push(b.cell); nodeSet.add(b.cell); revenue.add(b.cell); }
     }
+    const w = this.w, cells = this.cells;
+    const key = (a: number, b: number) => (a < b ? a * cells + b : b * cells + a);
+    // персистентный набор дорог: сохраняем то, что уже проложено
+    let committed = this.roadEdges.get(owner);
+    if (!committed) { committed = new Map(); this.roadEdges.set(owner, committed); }
+    // выкидываем только те дороги, чьи концы больше не существуют/не наши
+    for (const k of [...committed.keys()]) {
+      const a = Math.floor(k / cells), b = k % cells;
+      if (!nodeSet.has(a) || !nodeSet.has(b)) committed.delete(k);
+    }
+    // adj + союзы (union-find) + степени из уцелевших дорог
     const adj = new Map<number, number[]>();
-    const edge = new Map<number, number[]>();
-    const key = (a: number, b: number) => (a < b ? a * this.cells + b : b * this.cells + a);
-    const w = this.w;
-    // кандидаты рёбер: пары узлов в радиусе завода, по возрастанию расстояния
+    const uf = new Map<number, number>(); for (const n of nodes) uf.set(n, n);
+    const find = (x: number): number => { while (uf.get(x) !== x) { uf.set(x, uf.get(uf.get(x)!)!); x = uf.get(x)!; } return x; };
+    const deg = new Map<number, number>();
+    for (const k of committed.keys()) {
+      const a = Math.floor(k / cells), b = k % cells;
+      (adj.get(a) ?? adj.set(a, []).get(a)!).push(b);
+      (adj.get(b) ?? adj.set(b, []).get(b)!).push(a);
+      uf.set(find(a), find(b));
+      deg.set(a, (deg.get(a) ?? 0) + 1);
+      deg.set(b, (deg.get(b) ?? 0) + 1);
+    }
+    // ДОБАВЛЯЕМ дороги только чтобы связать ещё не связанные узлы (по возрастанию
+    // расстояния), не трогая существующие; перекрёстки — максимум 4 дороги
     const cand: { a: number; b: number; d: number }[] = [];
     for (let i = 0; i < nodes.length; i++)
       for (let j = i + 1; j < nodes.length; j++) {
@@ -1321,24 +1349,19 @@ export class Game {
         cand.push({ a, b, d });
       }
     cand.sort((p, q) => p.d - q.d);
-    // Краскал со связью через union-find и лимитом степени завода = 4
-    const uf = new Map<number, number>(); for (const n of nodes) uf.set(n, n);
-    const find = (x: number): number => { while (uf.get(x) !== x) { uf.set(x, uf.get(uf.get(x)!)!); x = uf.get(x)!; } return x; };
-    const deg = new Map<number, number>();
     for (const { a, b } of cand) {
-      if (find(a) === find(b)) continue; // уже в одной компоненте — не плодим циклы
-      if (facSet.has(a) && (deg.get(a) ?? 0) >= 4) continue; // перекрёсток: максимум 4 дороги
-      if (facSet.has(b) && (deg.get(b) ?? 0) >= 4) continue;
+      if (find(a) === find(b)) continue; // уже связаны (в т.ч. через старые дороги)
+      if ((deg.get(a) ?? 0) >= MAX_DEG || (deg.get(b) ?? 0) >= MAX_DEG) continue;
       const path = this.orthEdge(a, b);
       if (!path) continue;
-      edge.set(key(a, b), path);
+      committed.set(key(a, b), path);
       (adj.get(a) ?? adj.set(a, []).get(a)!).push(b);
       (adj.get(b) ?? adj.set(b, []).get(b)!).push(a);
       uf.set(find(a), find(b));
       deg.set(a, (deg.get(a) ?? 0) + 1);
       deg.set(b, (deg.get(b) ?? 0) + 1);
     }
-    const net = { ver: this.roadVer, adj, edge, revenue };
+    const net = { ver: this.roadVer, adj, edge: committed, revenue };
     this.roadNet.set(owner, net);
     return net;
   }
@@ -1917,18 +1940,44 @@ export class Game {
     this.relChanged.add(a).add(b);
   }
 
-  // предложить союз владельцу клетки. Боты принимают сразу; людям — уведомление.
-  proposeAlliance(fromId: number, cell: number): { toId: number; auto: boolean } | null {
+  // Сила игрока: территория + войска (грубая оценка для решений ботов).
+  powerOf(id: number): number {
+    const p = this.players.get(id);
+    if (!p?.alive) return 0;
+    return p.cells + p.troops * 0.5;
+  }
+
+  // Выгоден ли боту союз с игроком other? Да, если either (1) other не слабее бота
+  // (нет смысла злить сильного), либо (2) бот сейчас в невыгодном положении —
+  // воюет с кем-то сильнее себя и ему нужен друг.
+  private botWantsAlliance(botId: number, otherId: number): boolean {
+    const pb = this.powerOf(botId), po = this.powerOf(otherId);
+    if (po >= pb * 0.85) return true;
+    for (const foe of this.hostiles.get(botId) ?? [])
+      if (this.powerOf(foe) > pb) return true;
+    return false;
+  }
+
+  // предложить союз владельцу клетки. Бот соглашается только когда ему выгодно;
+  // людям — уведомление.
+  proposeAlliance(fromId: number, cell: number): { toId: number; auto: boolean; refused?: boolean; name: string } | null {
     const toId = this.owners[cell];
     if (toId <= 0 || toId === fromId) return null;
     const to = this.players.get(toId);
     if (!to?.alive) return null;
     if (this.relation(fromId, toId) === 'allied') return null;
     if (to.bot) {
-      this.acceptAlliance(fromId, toId);
-      return { toId, auto: true };
+      if (this.botWantsAlliance(toId, fromId)) {
+        this.acceptAlliance(fromId, toId);
+        return { toId, auto: true, name: to.name };
+      }
+      return { toId, auto: false, refused: true, name: to.name }; // боту невыгодно — отказ
     }
-    return { toId, auto: false };
+    return { toId, auto: false, name: to.name };
+  }
+
+  playerName(id: number): string {
+    return this.players.get(id)?.name ?? '?';
   }
 
   acceptAlliance(a: number, b: number) {
@@ -1940,8 +1989,15 @@ export class Game {
   breakAlliance(a: number, cell: number) {
     const b = this.owners[cell];
     if (b <= 0) return;
+    this.breakAllianceId(a, b);
+  }
+
+  breakAllianceId(a: number, b: number) {
+    const wasAllied = this.allies.get(a)?.has(b) ?? false;
     this.setRel(this.allies, a, b, false); // назад в нейтралитет
     this.relChanged.add(a).add(b);
+    // уведомляем сторону, с которой расторгли союз (инициатор — a)
+    if (wasAllied) this.relNotices.push({ to: b, kind: 'break', name: this.playerName(a) });
   }
 
   // списки для клиента (относительно игрока)
@@ -2179,6 +2235,9 @@ export class Game {
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return 'Нельзя';
     if (cell < 0 || cell >= this.cells) return 'Неверная цель';
+    // по союзнику ракету не пускаем (в т.ч. бот не бьёт своего союзника-человека)
+    const tOwner = this.owners[cell];
+    if (tOwner > 0 && tOwner !== playerId && this.relation(playerId, tOwner) === 'allied') return 'Союзник';
     const spec = NUKES[kind];
     if (!spec) return 'Неизвестная ракета';
     const cx = cell % this.w;
@@ -2929,6 +2988,21 @@ export class Game {
     const readiness = 0.25 / Math.max(1, aggro);
     if (p.troops < p.maxTroops * readiness || p.troops < 150) return;
     if (!counts.size) return;
+    // Предательство: если бот заметно сильнее граничащего союзника и его самого
+    // не давит более сильный враг — иногда рвёт союз и бьёт в спину.
+    if (Math.random() < 0.06 * aggro) {
+      const pressured = [...(this.hostiles.get(p.id) ?? [])].some((f) => this.powerOf(f) > this.powerOf(p.id) * 1.1);
+      if (!pressured) {
+        for (const k of counts.keys()) {
+          if (k <= 0 || this.relation(p.id, k) !== 'allied') continue;
+          if (this.powerOf(p.id) > this.powerOf(k) * 1.3) {
+            this.breakAllianceId(p.id, k); // разрыв союза снимает защиту — можно бить
+            this.launchAttackOwner(p.id, k, Math.floor(p.troops * 0.5));
+            return;
+          }
+        }
+      }
+    }
     let target: number;
     if (counts.has(0) && Math.random() < 0.6) {
       target = 0;

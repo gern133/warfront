@@ -160,7 +160,9 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
       const res = room.game.proposeAlliance(st.playerId, msg.cell | 0);
-      if (!res || res.auto) break; // бот принял сразу — relations придут тиком
+      if (!res) break;
+      if (res.auto) { send(ws, { type: 'notice', kind: 'accept', name: res.name }); break; } // бот принял
+      if (res.refused) { send(ws, { type: 'notice', kind: 'reject', name: res.name }); break; } // бот отклонил
       // человеку — уведомление с возможностью принять/отклонить
       for (const cws of room.clients) {
         const cst = clients.get(cws);
@@ -177,6 +179,13 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       const from = msg.from | 0;
       if (!st.proposals.delete(from)) return; // не было такого предложения
       if (msg.accept) room.game.acceptAlliance(st.playerId, from);
+      // уведомляем предложившего (принял/отклонил) — если он в комнате
+      for (const cws of room.clients) {
+        const cst = clients.get(cws);
+        if (cst?.playerId !== from) continue;
+        send(cws, { type: 'notice', kind: msg.accept ? 'accept' : 'reject', name: room.game.playerName(st.playerId) });
+        break;
+      }
       break;
     }
     case 'breakAlliance': {

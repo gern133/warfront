@@ -31,6 +31,8 @@ import { MenuScreen } from './screens/MenuScreen';
 import { LobbyScreen } from './screens/LobbyScreen';
 import { DeadScreen, WinnerModal } from './screens/EndScreens';
 
+const LB_ROW_H = 24; // высота строки лидерборда (px) — должна совпадать с CSS .lb-brow
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>('menu');
   const [menuView, setMenuView] = useState<MenuView>('main');
@@ -63,6 +65,13 @@ export default function App() {
   // входящие предложения союза (очередь)
   const [proposals, setProposals] = useState<{ from: number; name: string }[]>([]);
   const [relVer, setRelVer] = useState(0); // счётчик смены отношений (для перерисовки меню)
+  // лента ответов на мои предложения союза (принял/отклонил): вся история + «живые» тосты
+  const [notices, setNotices] = useState<{ id: number; ok: boolean; text: string }[]>([]);
+  const [liveNotices, setLiveNotices] = useState<number[]>([]); // id тостов, что ещё видны (5с)
+  const [chatOpen, setChatOpen] = useState(false); // открыта история сообщений
+  const noticeId = useRef(0);
+  const [lbExpanded, setLbExpanded] = useState(false); // лидерборд: топ-10 вместо топ-5
+  const [hoverOwner, setHoverOwner] = useState(0); // владелец под курсором (для тултипа)
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -183,6 +192,8 @@ export default function App() {
       const ids = [...gc.selectedWarships];
       if (ids.length) sendMsg({ type: 'warshipMove', ids, cell });
     };
+    // наведение на территорию: показываем тултип чужого игрока (не себя, не нейтраль)
+    gc.onHover = (owner) => setHoverOwner(owner > 0 && owner !== gc.selfId ? owner : 0);
 
     // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
     // Без неё — старое поведение: через https-туннель (cloudflared/ngrok) wss на том же хосте.
@@ -272,6 +283,19 @@ export default function App() {
         setPhase('dead');
       } else if (msg.type === 'winner') {
         setWinner({ name: msg.name, you: msg.id === gc.selfId });
+      } else if (msg.type === 'notice') {
+        // событие союза: зелёный «принял» / красный «отклонил» / красный «расторг»
+        const id = noticeId.current++;
+        const ok = msg.kind === 'accept';
+        const text =
+          msg.kind === 'accept'
+            ? `${msg.name} принял ваш союз`
+            : msg.kind === 'break'
+              ? `${msg.name} расторг союз с вами`
+              : `${msg.name} отклонил ваш союз`;
+        setNotices((n) => [...n, { id, ok, text }].slice(-100));
+        setLiveNotices((l) => [...l, id]);
+        setTimeout(() => setLiveNotices((l) => l.filter((x) => x !== id)), 5000);
       } else if (msg.type === 'error') {
         setError(msg.message);
         setTimeout(() => setError(null), 4000);
@@ -427,10 +451,9 @@ export default function App() {
   // мои десанты (куда плыву) и вражеские (кто плывёт ко мне)
   const myBoats = boats.filter((b) => b.player === gc.selfId);
   const incoming = boats.filter((b) => b.target === gc.selfId);
-  const board = players
-    .filter((p) => p.alive && p.cells > 0)
-    .sort((a, b) => b.cells - a.cells)
-    .slice(0, 8);
+  const rankedAll = players.filter((p) => p.alive && p.cells > 0).sort((a, b) => b.cells - a.cells);
+  const board = rankedAll.slice(0, lbExpanded ? 10 : 5);
+  const rankMap = new Map(rankedAll.map((p, i) => [p.id, i])); // id → место (для плавного сдвига строк)
   const totalCells = players.reduce((s, p) => s + (p.alive ? p.cells : 0), 0) || 1;
   const inGame = phase === 'spawn' || phase === 'playing' || phase === 'dead';
   // экономика: мои штабы, цена следующего, сколько войск уйдёт в атаку
@@ -533,22 +556,135 @@ export default function App() {
           <div className="eyebrow">
             Лидеры{roomCode !== 'QUICK' && <span className="room-code"> · {roomCode}</span>}
           </div>
-          {board.map((p, i) => {
-            const stat = statSnap.current.get(p.id);
-            return (
-              <div key={p.id} className={'lb-row' + (p.id === gc.selfId ? ' me' : '')}>
-                <span className="lb-rank">{i + 1}</span>
-                <span className="dot" style={{ background: playerColorCSS(p.id) }} />
-                <span className="lb-name">
-                  {p.name}
-                  {p.bot && !p.strong ? ' 🤖' : ''}
-                </span>
-                <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
-                <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
-                <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
-              </div>
-            );
-          })}
+          <div className="lb-row lb-head">
+            <span className="lb-rank">#</span>
+            <span className="dot lb-dot-sp" />
+            <span className="lb-name">Страна</span>
+            <span className="lb-val">Земля</span>
+            <span className="lb-stat">Армия</span>
+            <span className="lb-stat lb-gold">Золото</span>
+          </div>
+          {/* строки в СТАБИЛЬНОМ порядке по id (DOM не переставляется), а позиция
+              задаётся transform по рангу — при смене мест ряд плавно скользит, не прыгает */}
+          <div className="lb-body" style={{ height: board.length * LB_ROW_H }}>
+            {[...board]
+              .sort((a, b) => a.id - b.id)
+              .map((p) => {
+                const rank = rankMap.get(p.id) ?? 0;
+                const stat = statSnap.current.get(p.id);
+                return (
+                  <div
+                    key={p.id}
+                    className={'lb-row lb-brow' + (p.id === gc.selfId ? ' me' : '')}
+                    style={{ transform: `translateY(${rank * LB_ROW_H}px)` }}
+                  >
+                    <span className="lb-rank">{rank + 1}</span>
+                    <span className="dot" style={{ background: playerColorCSS(p.id) }} />
+                    <span className="lb-name">
+                      {p.name}
+                      {p.bot && !p.strong ? ' 🤖' : ''}
+                    </span>
+                    <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
+                    <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
+                    <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
+                  </div>
+                );
+              })}
+          </div>
+          <div className="lb-toggle">
+            <button
+              className="lb-tbtn"
+              disabled={lbExpanded || rankedAll.length <= 5}
+              title="Показать топ-10"
+              onClick={() => setLbExpanded(true)}
+            >
+              +
+            </button>
+            <span className="lb-count">Топ-{lbExpanded ? 10 : 5}</span>
+            <button
+              className="lb-tbtn"
+              disabled={!lbExpanded}
+              title="Свернуть до топ-5"
+              onClick={() => setLbExpanded(false)}
+            >
+              −
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* тултип противника при наведении на его территорию */}
+      {phase === 'playing' && hoverOwner > 0 && (() => {
+        const op = players.find((p) => p.id === hoverOwner);
+        if (!op) return null;
+        const stat = statSnap.current.get(op.id);
+        const types: { t: BuildingType; icon: string }[] = [
+          { t: 'city', icon: '🏙️' },
+          { t: 'factory', icon: '🏭' },
+          { t: 'port', icon: '⚓' },
+          { t: 'hq', icon: '🛡️' },
+          { t: 'silo', icon: '🚀' },
+          { t: 'sam', icon: '🛰️' },
+        ];
+        const counts = types
+          .map((x) => ({ ...x, n: buildings.filter((b) => b.owner === op.id && b.type === x.t).length }))
+          .filter((x) => x.n > 0);
+        return (
+          <div className="panel opp-tip">
+            <div className="opp-head">
+              <span className="dot" style={{ background: playerColorCSS(op.id) }} />
+              <span className="opp-name">{op.name}{op.bot && !op.strong ? ' 🤖' : ''}</span>
+            </div>
+            <div className="opp-rows">
+              <span className="opp-lbl">Армия</span>
+              <span className="opp-val">🪖 {fmtK(op.troops)} / {fmtK(stat?.max ?? op.maxTroops)}</span>
+              <span className="opp-lbl">Золото</span>
+              <span className="opp-val opp-gold">◈ {fmtK(stat?.money ?? op.money)}</span>
+            </div>
+            <div className="opp-blds">
+              {counts.length ? (
+                counts.map((x) => (
+                  <span className="opp-bld" key={x.t}>{x.icon} {x.n}</span>
+                ))
+              ) : (
+                <span className="opp-none">Построек нет</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* лента ответов на предложения союза (тосты + история) — снизу справа */}
+      {inGame && (
+        <div className="chat-log">
+          {chatOpen && (
+            <div className="chat-history">
+              <div className="eyebrow chat-hhead">История союзов</div>
+              {notices.length === 0 && <div className="chat-empty">Пока пусто</div>}
+              {[...notices].reverse().map((n) => (
+                <div key={n.id} className={'chat-line ' + (n.ok ? 'ok' : 'no')}>
+                  {n.ok ? '🤝' : '✕'} {n.text}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="chat-toasts">
+            {notices
+              .filter((n) => liveNotices.includes(n.id))
+              .map((n) => (
+                <div key={n.id} className={'chat-toast ' + (n.ok ? 'ok' : 'no')}>
+                  {n.ok ? '🤝' : '✕'} {n.text}
+                </div>
+              ))}
+          </div>
+          <button
+            className="chat-toggle"
+            onClick={() => setChatOpen((v) => !v)}
+            title="История ответов на союзы"
+          >
+            🕑 {chatOpen ? 'Скрыть' : 'История'}
+            {notices.length > 0 && <span className="chat-badge">{notices.length}</span>}
+          </button>
         </div>
       )}
 

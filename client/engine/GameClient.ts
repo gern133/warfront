@@ -43,6 +43,8 @@ export class GameClient {
   onCellRightClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
   onBuild: ((cell: number) => void) | null = null;
   onFleetMove: ((cell: number) => void) | null = null; // приказ выделенным кораблям
+  onHover: ((owner: number) => void) | null = null; // владелец клетки под курсором (для тултипа)
+  private lastHoverOwner = -2; // -2 = ещё не знаем; чтобы дедуплицировать вызовы onHover
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
   buildMode: BuildingType | null = null;
@@ -1663,6 +1665,12 @@ export class GameClient {
     };
     const onMove = (e: PointerEvent) => {
       if (this.buildMode || this.nukeKind || this.fleetMode) this.hoverCell = cellUnder(e); // предпросмотр
+      // владелец клетки под курсором (для тултипа противника) — только вне перетаскивания
+      if (!down && this.w) {
+        const c = cellUnder(e);
+        const o = c >= 0 ? this.owners[c] : 0;
+        if (o !== this.lastHoverOwner) { this.lastHoverOwner = o; this.onHover?.(o); }
+      }
       if (!down) return;
       if (selecting && this.selBox) {
         this.selBox.x1 = e.clientX;
@@ -1740,9 +1748,11 @@ export class GameClient {
       this.clampPan();
     };
 
+    const onLeave = () => { if (this.lastHoverOwner !== 0) { this.lastHoverOwner = 0; this.onHover?.(0); } };
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointerleave', onLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('contextmenu', onContext);
 
@@ -1754,6 +1764,7 @@ export class GameClient {
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointerleave', onLeave);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContext);
     };

@@ -244,12 +244,118 @@ button {
 
 .leaderboard {
   top: 58px;
-  right: 16px;
-  min-width: 300px;
+  left: 16px;
+  min-width: 320px;
 }
 
 .leaderboard .lb-row {
   gap: 6px;
+}
+
+/* контейнер строк: строки позиционируются абсолютно по рангу и плавно скользят,
+   поэтому при пересортировке лидерборд не «прыгает», а перестраивается анимацией */
+.lb-body {
+  position: relative;
+  overflow: hidden;
+  transition: height 0.28s ease;
+}
+
+.lb-brow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 24px;
+  padding: 0;
+  transition: transform 0.35s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.25s ease;
+  animation: lb-fade-in 0.25s ease;
+}
+
+@keyframes lb-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* заголовок таблицы */
+.lb-head {
+  border-bottom: 1px solid var(--edge);
+  padding-bottom: 6px;
+  margin-bottom: 3px;
+}
+
+.lb-head .lb-name,
+.lb-head .lb-val,
+.lb-head .lb-stat,
+.lb-head .lb-rank {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+
+.lb-dot-sp {
+  background: transparent !important;
+}
+
+.lb-val,
+.lb-stat {
+  width: 58px;
+  text-align: right;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* моноширинные цифры + фикс ширины у ранга/имени — числа не двигают вёрстку */
+.lb-rank {
+  font-variant-numeric: tabular-nums;
+}
+
+.lb-head .lb-val,
+.lb-head .lb-stat {
+  color: var(--ink-faint);
+}
+
+/* переключатель топ-5 / топ-10 */
+.lb-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge);
+}
+
+.lb-tbtn {
+  width: 24px;
+  height: 22px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: rgba(233, 237, 227, 0.06);
+  color: var(--ink);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lb-tbtn:hover:not(:disabled) {
+  border-color: var(--khaki);
+}
+
+.lb-tbtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.lb-count {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  min-width: 48px;
+  text-align: center;
 }
 
 .lb-stat {
@@ -620,6 +726,188 @@ button {
 }
 
 /* входящие предложения союза — стопкой сверху по центру */
+/* --- тултип противника (наведение на территорию) --- */
+.opp-tip {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  min-width: 240px;
+  padding: 12px 14px;
+  pointer-events: none;
+}
+
+.opp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--edge);
+}
+
+.opp-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.opp-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.opp-lbl {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+}
+
+.opp-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--ink);
+  text-align: right;
+}
+
+.opp-gold {
+  color: #f2c94c;
+}
+
+.opp-blds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.opp-bld {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.opp-none {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* --- лента ответов на союзы (снизу справа) --- */
+.chat-log {
+  position: absolute;
+  right: 16px;
+  bottom: 20px;
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  width: min(280px, 80vw);
+}
+
+.chat-toasts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.chat-toast {
+  width: 100%;
+  padding: 8px 11px;
+  border-radius: 6px 6px 0 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  animation: toast-in 0.22s ease-out;
+}
+
+.chat-toast.ok,
+.chat-line.ok {
+  background: rgba(24, 54, 30, 0.92);
+  border: 1px solid #4fbf5f;
+  color: #b6f0bd;
+}
+
+.chat-toast.no,
+.chat-line.no {
+  background: rgba(58, 22, 20, 0.92);
+  border: 1px solid #e05a48;
+  color: #f4b6ac;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-history {
+  width: 100%;
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.chat-hhead {
+  margin-bottom: 4px;
+}
+
+.chat-line {
+  padding: 6px 9px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.chat-empty {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.chat-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  color: var(--ink-dim);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-toggle:hover {
+  border-color: var(--khaki);
+  color: var(--ink);
+}
+
+.chat-badge {
+  background: var(--khaki);
+  color: #10140c;
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .proposals {
   position: absolute;
   top: 16px;
@@ -957,8 +1245,18 @@ button {
   }
 
   .leaderboard {
-    min-width: 180px;
+    min-width: 210px;
     font-size: 12px;
+  }
+
+  .lb-val,
+  .lb-stat {
+    width: 44px;
+    font-size: 10px;
+  }
+
+  .opp-tip {
+    min-width: 200px;
   }
 
   .spawn-banner {

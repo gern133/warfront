@@ -73,6 +73,7 @@ export type ServerMsg =
   | { type: 'resync'; ownersRle: number[] } // полный снимок владельцев (после лага)
   | { type: 'relations'; allies: number[]; enemies: number[] } // отношения игрока
   | { type: 'proposal'; from: number; name: string } // входящее предложение союза
+  | { type: 'notice'; kind: 'accept' | 'reject' | 'break'; name: string } // событие союза: принял/отклонил/расторг
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла
   | { type: 'dead' }
