@@ -20,6 +20,7 @@ import {
   SILO_COST,
   NUKES,
   samCost,
+  factoryCost,
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
@@ -82,6 +83,7 @@ export default function App() {
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
   const canBuildCityRef = useRef(false);
+  const canBuildFactoryRef = useRef(false);
   const canBuildSiloRef = useRef(false);
   const canBuildSamRef = useRef(false);
   const nukeAffordRef = useRef<Record<string, boolean>>({}); // по типу ракеты: хватает ли на пуск
@@ -219,6 +221,7 @@ export default function App() {
         gc.setBoats(upBoats);
         gc.setBuildings(upBuildings);
         gc.setShips(msg.ships ?? []);
+        gc.setTrucks(msg.trucks ?? []);
         gc.setWarships(msg.warships ?? []);
         gc.setShots(msg.shots ?? []);
         gc.setMissiles(msg.missiles ?? []);
@@ -389,6 +392,7 @@ export default function App() {
         if (bt === 'hq' && !canBuildHqRef.current) return;
         if (bt === 'port' && !canBuildPortRef.current) return;
         if (bt === 'city' && !canBuildCityRef.current) return;
+        if (bt === 'factory' && !canBuildFactoryRef.current) return;
         if (bt === 'silo' && !canBuildSiloRef.current) return;
         if (bt === 'sam' && !canBuildSamRef.current) return;
         if (bt) {
@@ -432,6 +436,11 @@ export default function App() {
   const myHqs = buildings.filter((b) => b.owner === gc.selfId && b.type === 'hq').length;
   const myPorts = buildings.filter((b) => b.owner === gc.selfId && b.type === 'port').length;
   const myCities = buildings.filter((b) => b.owner === gc.selfId && b.type === 'city').length;
+  const myFactories = buildings.filter((b) => b.owner === gc.selfId && b.type === 'factory').length;
+  const myFactoryLevels = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'factory')
+    .reduce((s, b) => s + b.level, 0);
+  const nextFactoryCost = factoryCost(myFactoryLevels);
   const mySilos = buildings.filter((b) => b.owner === gc.selfId && b.type === 'silo').length;
   const mySams = buildings.filter((b) => b.owner === gc.selfId && b.type === 'sam').length;
   // суммарный уровень ПВО → цена следующей покупки (в общем)
@@ -462,6 +471,8 @@ export default function App() {
   canBuildPortRef.current = shownMoney >= Math.min(PORT_BUILD_COST, cheapestPortUpg);
   // город (клавиша 1): и постройка, и апгрейд стоят одинаково — по сумме уровней
   canBuildCityRef.current = shownMoney >= nextCityCost;
+  // завод (клавиша 2): постройка/апгрейд по сумме уровней
+  canBuildFactoryRef.current = shownMoney >= nextFactoryCost;
   // шахта (клавиша 5): постройка и апгрейд по 1млн
   canBuildSiloRef.current = shownMoney >= SILO_COST;
   // ПВО (клавиша 6): постройка/апгрейд по сумме уровней
@@ -605,6 +616,11 @@ export default function App() {
               Кликните в глубине своей земли — город (+лимит войск); рядом с городом — апгрейд (Esc)
             </div>
           )}
+          {buildMode === 'factory' && (
+            <div className="build-hint">
+              Кликните в глубине своей земли — завод (ускоряет реген в радиусе + грузовики возят золото по дорогам к городам/портам); рядом с заводом — апгрейд (Esc)
+            </div>
+          )}
           {buildMode === 'silo' && (
             <div className="build-hint">
               Кликните в глубине своей земли — ракетная шахта; рядом с шахтой — апгрейд (Esc)
@@ -664,7 +680,7 @@ export default function App() {
               {TOOLS.map((t, i) => {
                 const nk = t.nuke; // тип ракеты (☢️/💥) — действие пуска
                 const active =
-                  !!nk || !!t.fleet || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'silo' || t.bt === 'sam';
+                  !!nk || !!t.fleet || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'factory' || t.bt === 'silo' || t.bt === 'sam';
                 const cost = nk
                   ? NUKES[nk].cost
                   : t.fleet
@@ -673,11 +689,13 @@ export default function App() {
                       ? PORT_BUILD_COST
                       : t.bt === 'city'
                         ? nextCityCost
-                        : t.bt === 'silo'
-                          ? SILO_COST
-                          : t.bt === 'sam'
-                            ? nextSamCost
-                            : nextHqCost;
+                        : t.bt === 'factory'
+                          ? nextFactoryCost
+                          : t.bt === 'silo'
+                            ? SILO_COST
+                            : t.bt === 'sam'
+                              ? nextSamCost
+                              : nextHqCost;
                 const count = nk
                   ? nukeAmmo
                   : t.fleet
@@ -686,13 +704,15 @@ export default function App() {
                       ? myPorts
                       : t.bt === 'city'
                         ? myCities
-                        : t.bt === 'silo'
-                          ? mySilos
-                          : t.bt === 'sam'
-                            ? mySams
-                            : t.bt === 'hq'
-                              ? myHqs
-                              : 0;
+                        : t.bt === 'factory'
+                          ? myFactories
+                          : t.bt === 'silo'
+                            ? mySilos
+                            : t.bt === 'sam'
+                              ? mySams
+                              : t.bt === 'hq'
+                                ? myHqs
+                                : 0;
                 const afford = nk
                   ? nukeAffordRef.current[nk]
                   : t.fleet
@@ -701,11 +721,13 @@ export default function App() {
                       ? canBuildPortRef.current
                       : t.bt === 'city'
                         ? canBuildCityRef.current
-                        : t.bt === 'silo'
-                          ? canBuildSiloRef.current
-                          : t.bt === 'sam'
-                            ? canBuildSamRef.current
-                            : shownMoney >= cost;
+                        : t.bt === 'factory'
+                          ? canBuildFactoryRef.current
+                          : t.bt === 'silo'
+                            ? canBuildSiloRef.current
+                            : t.bt === 'sam'
+                              ? canBuildSamRef.current
+                              : shownMoney >= cost;
                 const usable = active && afford;
                 const selected = nk ? nukeKind === nk : t.fleet ? fleetMode : buildMode === t.bt && active;
                 return (
@@ -964,6 +986,28 @@ export default function App() {
                     <div className="ctx-title">🏙️ Город · ур. {lvl}</div>
                     <div className="ctx-note">
                       Лимит войск: +{fmtK(cityTroopBonus(lvl))} → +{fmtK(cityTroopBonus(toLevel))}
+                    </div>
+                    <button
+                      className="ctx-btn"
+                      disabled={shownMoney < cost}
+                      onClick={() => {
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        setUpgradeMenu(null);
+                      }}
+                    >
+                      ⚡ До {toLevel} ур. · {fmtK(cost)}
+                    </button>
+                  </>
+                );
+              }
+              if (b?.type === 'factory') {
+                const toLevel = lvl + 1;
+                const cost = nextFactoryCost;
+                return (
+                  <>
+                    <div className="ctx-title">🏭 Завод · ур. {lvl}</div>
+                    <div className="ctx-note">
+                      Ускоряет реген в радиусе · грузовики возят золото (10к за здание) · +3% к регену за каждые 10 ур.
                     </div>
                     <button
                       className="ctx-btn"

@@ -3,6 +3,10 @@ import { Difficulty } from '../../shared/protocol';
 // Скорости движения кружков (клеток за тик)
 export const TRADE_SPEED = 0.6;
 export const BOAT_SPEED = 0.6;
+// Грузовик завода: развозит золото по дорогам между зданиями
+export const TRUCK_SPEED = 1.2; // вдвое быстрее трейдерских судов
+export const TRUCK_REWARD = 10000; // монет за каждое посещённое здание
+export const TRUCK_INTERVAL = 100; // 10с между грузовиками одного завода
 // Максимум своих десантных кораблей в пути одновременно
 export const MAX_BOATS = 3;
 

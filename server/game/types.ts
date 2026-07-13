@@ -41,6 +41,7 @@ export interface TradeShip {
   id: number;
   owner: number;
   portCell: number; // домашний порт (для учёта кораблей)
+  destCell: number; // порт-назначение (если исчез/война — корабль тонет)
   path: number[]; // маршрут по воде
   cum: number[];
   totalLen: number;
@@ -112,6 +113,19 @@ export interface Warship {
   repairing: boolean; // идёт в порт чиниться / стоит на ремонте
   healTicks: number; // тиков ремонта осталось (0 = не чинится)
   healRate: number; // прибавка hp за тик во время ремонта
+}
+
+// Грузовик завода: развозит золото по дорогам, посещая соединённые здания
+// (города/порты), за каждое даёт монеты, затем возвращается на завод.
+export interface Truck {
+  id: number;
+  owner: number;
+  factoryCell: number; // домашний завод
+  stops: number[]; // клетки-остановки: [здание1..зданиеK, завод] (последняя — возврат)
+  ti: number; // индекс текущей цели в stops
+  x: number;
+  y: number;
+  done: boolean; // рейс завершён / грузовик снят — на удаление
 }
 
 // Пуля боевого корабля: летит пикселем и догоняет цель, при попадании — урон

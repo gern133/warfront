@@ -17,7 +17,7 @@ export const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
 // панель зданий/вооружений (1–0). bt — тип постройки, nuke — тип запускаемой ракеты
 export const TOOLS: { icon: string; bt: BuildingType | null; name: string; nuke?: string; fleet?: boolean }[] = [
   { icon: '🏙️', bt: 'city', name: 'Город' },
-  { icon: '🏭', bt: null, name: 'Завод' },
+  { icon: '🏭', bt: 'factory', name: 'Завод' },
   { icon: '⚓', bt: 'port', name: 'Торговый порт' },
   { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
   { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },

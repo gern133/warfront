@@ -5,6 +5,7 @@ import {
   BuildingPub,
   BuildingType,
   TradeShipPub,
+  TruckPub,
   WarshipPub,
   TradeEarn,
   MissilePub,
@@ -13,6 +14,7 @@ import {
   HQ_EXPLODE_RADIUS,
   PORT_RADIUS,
   SAM_RANGE,
+  FACTORY_RANGE,
 } from '../../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../../shared/color';
 import { rleDecode } from '../../shared/rle';
@@ -82,6 +84,7 @@ export class GameClient {
   private attacks: AttackPub[] = [];
   private boats: BoatPub[] = [];
   ships: TradeShipPub[] = []; // трейд-корабли (читает engine/render)
+  trucks: TruckPub[] = []; // грузовики заводов на дорогах
   private moneyPops: { x: number; y: number; amount: number; t0: number }[] = []; // всплывашки заработка
   allies = new Set<number>(); // мои союзники
   enemies = new Set<number>(); // мои враги (нельзя торговать)
@@ -299,6 +302,59 @@ export class GameClient {
 
   setShips(ships: TradeShipPub[]) {
     this.ships = ships ?? [];
+  }
+
+  setTrucks(trucks: TruckPub[]) {
+    this.trucks = trucks ?? [];
+  }
+
+  // Дороги от завода к его городам/портам в радиусе + грузовики на них. Рисуем
+  // ПОД зданиями. Порядок соединения тот же, что у грузовика (по возрастанию
+  // дистанции), чтобы дорога совпадала с маршрутом.
+  private drawRoads(ctx: CanvasRenderingContext2D, dpr: number) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const z = this.zoom, px = this.panX, py = this.panY, R2 = FACTORY_RANGE * FACTORY_RANGE;
+    const factories = this.buildings.filter((b) => b.type === 'factory' && b.progress >= 1);
+    if (factories.length) {
+      ctx.lineWidth = Math.max(2, z * 0.7);
+      ctx.strokeStyle = 'rgba(214,208,190,0.9)'; // светлая дорога, сплошная линия
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      const S = (x: number) => px + (x + 0.5) * z;
+      const T = (y: number) => py + (y + 0.5) * z;
+      for (const f of factories) {
+        const fx = f.cell % this.w, fy = (f.cell / this.w) | 0;
+        const infra = this.buildings
+          .filter((o) => o.owner === f.owner && (o.type === 'city' || o.type === 'port') && o.progress >= 1 &&
+            ((o.cell % this.w - fx) ** 2 + ((o.cell / this.w | 0) - fy) ** 2) <= R2)
+          .map((o) => ({ x: o.cell % this.w, y: (o.cell / this.w) | 0, d: (o.cell % this.w - fx) ** 2 + ((o.cell / this.w | 0) - fy) ** 2 }))
+          .sort((a, b) => a.d - b.d);
+        if (!infra.length) continue;
+        // маршрут завод → B1 → ... → Bk → завод; колена под прямым углом (сначала
+        // по горизонтали, потом по вертикали) — как настоящие дороги (см. фото)
+        const route = [{ x: fx, y: fy }, ...infra, { x: fx, y: fy }];
+        ctx.beginPath();
+        for (let i = 0; i + 1 < route.length; i++) {
+          const a = route[i], b = route[i + 1];
+          ctx.moveTo(S(a.x), T(a.y));
+          ctx.lineTo(S(b.x), T(a.y)); // горизонтальное колено
+          ctx.lineTo(S(b.x), T(b.y)); // вертикальное колено
+        }
+        ctx.stroke();
+      }
+    }
+    // грузовики — маленькие квадратики цвета владельца
+    if (this.trucks.length) {
+      const s = Math.max(2.5, z * 0.8);
+      for (const t of this.trucks) {
+        const tx = px + t.x * z, ty = py + t.y * z;
+        ctx.fillStyle = playerColorCSS(t.owner);
+        ctx.fillRect(tx - s, ty - s, s * 2, s * 2);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.strokeRect(tx - s, ty - s, s * 2, s * 2);
+      }
+    }
   }
 
   setWarships(warships: WarshipPub[]) {
@@ -1007,6 +1063,40 @@ export class GameClient {
         }
         continue;
       }
+      if (b.type === 'factory') {
+        const buildingP = b.progress < 1;
+        ctx.globalAlpha = buildingP ? 0.55 : 1;
+        ctx.fillStyle = '#2a2412';
+        ctx.strokeStyle = playerColorCSS(b.owner);
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        this.drawEmoji(ctx, '🏭', sx, sy, r * 1.1);
+        if (badge && b.level > 1 && !buildingP) {
+          const fs = Math.max(10, r * 0.9);
+          ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+          ctx.lineWidth = Math.max(2, fs / 5);
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+          ctx.fillStyle = '#ffd27a';
+          ctx.strokeText(String(b.level), sx + r, sy - r);
+          ctx.fillText(String(b.level), sx + r, sy - r);
+        }
+        ctx.globalAlpha = 1;
+        if (buildingP) {
+          const bw = r * 2.4, bh = Math.max(3, r * 0.35);
+          const bx = sx - bw / 2, by = sy - r - bh - 3;
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = '#ffb84d';
+          ctx.fillRect(bx, by, bw * b.progress, bh);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        continue;
+      }
       if (b.type === 'city') {
         const buildingP = b.progress < 1;
         ctx.globalAlpha = buildingP ? 0.55 : 1;
@@ -1242,6 +1332,44 @@ export class GameClient {
         ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
       }
       ctx.globalAlpha = 1;
+    } else if (this.buildMode === 'factory' && this.hoverCell >= 0) {
+      // предпросмотр завода: показываем ЗОНУ ОХВАТА (радиус связывания дорог/усиления)
+      const near = this.nearbyOwnType(this.hoverCell, 'factory');
+      const cellFor = near ? near.cell : this.hoverCell;
+      const ok = near ? true : this.canBuildCityAt(this.hoverCell);
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
+      const rangePx = FACTORY_RANGE * this.zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rangePx, 0, Math.PI * 2);
+      ctx.fillStyle = ok ? 'rgba(255,184,77,0.10)' : 'rgba(150,150,150,0.15)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = ok ? 'rgba(255,184,77,0.85)' : 'rgba(160,160,160,0.7)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = ok ? 'rgba(42,36,18,0.9)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#ffb84d' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `${r * 1.1}px sans-serif`;
+      ctx.globalAlpha = ok ? 1 : 0.5;
+      ctx.fillText('🏭', sx, sy + 1);
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#ffd27a';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
+      ctx.globalAlpha = 1;
     } else if (this.buildMode === 'sam' && this.hoverCell >= 0) {
       // предпросмотр ПВО: показываем ЗОНУ ПОКРЫТИЯ (радиус перехвата SAM_RANGE)
       const near = this.nearbyOwnType(this.hoverCell, 'sam');
@@ -1436,13 +1564,15 @@ export class GameClient {
     let panning = false;
     // движение камеры на WASD (плавно, в цикле по зажатым клавишам)
     const heldKeys = new Set<string>();
+    // используем e.code (физическая клавиша) — не зависит от раскладки: на русской
+    // раскладке WASD дают ц/ф/ы/в, но code остаётся KeyW/KeyA/KeyS/KeyD
+    const PAN_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
     const onKeyDown = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return; // не мешаем вводу
-      const k = e.key.toLowerCase();
-      if (k === 'w' || k === 'a' || k === 's' || k === 'd') heldKeys.add(k);
+      if (PAN_CODES.has(e.code)) { heldKeys.add(e.code); if (e.code.startsWith('Arrow')) e.preventDefault(); }
     };
-    const onKeyUp = (e: KeyboardEvent) => heldKeys.delete(e.key.toLowerCase());
+    const onKeyUp = (e: KeyboardEvent) => heldKeys.delete(e.code);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
 
@@ -1481,10 +1611,10 @@ export class GameClient {
       // камера на WASD
       if (this.active && heldKeys.size) {
         const step = 16;
-        if (heldKeys.has('w')) this.panY += step;
-        if (heldKeys.has('s')) this.panY -= step;
-        if (heldKeys.has('a')) this.panX += step;
-        if (heldKeys.has('d')) this.panX -= step;
+        if (heldKeys.has('KeyW') || heldKeys.has('ArrowUp')) this.panY += step;
+        if (heldKeys.has('KeyS') || heldKeys.has('ArrowDown')) this.panY -= step;
+        if (heldKeys.has('KeyA') || heldKeys.has('ArrowLeft')) this.panX += step;
+        if (heldKeys.has('KeyD') || heldKeys.has('ArrowRight')) this.panX -= step;
         this.anim = null; // ручное управление отменяет автозум
         this.clampPan();
       }
@@ -1505,6 +1635,7 @@ export class GameClient {
         ctx.drawImage(this.off, 0, 0);
         this.drawNames(ctx, dpr);
         drawShips(this, ctx, dpr);
+        this.drawRoads(ctx, dpr);
         this.drawBuildings(ctx, dpr);
         drawFleet(this, ctx, dpr);
         drawMissiles(this, ctx, dpr);
@@ -1610,7 +1741,7 @@ export class GameClient {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       this.anim = null; // ручной зум отменяет автозум
-      const k = Math.exp(-e.deltaY * 0.0012);
+      const k = Math.exp(-e.deltaY * 0.0036); // чувствительность зума ×3
       const nz = Math.min(60, Math.max(this.minZoom(), this.zoom * k));
       const kk = nz / this.zoom;
       this.panX = e.clientX - (e.clientX - this.panX) * kk;

@@ -34,6 +34,13 @@ export interface TradeShipPub {
   y: number;
 }
 
+// Грузовик завода: едет по дорогам между зданиями (для отрисовки)
+export interface TruckPub {
+  x: number;
+  y: number;
+  owner: number;
+}
+
 // Боевой корабль: плывёт к зоне и патрулирует её, стреляя по вражеским судам
 export interface WarshipPub {
   id: number;

@@ -16,6 +16,7 @@ import {
   hqUpgradeCost,
   hqUpgradeTicks,
   TradeShipPub,
+  TruckPub,
   WarshipPub,
   TradeEarn,
   PORT_BUILD_COST,
@@ -28,6 +29,11 @@ import {
   CITY_BUILD_TICKS,
   cityCost,
   cityTroopBonus,
+  FACTORY_BUILD_TICKS,
+  FACTORY_RANGE,
+  factoryCost,
+  factoryBoostPct,
+  FACTORY_COVER,
   SILO_COST,
   SILO_BUILD_TICKS,
   SILO_RELOAD_TICKS,
@@ -40,11 +46,14 @@ import {
   samCost,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
-import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet } from './types';
+import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck } from './types';
 import {
   TRADE_SPEED,
   BOAT_SPEED,
   MAX_BOATS,
+  TRUCK_SPEED,
+  TRUCK_REWARD,
+  TRUCK_INTERVAL,
   WARSHIP_SPEED,
   WARSHIP_HP,
   WARSHIP_RANGE,
@@ -98,6 +107,8 @@ export class Game {
   private nextShipId = 1;
   warships: Warship[] = []; // боевые корабли
   private nextWarshipId = 1;
+  trucks: Truck[] = []; // грузовики заводов на дорогах
+  private nextTruckId = 1;
   bullets: Bullet[] = []; // пули кораблей в полёте
   private nextBulletId = 1;
   missiles: Missile[] = []; // ракеты в полёте
@@ -163,6 +174,7 @@ export class Game {
     this.buildings = [];
     this.tradeShips = [];
     this.warships = [];
+    this.trucks = [];
     this.bullets = [];
     this.missiles = [];
     this.tradeEarnings = [];
@@ -661,6 +673,7 @@ export class Game {
     this.buildings = this.buildings.filter((b) => b.owner !== id);
     this.tradeShips = this.tradeShips.filter((s) => s.owner !== id);
     this.warships = this.warships.filter((s) => s.owner !== id);
+    this.trucks = this.trucks.filter((t) => t.owner !== id);
     this.bullets = this.bullets.filter((b) => b.owner !== id);
     this.clearRelations(id);
     this.fortDirty = true;
@@ -714,6 +727,7 @@ export class Game {
     p.money = 0;
     this.tradeShips = this.tradeShips.filter((s) => s.owner !== p.id);
     this.warships = this.warships.filter((s) => s.owner !== p.id);
+    this.trucks = this.trucks.filter((t) => t.owner !== p.id);
     this.bullets = this.bullets.filter((b) => b.owner !== p.id);
     this.clearRelations(p.id);
     // здания НЕ сносим тут: их клетки уже захвачены, и checkBuildings корректно
@@ -770,6 +784,35 @@ export class Game {
     return out;
   }
 
+  // прилегающая к берегу игрока вода в радиусе R вокруг ближайшей к (tx,ty)
+  // береговой клетки — чтобы десант выходил с ближайшей к высадке точки берега
+  private nearCoastalWaterOf(playerId: number, tx: number, ty: number, R: number): number[] {
+    const w = this.w, h = this.h;
+    let bestCoast = -1, bestD = Infinity;
+    for (const c of this.playerCells(playerId)) {
+      if (this.owners[c] !== playerId) continue;
+      const x = c % w, y = (c / w) | 0;
+      const coastal =
+        (x > 0 && !this.terrain[c - 1]) || (x < w - 1 && !this.terrain[c + 1]) ||
+        (y > 0 && !this.terrain[c - w]) || (y < h - 1 && !this.terrain[c + w]);
+      if (!coastal) continue;
+      const d = (x - tx) ** 2 + (y - ty) ** 2;
+      if (d < bestD) { bestD = d; bestCoast = c; }
+    }
+    if (bestCoast < 0) return [];
+    const bx = bestCoast % w, by = (bestCoast / w) | 0, R2 = R * R;
+    const out: number[] = [];
+    for (let dy = -R; dy <= R; dy++)
+      for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dy * dy > R2) continue;
+        const x = bx + dx, y = by + dy;
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const c = y * w + x;
+        if (!this.terrain[c]) out.push(c);
+      }
+    return out;
+  }
+
   // берег материка клетки targetCell, ближайший к (fromX,fromY) — точка высадки
   private landingShore(targetCell: number, fromX: number, fromY: number): number {
     const land = this.landId[targetCell];
@@ -809,15 +852,15 @@ export class Game {
     let landCell = this.landingShore(targetCell, tx, ty);
     const lx = landCell % this.w;
     const ly = (landCell / this.w) | 0;
-    // Засев: ВСЯ вода у берега игрока (устойчиво к «запертым» фьордам/проливам у
-    // одной клетки — лодка выйдет с той части берега, откуда есть путь к цели).
-    const seeds = this.coastalWaterOf(playerId);
-    if (seeds.length === 0) return false; // нет выхода к морю
-    // Маршрут — пиксельный A* строго по воде к воде у берега цели. Лодка НИКОГДА не
-    // идёт по суше, держится открытой воды, проходит проливы. null = морем не
-    // добраться (напр. бессточный Каспий) — десант отменяется.
     const targetLand = this.landId[landCell];
-    const fine = this.waterPathFine(seeds, targetLand, lx, ly);
+    // Сначала пробуем выйти с БЛИЖАЙШЕГО к высадке берега (десант стартует рядом
+    // с целью). Если оттуда морем не пройти (заперто) — засеваем весь берег.
+    let fine = this.waterPathFine(this.nearCoastalWaterOf(playerId, lx, ly, 10), targetLand, lx, ly);
+    if (!fine) {
+      const seeds = this.coastalWaterOf(playerId);
+      if (seeds.length === 0) return false; // нет выхода к морю
+      fine = this.waterPathFine(seeds, targetLand, lx, ly);
+    }
     if (!fine) return false;
     // фактическая клетка высадки — суша цели у конца маршрута (лодка могла прийти
     // не точно в кликнутую точку, если та в отрезанном фьорде)
@@ -1161,6 +1204,77 @@ export class Game {
     }));
   }
 
+  // Грузовики заводов: выпуск. Каждый достроенный завод раз в интервал шлёт
+  // грузовик по дорогам к своим городам/портам в радиусе и обратно.
+  private spawnTrucks() {
+    const R2 = FACTORY_RANGE * FACTORY_RANGE;
+    for (const b of this.buildings) {
+      if (b.type !== 'factory' || this.tickNo < b.readyTick) continue;
+      if (this.tickNo < b.nextShipTick) continue;
+      if (this.trucks.some((t) => t.factoryCell === b.cell && t.owner === b.owner)) continue;
+      const fx = b.cell % this.w, fy = (b.cell / this.w) | 0;
+      const infra: { cell: number; d: number }[] = [];
+      for (const o of this.buildings) {
+        if (o.owner !== b.owner || (o.type !== 'city' && o.type !== 'port') || this.tickNo < o.readyTick) continue;
+        const d = ((o.cell % this.w) - fx) ** 2 + (((o.cell / this.w) | 0) - fy) ** 2;
+        if (d <= R2) infra.push({ cell: o.cell, d });
+      }
+      b.nextShipTick = this.tickNo + TRUCK_INTERVAL;
+      if (!infra.length) continue; // нет соединённых зданий — груз возить некому
+      infra.sort((a, z) => a.d - z.d);
+      const stops = infra.map((i) => i.cell);
+      stops.push(b.cell); // возврат на завод
+      this.trucks.push({
+        id: this.nextTruckId++,
+        owner: b.owner,
+        factoryCell: b.cell,
+        stops,
+        ti: 0,
+        x: fx + 0.5,
+        y: fy + 0.5,
+        done: false,
+      });
+    }
+  }
+
+  private stepTrucks() {
+    let any = false;
+    for (const t of this.trucks) {
+      const p = this.players.get(t.owner);
+      const fac = this.buildings.find((b) => b.cell === t.factoryCell && b.owner === t.owner && b.type === 'factory');
+      if (!p?.alive || !fac) { t.done = true; any = true; continue; }
+      const dst = t.stops[t.ti];
+      const tx = (dst % this.w) + 0.5, ty = ((dst / this.w) | 0) + 0.5;
+      const dx = tx - t.x, dy = ty - t.y;
+      if (Math.abs(dx) <= 0.5 && Math.abs(dy) <= 0.5) {
+        t.x = tx; t.y = ty;
+        if (t.ti >= t.stops.length - 1) {
+          // вернулся на завод — рейс окончен, следующий через интервал
+          fac.nextShipTick = this.tickNo + TRUCK_INTERVAL;
+          t.done = true; any = true;
+        } else {
+          // приехал к зданию — 10к, если оно ещё стоит и наше
+          if (this.buildings.some((bd) => bd.cell === dst && bd.owner === t.owner)) {
+            p.money += TRUCK_REWARD;
+            if (!p.bot) this.tradeEarnings.push({ x: tx, y: ty, amount: TRUCK_REWARD, owner: t.owner });
+          }
+          t.ti++;
+        }
+      } else if (Math.abs(dx) > 0.5) {
+        // сначала едем по горизонтали (как дорога с прямыми углами)
+        t.x += Math.sign(dx) * Math.min(TRUCK_SPEED, Math.abs(dx));
+      } else {
+        // затем по вертикали
+        t.y += Math.sign(dy) * Math.min(TRUCK_SPEED, Math.abs(dy));
+      }
+    }
+    if (any) this.trucks = this.trucks.filter((t) => !t.done);
+  }
+
+  trucksPub(): TruckPub[] {
+    return this.trucks.map((t) => ({ x: +t.x.toFixed(1), y: +t.y.toFixed(1), owner: t.owner }));
+  }
+
   private stepBoats() {
     for (const b of this.boats) {
       const p = this.players.get(b.player);
@@ -1254,6 +1368,13 @@ export class Game {
   private samLevels(playerId: number): number {
     let n = 0;
     for (const b of this.buildings) if (b.owner === playerId && b.type === 'sam') n += b.level;
+    return n;
+  }
+
+  // суммарный уровень всех заводов игрока — от него растёт цена следующей покупки
+  private factoryLevels(playerId: number): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.owner === playerId && b.type === 'factory') n += b.level;
     return n;
   }
 
@@ -1388,6 +1509,34 @@ export class Game {
       });
       return null;
     }
+    if (bt === 'factory') {
+      // клик рядом со своим заводом — апгрейд
+      const near = this.nearbyOwnType(playerId, cell, 'factory');
+      if (near) return this.upgrade(playerId, near.cell);
+      if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
+      if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
+        return 'Слишком близко к другому зданию';
+      const cost = factoryCost(this.factoryLevels(playerId));
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      this.buildings.push({
+        id: this.nextBuildingId++,
+        owner: playerId,
+        cell,
+        type: 'factory',
+        readyTick: this.tickNo + FACTORY_BUILD_TICKS,
+        level: 1,
+        fuseTick: 0,
+        upStart: 0,
+        upEnd: 0,
+        nextShipTick: 0,
+        ships: 0,
+        stock: 0,
+        reloadTick: 0,
+        reloads: [],
+      });
+      return null;
+    }
     if (bt === 'silo') {
       // клик рядом со своей шахтой — апгрейд
       const near = this.nearbyOwnType(playerId, cell, 'silo');
@@ -1489,6 +1638,13 @@ export class Game {
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       b.level++; // город апгрейдится мгновенно, уровней сколько угодно
+      return null;
+    }
+    if (b.type === 'factory') {
+      const cost = factoryCost(this.factoryLevels(playerId)); // по сумме уровней
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
+      b.level++; // завод апгрейдится мгновенно
       return null;
     }
     if (b.upEnd > 0) return 'Уже улучшается';
@@ -1653,6 +1809,7 @@ export class Game {
         id: this.nextShipId++,
         owner: b.owner,
         portCell: b.cell,
+        destCell: dest.cell,
         path: route.path,
         cum: route.cum,
         totalLen: route.totalLen,
@@ -1674,6 +1831,13 @@ export class Game {
         (b) => b.cell === s.portCell && b.owner === s.owner && b.type === 'port'
       );
       if (!p?.alive || !home) {
+        s.done = true;
+        continue;
+      }
+      // порт-назначение уничтожен ИЛИ мы объявили войну его владельцу — корабль
+      // тонет (с врагом не торгуем), освобождая место под новый маршрут
+      const dest = this.buildings.find((b) => b.cell === s.destCell && b.type === 'port');
+      if (!dest || this.relation(s.owner, dest.owner) === 'hostile') {
         s.done = true;
         continue;
       }
@@ -1893,8 +2057,8 @@ export class Game {
     const explosions: { cell: number; level: number }[] = [];
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue; // ещё строится — неуязвим
-      // порт/город/шахта/ПВО: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
-      if (b.type === 'port' || b.type === 'city' || b.type === 'silo' || b.type === 'sam') {
+      // порт/город/завод/шахта/ПВО: при захвате клетки переходят захватчику (нейтраль/взрыв — снос)
+      if (b.type === 'port' || b.type === 'city' || b.type === 'factory' || b.type === 'silo' || b.type === 'sam') {
         const now = this.owners[b.cell];
         if (now !== b.owner) {
           if (now > 0 && this.players.get(now)?.alive) {
@@ -2004,6 +2168,15 @@ export class Game {
       if (attacker > 0) this.markHostile(attacker, owner);
     }
     for (const n of inBlast) this.setOwner(n, 0);
+    // ядерный взрыв топит любые суда в радиусе — боевые, торговые и десант
+    const bx = cx + 0.5, by = cy + 0.5;
+    let sunkWar = false, sunkTrade = false, sunkBoat = false;
+    for (const s of this.warships) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.hp = 0; sunkWar = true; }
+    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; }
+    for (const b of this.boats) if ((b.x - bx) ** 2 + (b.y - by) ** 2 <= R2) { b.troops = 0; sunkBoat = true; }
+    if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
+    if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);
+    if (sunkBoat) this.boats = this.boats.filter((b) => b.troops >= 1);
   }
 
   // Пересбор поля укреплений: каждый штаб штампует диск своего владельца.
@@ -2074,9 +2247,17 @@ export class Game {
     if (this.fortDirty) this.rebuildFort();
     // суммарная прибавка к лимиту войск от достроенных городов (по игрокам)
     const cityBonus = new Map<number, number>();
+    // заводы: число и суммарный % ускорения регена по игрокам (деньги — через грузовики)
+    const facN = new Map<number, number>();
+    const facPct = new Map<number, number>();
     for (const b of this.buildings) {
-      if (b.type !== 'city' || this.tickNo < b.readyTick) continue;
-      cityBonus.set(b.owner, (cityBonus.get(b.owner) || 0) + cityTroopBonus(b.level));
+      if (this.tickNo < b.readyTick) continue;
+      if (b.type === 'city') {
+        cityBonus.set(b.owner, (cityBonus.get(b.owner) || 0) + cityTroopBonus(b.level));
+      } else if (b.type === 'factory') {
+        facN.set(b.owner, (facN.get(b.owner) || 0) + 1);
+        facPct.set(b.owner, (facPct.get(b.owner) || 0) + factoryBoostPct(b.level));
+      }
     }
     for (const p of this.players.values()) {
       if (!p.alive || !p.spawned) continue;
@@ -2101,10 +2282,19 @@ export class Game {
       // быстрее восполнение. frac 0 → ×2.6, frac 0.6 и выше → ×1. Так проигрывающий
       // догоняет, а копящий у потолка армию — тормозит (невыгодно сидеть на золоте)
       const boost = 1 + 1.6 * Math.max(0, 1 - frac / 0.6);
+      // завод: ускоряет реген в своей зоне — эффект на первые 30к войск/завод
+      // (для больших армий буст слабее), базово +10%, +3% за каждые 10 уровней
+      let facBoost = 1;
+      const fn = facN.get(p.id) || 0;
+      if (fn > 0 && p.troops > 0) {
+        const covered = Math.min(p.troops, FACTORY_COVER * fn);
+        const avgPct = (facPct.get(p.id) || 0) / fn;
+        facBoost = 1 + avgPct * (covered / p.troops);
+      }
       // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает
-      const growth = (base * (1 + early) + early * 20) * taper * boost;
+      const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost;
       p.troops = Math.min(p.maxTroops, p.troops + growth);
-      // пассивный доход денег — на копейки, от размера территории
+      // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
       p.money += 0.5 + p.cells * 0.08;
       if (p.bot) {
         if (this.tickNo >= p.thinkAt) this.botThink(p);
@@ -2132,6 +2322,8 @@ export class Game {
     this.stepTradeShips();
     this.stepWarships();
     this.stepBullets();
+    this.spawnTrucks();
+    this.stepTrucks();
     this.reloadSilos();
     this.stepMissiles();
     for (const a of this.attacks) this.stepAttack(a);
@@ -2332,6 +2524,30 @@ export class Game {
       }
       if (zone >= 0) this.launchWarship(p.id, zone);
     }
+    // Наступательность: если угроз нет и корабли есть — иногда двигаем их к
+    // вражескому берегу/порту (блокада торговли и десантов), а не держим у себя
+    if (!threats.length && myWar.length && Math.random() < 0.4) {
+      // цель: порт враждебного игрока или его прибрежная клетка
+      const foePorts = this.buildings.filter(
+        (b) => b.type === 'port' && b.owner !== p.id && this.relation(p.id, b.owner) === 'hostile' && this.tickNo >= b.readyTick
+      );
+      let zoneCell = -1;
+      if (foePorts.length) {
+        const fp = foePorts[(Math.random() * foePorts.length) | 0].cell;
+        const [wx, wy] = this.nearestWaterFine(fp % this.w, (fp / this.w) | 0, 20);
+        if (!this.terrain[wy * this.w + wx]) zoneCell = wy * this.w + wx;
+      } else {
+        // враждебных портов нет — стережём ближайшее к нам вражеское судно/трейд
+        const foeShip = this.tradeShips.find((s) => s.owner !== p.id && this.relation(p.id, s.owner) === 'hostile');
+        if (foeShip) zoneCell = (Math.round(foeShip.y) | 0) * this.w + (Math.round(foeShip.x) | 0);
+      }
+      // не гоняем, если уже кто-то рядом с этой зоной
+      if (zoneCell >= 0) {
+        const zx = zoneCell % this.w, zy = (zoneCell / this.w) | 0;
+        const covered = myWar.some((s) => (s.x - zx) ** 2 + (s.y - zy) ** 2 < (WARSHIP_RANGE * 0.7) ** 2);
+        if (!covered) this.moveWarships(p.id, myWar.map((s) => s.id), zoneCell);
+      }
+    }
   }
 
   // Морской десант бота: найти прибрежную клетку врага (в т.ч. на другом острове)
@@ -2409,8 +2625,19 @@ export class Game {
       if (myCities < 3 && p.money >= cityCost(this.cityLevels(p.id))) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam'])) {
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
             this.build(p.id, 'city', c);
+            break;
+          }
+        }
+      }
+      // завод: доход (грузовики) + ускорение регена; строим 1-2, если есть деньги
+      const myFactories = this.buildings.filter((b) => b.owner === p.id && b.type === 'factory').length;
+      if (myFactories < 2 && p.money >= factoryCost(this.factoryLevels(p.id))) {
+        for (let i = 0; i < cells.length; i += step) {
+          const c = cells[i];
+          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
+            this.build(p.id, 'factory', c);
             break;
           }
         }

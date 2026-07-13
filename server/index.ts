@@ -108,6 +108,7 @@ setInterval(() => {
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),
       ships: game.tradeShipsPub(),
+      trucks: game.trucksPub(),
       warships: game.warshipsPub(),
       shots: game.bulletsPub(),
       missiles: game.missilesPub(),

@@ -7,6 +7,7 @@ import {
   PlayerPub,
   TradeEarn,
   TradeShipPub,
+  TruckPub,
   WarshipPub,
 } from './dto';
 
@@ -60,6 +61,7 @@ export type ServerMsg =
       boats: BoatPub[];
       buildings: BuildingPub[];
       ships: TradeShipPub[]; // трейд-корабли (кружки без следа)
+      trucks: TruckPub[]; // грузовики заводов на дорогах
       warships: WarshipPub[]; // боевые корабли
       shots: number[]; // выстрелы кораблей за тик: [sx,sy,tx,ty,hit,...] (для трассеров)
       missiles: MissilePub[]; // ракеты в полёте
