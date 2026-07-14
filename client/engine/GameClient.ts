@@ -15,6 +15,7 @@ import {
   PORT_RADIUS,
   SAM_RANGE,
   FACTORY_RANGE,
+  MAX_HQ_LEVEL,
 } from '../../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../../shared/color';
 import { rleDecode } from '../../shared/rle';
@@ -569,6 +570,20 @@ export class GameClient {
 
   nearbyPort(cell: number): BuildingPub | undefined {
     return this.nearbyOwnType(cell, 'port');
+  }
+
+  // свой штаб, готовый к апгрейду, чей купол (HQ_RADIUS) накрывает клетку —
+  // ближайший центром. Готовый = достроен, не улучшается, не максимального уровня.
+  hqCovering(cell: number): BuildingPub | undefined {
+    const cx = cell % this.w, cy = (cell / this.w) | 0, r2 = HQ_RADIUS * HQ_RADIUS;
+    let best: BuildingPub | undefined, bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'hq' || b.owner !== this.selfId || b.progress < 1) continue;
+      if (b.level >= MAX_HQ_LEVEL || b.upProgress > 0) continue;
+      const d = ((b.cell % this.w) - cx) ** 2 + (((b.cell / this.w) | 0) - cy) ** 2;
+      if (d <= r2 && d < bestD) { bestD = d; best = b; }
+    }
+    return best;
   }
 
   // есть ли рядом (радиус r) здание из types — для запрета/предпросмотра города
@@ -1401,10 +1416,12 @@ export class GameClient {
       }
       ctx.globalAlpha = 1;
     } else if (this.buildMode && this.hoverCell >= 0) {
-      // предпросмотр штаба
-      const ok = this.canBuildHqAt(this.hoverCell);
-      const sx = this.panX + (this.hoverCell % this.w + 0.5) * this.zoom;
-      const sy = this.panY + ((this.hoverCell / this.w | 0) + 0.5) * this.zoom;
+      // предпросмотр штаба: клик в купол своего штаба = апгрейд, иначе новый
+      const near = this.hqCovering(this.hoverCell);
+      const cellFor = near ? near.cell : this.hoverCell;
+      const ok = near ? true : this.canBuildHqAt(this.hoverCell);
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
       // зона покрытия штаба — полупрозрачная плёнка радиуса HQ_RADIUS
       const rangePx = HQ_RADIUS * this.zoom;
       ctx.beginPath();
@@ -1427,10 +1444,21 @@ export class GameClient {
       ctx.font = `${r * 1.2}px sans-serif`;
       ctx.globalAlpha = ok ? 1 : 0.5;
       ctx.fillText('🛡', sx, sy + 1);
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#a9f0bd';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
       ctx.globalAlpha = 1;
     }
-    // при наведении ядерки — красные полупрозрачные зоны ВСЕХ ПВО (там ракету собьют)
-    if (this.nukeKind) {
+    // зоны покрытия ВСЕХ ПВО на карте: при выборе ракеты (там её собьют) и при
+    // постройке ПВО (видно, где уже есть покрытие и куда ставить). Свои — голубые,
+    // чужие — красные.
+    if (this.nukeKind || this.buildMode === 'sam') {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       const rr = SAM_RANGE * this.zoom;
@@ -1439,12 +1467,13 @@ export class GameClient {
         const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
         const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
         if (sx < -rr || sy < -rr || sx > vw + rr || sy > vh + rr) continue;
+        const mine = b.owner === this.selfId;
         ctx.beginPath();
         ctx.arc(sx, sy, rr, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255,40,40,0.12)';
+        ctx.fillStyle = mine ? 'rgba(77,225,255,0.10)' : 'rgba(255,40,40,0.12)';
         ctx.fill();
         ctx.lineWidth = 1.5;
-        ctx.strokeStyle = 'rgba(255,60,60,0.6)';
+        ctx.strokeStyle = mine ? 'rgba(77,225,255,0.6)' : 'rgba(255,60,60,0.6)';
         ctx.stroke();
       }
     }

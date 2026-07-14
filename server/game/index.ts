@@ -1689,6 +1689,19 @@ export class Game {
     );
   }
 
+  // свой штаб, чей купол (радиус HQ_RADIUS) накрывает клетку — ближайший центром.
+  // Клик в зону щита в режиме постройки штаба апгрейдит этот щит.
+  private hqCovering(playerId: number, cell: number): Building | undefined {
+    const cx = cell % this.w, cy = (cell / this.w) | 0, r2 = HQ_RADIUS * HQ_RADIUS;
+    let best: Building | undefined, bestD = Infinity;
+    for (const b of this.buildings) {
+      if (b.type !== 'hq' || b.owner !== playerId) continue;
+      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      if (d <= r2 && d < bestD) { bestD = d; best = b; }
+    }
+    return best;
+  }
+
   // есть ли рядом (радиус r) чужое/своё здание указанных типов — для запрета
   // ставить порты и города впритык друг к другу
   private buildingNear(cell: number, r: number, types: BuildingType[]): boolean {
@@ -1850,6 +1863,11 @@ export class Game {
       });
       return null;
     }
+    // клик в зону купола своего штаба, который ещё можно улучшить — апгрейд его
+    // (а не постройка нового); максимальный/занятый штаб не мешает строить рядом
+    const coverHq = this.hqCovering(playerId, cell);
+    if (coverHq && coverHq.upEnd === 0 && coverHq.level < MAX_HQ_LEVEL && this.tickNo >= coverHq.readyTick)
+      return this.upgrade(playerId, coverHq.cell);
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
     // штаб нельзя ставить впритык к другому штабу/порту/городу/шахте
     if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
