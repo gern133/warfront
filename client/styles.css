@@ -1220,29 +1220,23 @@ button {
 }
 
 /* радарная развёртка — сигнатура «военного штаба» */
+/* статичное свечение по центру (без анимации — иначе непрерывный композитинг
+   роняет частоту кадров в vsync half-lock и держит 30 FPS) */
 .overlay::after {
   content: '';
   position: fixed;
-  width: 150vmax;
-  height: 150vmax;
-  left: 50%;
-  top: 45%;
-  transform: translate(-50%, -50%);
+  inset: 0;
   z-index: 0;
   pointer-events: none;
-  background: conic-gradient(from 0deg, transparent 0deg, rgba(199, 209, 143, 0.07) 26deg, transparent 60deg);
-  animation: radar 16s linear infinite;
-}
-
-@keyframes radar {
-  to { transform: translate(-50%, -50%) rotate(360deg); }
+  background: radial-gradient(ellipse 55% 45% at 50% 42%, rgba(199, 209, 143, 0.06), transparent 70%);
 }
 
 .menu {
   position: relative;
   z-index: 1;
-  background: linear-gradient(180deg, rgba(20, 27, 23, 0.82), rgba(11, 16, 13, 0.86));
-  backdrop-filter: blur(14px);
+  /* непрозрачный фон вместо backdrop-filter: blur — размытие движущегося фона
+     каждый кадр держало страницу на 30 FPS (vsync half-lock) */
+  background: linear-gradient(180deg, rgba(22, 29, 25, 0.97), rgba(12, 17, 14, 0.98));
   border: 1px solid var(--edge);
   border-radius: 6px;
   padding: 30px 32px 26px;

@@ -972,6 +972,12 @@ export class GameClient {
     ctx.textBaseline = 'middle';
     const r = Math.max(5, Math.min(16, this.zoom * 2.2));
     const badge = r >= 9; // мелкие цифры-бейджи при отдалении не читаются — не рисуем
+    // При отдалении карты рисуем здания дешёвыми фигурами (LOD): круг — город/
+    // завод/щит, ромб — порт, треугольник — шахта, квадрат — ПВО. Это резко
+    // экономит FPS на общем виде (нет drawImage/текста), а размер фигуры РАСТЁТ
+    // при отдалении, чтобы постройки оставались заметны.
+    const shapeMode = this.zoom < 2.4;
+    const hs = Math.max(3.5, Math.min(9, 6 / this.zoom)); // полуразмер фигуры (px)
     const now = performance.now();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -979,6 +985,33 @@ export class GameClient {
       const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
       const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
       if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue; // вне экрана
+      if (shapeMode) {
+        // дешёвая фигура: тёмная заливка + контур цветом владельца — чтобы
+        // здание было видно на своей же (окрашенной) территории и было понятно, чьё
+        ctx.globalAlpha = b.progress < 1 ? 0.5 : 1;
+        ctx.fillStyle = 'rgba(16,20,16,0.9)';
+        ctx.strokeStyle = playerColorCSS(b.owner);
+        ctx.lineWidth = Math.max(1.4, hs * 0.32);
+        const t = b.type;
+        if (t === 'port') { // ромб
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - hs); ctx.lineTo(sx + hs, sy); ctx.lineTo(sx, sy + hs); ctx.lineTo(sx - hs, sy);
+          ctx.closePath(); ctx.fill(); ctx.stroke();
+        } else if (t === 'silo') { // треугольник
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - hs); ctx.lineTo(sx + hs, sy + hs * 0.86); ctx.lineTo(sx - hs, sy + hs * 0.86);
+          ctx.closePath(); ctx.fill(); ctx.stroke();
+        } else if (t === 'sam') { // квадрат
+          ctx.fillRect(sx - hs, sy - hs, hs * 2, hs * 2);
+          ctx.strokeRect(sx - hs, sy - hs, hs * 2, hs * 2);
+        } else { // город / завод / щит — круг
+          ctx.beginPath();
+          ctx.arc(sx, sy, hs, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        continue;
+      }
       if (b.type === 'silo') {
         const buildingP = b.progress < 1;
         const upgrading = b.upProgress > 0 && b.upProgress < 1;
