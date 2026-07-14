@@ -26,6 +26,7 @@ import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
 import { Phase, MenuView, LobbyInfo } from './types';
 import { TOOLS } from './constants/ui';
+import { ICON_URLS } from './engine/icons';
 import { fmtK } from './lib/format';
 import { MenuScreen } from './screens/MenuScreen';
 import { LobbyScreen } from './screens/LobbyScreen';
@@ -620,13 +621,13 @@ export default function App() {
         const op = players.find((p) => p.id === hoverOwner);
         if (!op) return null;
         const stat = statSnap.current.get(op.id);
-        const types: { t: BuildingType; icon: string }[] = [
-          { t: 'city', icon: '🏙️' },
-          { t: 'factory', icon: '🏭' },
-          { t: 'port', icon: '⚓' },
-          { t: 'hq', icon: '🛡️' },
-          { t: 'silo', icon: '🚀' },
-          { t: 'sam', icon: '🛰️' },
+        const types: { t: BuildingType; svg: string }[] = [
+          { t: 'city', svg: 'city' },
+          { t: 'factory', svg: 'factory' },
+          { t: 'port', svg: 'port' },
+          { t: 'hq', svg: 'hq' },
+          { t: 'silo', svg: 'silo' },
+          { t: 'sam', svg: 'sam' },
         ];
         const counts = types
           .map((x) => ({ ...x, n: buildings.filter((b) => b.owner === op.id && b.type === x.t).length }))
@@ -646,7 +647,9 @@ export default function App() {
             <div className="opp-blds">
               {counts.length ? (
                 counts.map((x) => (
-                  <span className="opp-bld" key={x.t}>{x.icon} {x.n}</span>
+                  <span className="opp-bld" key={x.t}>
+                    <img className="opp-bld-icon" src={ICON_URLS[x.svg]} alt="" draggable={false} /> {x.n}
+                  </span>
                 ))
               ) : (
                 <span className="opp-none">Построек нет</span>
@@ -899,7 +902,11 @@ export default function App() {
                     }}
                   >
                     <span className="tool-key">{(i + 1) % 10}</span>
-                    <span className="tool-icon">{t.icon}</span>
+                    {t.svg ? (
+                      <img className="tool-icon-svg" src={ICON_URLS[t.svg]} alt={t.name} draggable={false} />
+                    ) : (
+                      <span className="tool-icon">{t.icon}</span>
+                    )}
                     <span className="tool-count">{count}</span>
                     {active && <span className="tool-cost">{fmtK(cost)}</span>}
                   </button>

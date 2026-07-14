@@ -30,6 +30,7 @@ import {
 } from './constants';
 import { fmtTroops, fmtMoney } from '../lib/format';
 import { drawShips, drawMissiles, drawFleet } from './render/projectiles';
+import { IconSet, ICON_URLS } from './icons';
 
 export class GameClient {
   w = 0;
@@ -78,7 +79,7 @@ export class GameClient {
   private labels = new Map<number, { x: number; y: number }>();
   private miniCanvas: HTMLCanvasElement | null = null;
   private miniCtx: CanvasRenderingContext2D | null = null;
-  private emojiCache = new Map<string, HTMLCanvasElement>(); // спрайты иконок (кэш)
+  icons = new IconSet(ICON_URLS); // SVG-иконки зданий/юнитов (тонируются под canvas)
   private miniScale = 1; // масштаб миникарты (её пиксели / клетки карты)
   private miniPanX = NaN; // камера на последней отрисовке миникарты (для пропуска кадров)
   private miniPanY = NaN;
@@ -956,25 +957,12 @@ export class GameClient {
   }
 
 
-  // Иконка через кэш-спрайт: эмодзи рисуется один раз в маленький canvas, дальше
-  // дешёвый drawImage. Критично при сотнях зданий на экране (иначе fillText-эмодзи
-  // каждый кадр роняет FPS). Внешне идентично прежнему fillText.
-  private drawEmoji(ctx: CanvasRenderingContext2D, emoji: string, cx: number, cy: number, fontPx: number) {
-    let s = this.emojiCache.get(emoji);
-    if (!s) {
-      const S = 64;
-      s = document.createElement('canvas');
-      s.width = S;
-      s.height = S;
-      const c = s.getContext('2d')!;
-      c.font = `${Math.round(S * 0.82)}px sans-serif`;
-      c.textAlign = 'center';
-      c.textBaseline = 'middle';
-      c.fillText(emoji, S / 2, S / 2 + S * 0.06);
-      this.emojiCache.set(emoji, s);
-    }
-    const d = fontPx / 0.82; // видимый размер эмодзи ≈ fontPx (как у прежнего font)
-    ctx.drawImage(s, cx - d / 2, cy + 1 - d / 2, d, d);
+  // SVG-иконка на карте: тонированный спрайт из IconSet, центрируется в (cx,cy).
+  // size — сторона квадрата иконки в пикселях. Пока SVG не загрузился — пропускаем.
+  drawIcon(ctx: CanvasRenderingContext2D, name: string, cx: number, cy: number, size: number, color = '#ffffff') {
+    const spr = this.icons.get(name, color, 64);
+    if (!spr) return;
+    ctx.drawImage(spr, cx - size / 2, cy - size / 2, size, size);
   }
 
   // Здания на карте + предпросмотр в режиме постройки (зелёный/серый)
@@ -1002,7 +990,7 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        this.drawEmoji(ctx, '🚀', sx, sy, r * 1.1);
+        this.drawIcon(ctx, 'silo', sx, sy, r * 1.7);
         // заряд/залп справа-сверху (напр. 2/3) — только достроенная и не мелко
         if (badge && !buildingP) {
           const fs = Math.max(9, r * 0.85);
@@ -1042,7 +1030,7 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        this.drawEmoji(ctx, '🛰️', sx, sy, r * 1.05);
+        this.drawIcon(ctx, 'sam', sx, sy, r * 1.7);
         if (badge && !buildingP) {
           const fs = Math.max(9, r * 0.85);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1080,7 +1068,7 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        this.drawEmoji(ctx, '🏭', sx, sy, r * 1.1);
+        this.drawIcon(ctx, 'factory', sx, sy, r * 1.7);
         if (badge && b.level > 1 && !buildingP) {
           const fs = Math.max(10, r * 0.9);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1114,7 +1102,7 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        this.drawEmoji(ctx, '🏙️', sx, sy, r * 1.1);
+        this.drawIcon(ctx, 'city', sx, sy, r * 1.7);
         if (badge && b.level > 1 && !buildingP) {
           const fs = Math.max(10, r * 0.9);
           ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1150,7 +1138,7 @@ export class GameClient {
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        this.drawEmoji(ctx, '⚓', sx, sy, r * 1.1);
+        this.drawIcon(ctx, 'port', sx, sy, r * 1.7);
         // номер уровня справа-сверху
         if (badge && b.level > 1 && !buildingP) {
           const fs = Math.max(10, r * 0.9);
@@ -1195,7 +1183,7 @@ export class GameClient {
         ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
-      this.drawEmoji(ctx, b.level >= 2 ? '🛡️' : '🛡', sx, sy, r * 1.2);
+      this.drawIcon(ctx, 'hq', sx, sy, r * 1.7);
       ctx.globalAlpha = 1;
       // прогресс-бар постройки/апгрейда над зданием
       if (building || upgrading) {
@@ -1291,7 +1279,7 @@ export class GameClient {
       ctx.fill();
       ctx.stroke();
       ctx.font = `${r * 1.1}px sans-serif`;
-      ctx.fillText('⚓', sx, sy + 1);
+      this.drawIcon(ctx, 'port', sx, sy, r * 1.6);
       // при апгрейде — показываем будущий уровень
       if (near) {
         const fs = Math.max(10, r * 0.9);
@@ -1328,7 +1316,7 @@ export class GameClient {
       ctx.fill();
       ctx.stroke();
       ctx.font = `${r * 1.1}px sans-serif`;
-      ctx.fillText('🏙️', sx, sy + 1);
+      this.drawIcon(ctx, 'city', sx, sy, r * 1.6);
       if (near) {
         const fs = Math.max(10, r * 0.9);
         ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1366,7 +1354,7 @@ export class GameClient {
       ctx.stroke();
       ctx.font = `${r * 1.1}px sans-serif`;
       ctx.globalAlpha = ok ? 1 : 0.5;
-      ctx.fillText('🏭', sx, sy + 1);
+      this.drawIcon(ctx, 'factory', sx, sy, r * 1.6);
       if (near) {
         const fs = Math.max(10, r * 0.9);
         ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1404,7 +1392,7 @@ export class GameClient {
       ctx.stroke();
       ctx.font = `${r * 1.05}px sans-serif`;
       ctx.globalAlpha = ok ? 1 : 0.5;
-      ctx.fillText('🛰️', sx, sy + 1);
+      this.drawIcon(ctx, 'sam', sx, sy, r * 1.6);
       if (near) {
         const fs = Math.max(10, r * 0.9);
         ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
@@ -1443,7 +1431,7 @@ export class GameClient {
       ctx.stroke();
       ctx.font = `${r * 1.2}px sans-serif`;
       ctx.globalAlpha = ok ? 1 : 0.5;
-      ctx.fillText('🛡', sx, sy + 1);
+      this.drawIcon(ctx, 'hq', sx, sy, r * 1.6);
       if (near) {
         const fs = Math.max(10, r * 0.9);
         ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;

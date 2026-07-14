@@ -60,11 +60,8 @@ export function drawFleet(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
     ctx.lineWidth = Math.max(2, rad * 0.18);
     ctx.strokeStyle = 'rgba(0,0,0,0.65)';
     ctx.stroke();
-    // «башня» — тёмный внутренний круг
-    ctx.beginPath();
-    ctx.arc(sx, sy, rad * 0.42, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(18,22,30,0.85)';
-    ctx.fill();
+    // иконка корабля (белый силуэт поверх цветного круга владельца)
+    gc.drawIcon(ctx, 'warship', sx, sy, rad * 1.3);
     // полоска здоровья над кораблём (если ранен)
     if (wship.hp < 1) {
       const bw = rad * 2, bh = Math.max(3, rad * 0.2);

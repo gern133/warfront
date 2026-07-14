@@ -668,6 +668,16 @@ button {
   font-size: 20px;
 }
 
+/* SVG-иконка инструмента: моно-силуэт красим в белый через filter */
+.tool-icon-svg {
+  width: 62%;
+  height: 62%;
+  object-fit: contain;
+  filter: brightness(0) invert(1);
+  pointer-events: none;
+  user-select: none;
+}
+
 .tool-key {
   position: absolute;
   top: 2px;
@@ -787,9 +797,20 @@ button {
 }
 
 .opp-bld {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 12px;
   color: var(--ink-dim);
+}
+
+.opp-bld-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  filter: brightness(0) invert(1);
+  opacity: 0.85;
 }
 
 .opp-none {

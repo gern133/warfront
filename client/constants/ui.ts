@@ -14,16 +14,17 @@ export const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
   earth: { name: 'Земля', desc: 'реальные материки и острова' },
 };
 
-// панель зданий/вооружений (1–0). bt — тип постройки, nuke — тип запускаемой ракеты
-export const TOOLS: { icon: string; bt: BuildingType | null; name: string; nuke?: string; fleet?: boolean }[] = [
-  { icon: '🏙️', bt: 'city', name: 'Город' },
-  { icon: '🏭', bt: 'factory', name: 'Завод' },
-  { icon: '⚓', bt: 'port', name: 'Торговый порт' },
-  { icon: '🛡️', bt: 'hq', name: 'Штаб обороны' },
-  { icon: '🚀', bt: 'silo', name: 'Ракетная шахта' },
-  { icon: '🛰️', bt: 'sam', name: 'ПВО' },
-  { icon: '🚢', bt: null, name: 'Боевой флот', fleet: true },
-  { icon: '☢️', bt: null, name: 'Ядерка', nuke: 'basic' },
-  { icon: '💥', bt: null, name: 'Водородная бомба', nuke: 'hydro' },
+// панель зданий/вооружений (1–0). bt — тип постройки, nuke — тип запускаемой
+// ракеты, svg — ключ SVG-иконки (см. engine/icons); icon — эмодзи-запасной вариант
+export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name: string; nuke?: string; fleet?: boolean }[] = [
+  { icon: '🏙️', svg: 'city', bt: 'city', name: 'Город' },
+  { icon: '🏭', svg: 'factory', bt: 'factory', name: 'Завод' },
+  { icon: '⚓', svg: 'port', bt: 'port', name: 'Торговый порт' },
+  { icon: '🛡️', svg: 'hq', bt: 'hq', name: 'Штаб обороны' },
+  { icon: '🚀', svg: 'silo', bt: 'silo', name: 'Ракетная шахта' },
+  { icon: '🛰️', svg: 'sam', bt: 'sam', name: 'ПВО' },
+  { icon: '🚢', svg: 'warship', bt: null, name: 'Боевой флот', fleet: true },
+  { icon: '☢️', svg: 'nuke', bt: null, name: 'Ядерка', nuke: 'basic' },
+  { icon: '💥', svg: 'hydro', bt: null, name: 'Водородная бомба', nuke: 'hydro' },
   { icon: '💣', bt: null, name: 'Бомба' },
 ];
