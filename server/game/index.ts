@@ -2176,10 +2176,11 @@ export class Game {
         s.done = true;
         continue;
       }
-      // порт-назначение уничтожен ИЛИ мы объявили войну его владельцу — корабль
-      // тонет (с врагом не торгуем), освобождая место под новый маршрут
+      // порт-назначение уничтожен, стал НАШИМ (сам с собой не торгуют — напр.
+      // мы захватили страну-партнёра) ИЛИ мы объявили войну его владельцу —
+      // корабль тонет, освобождая место под новый маршрут
       const dest = this.buildings.find((b) => b.cell === s.destCell && b.type === 'port');
-      if (!dest || this.relation(s.owner, dest.owner) === 'hostile') {
+      if (!dest || dest.owner === s.owner || this.relation(s.owner, dest.owner) === 'hostile') {
         s.done = true;
         continue;
       }
