@@ -128,8 +128,9 @@ export class Game {
   allies = new Map<number, Set<number>>();
   hostiles = new Map<number, Set<number>>();
   relChanged = new Set<number>();
-  // события союзов для ленты (расторжения) — кому и от кого; чистится в index
-  relNotices: { to: number; kind: 'break'; name: string }[] = [];
+  // события для ленты: расторжение союза / уничтожение торгового корабля —
+  // кому и от кого; чистится в index
+  relNotices: { to: number; kind: 'break' | 'trade'; name: string }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
@@ -330,6 +331,22 @@ export class Game {
           const x = px + dx, y = py + dy;
           if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
           if (this.terrain[y * this.w + x]) return y * this.w + x;
+        }
+    }
+    return -1;
+  }
+
+  // ближайшая клетка суши, принадлежащая игроку owner (для точки посадки десанта —
+  // чтобы десант выходил именно с нашего берега, даже если вражеский ближе)
+  private nearestOwnedLand(owner: number, px: number, py: number, maxR: number): number {
+    for (let r = 0; r <= maxR; r++) {
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = px + dx, y = py + dy;
+          if (x < 0 || y < 0 || x >= this.w || y >= this.h) continue;
+          const c = y * this.w + x;
+          if (this.terrain[c] && this.owners[c] === owner) return c;
         }
     }
     return -1;
@@ -887,11 +904,15 @@ export class Game {
     // становится врагом сразу (её корабли начинают бить наш десант в пути)
     const victim = this.owners[landCell];
     if (victim > 0 && victim !== playerId) this.markHostile(playerId, victim);
-    // точка старта = наш берег рядом с началом маршрута
+    // точка старта = НАШ берег рядом с началом маршрута. Ищем именно свою сушу
+    // (иначе при десанте «в упор» к врагу ближайшей сушей к воде оказывается его
+    // берег, и лодка визуально стартовала бы с вражеской территории)
     const startCell = fine[0];
-    const embark = this.nearestLandCell(startCell % this.w, (startCell / this.w) | 0, this.ck * 2);
-    const sx = embark >= 0 ? embark % this.w : startCell % this.w;
-    const sy = embark >= 0 ? (embark / this.w) | 0 : (startCell / this.w) | 0;
+    const sxw = startCell % this.w, syw = (startCell / this.w) | 0;
+    let embark = this.nearestOwnedLand(playerId, sxw, syw, this.ck * 2);
+    if (embark < 0) embark = this.nearestLandCell(sxw, syw, this.ck * 2); // подстраховка
+    const sx = embark >= 0 ? embark % this.w : sxw;
+    const sy = embark >= 0 ? (embark / this.w) | 0 : syw;
     // Путь: наш берег → клетки A* (строго вода) → берег высадки. Засев A* у берега,
     // поэтому переход берег↔вода — всего пара клеток (лодка стартует ОТ берега и
     // причаливает К берегу), а вся середина маршрута идёт по воде.
@@ -1192,6 +1213,7 @@ export class Game {
           boatKilled = true;
         } else {
           (tgt as TradeShip).done = true;
+          this.noticeTradeLost((tgt as TradeShip).owner, b.owner);
         }
         b.dmg = 0; // пуля отработала
       } else {
@@ -1980,6 +2002,12 @@ export class Game {
     return this.players.get(id)?.name ?? '?';
   }
 
+  // уведомление в ленту владельцу потопленного торгового корабля (кто потопил)
+  private noticeTradeLost(shipOwner: number, attacker: number) {
+    if (attacker <= 0 || attacker === shipOwner) return;
+    this.relNotices.push({ to: shipOwner, kind: 'trade', name: this.playerName(attacker) });
+  }
+
   acceptAlliance(a: number, b: number) {
     this.setRel(this.hostiles, a, b, false); // союз снимает вражду
     this.setRel(this.allies, a, b, true);
@@ -2444,7 +2472,7 @@ export class Game {
     const bx = cx + 0.5, by = cy + 0.5;
     let sunkWar = false, sunkTrade = false, sunkBoat = false;
     for (const s of this.warships) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.hp = 0; sunkWar = true; }
-    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; }
+    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker); }
     for (const b of this.boats) if ((b.x - bx) ** 2 + (b.y - by) ** 2 <= R2) { b.troops = 0; sunkBoat = true; }
     if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
     if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);

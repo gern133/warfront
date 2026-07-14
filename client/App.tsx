@@ -292,7 +292,9 @@ export default function App() {
             ? `${msg.name} принял ваш союз`
             : msg.kind === 'break'
               ? `${msg.name} расторг союз с вами`
-              : `${msg.name} отклонил ваш союз`;
+              : msg.kind === 'trade'
+                ? `${msg.name} уничтожил ваш торговый корабль`
+                : `${msg.name} отклонил ваш союз`;
         setNotices((n) => [...n, { id, ok, text }].slice(-100));
         setLiveNotices((l) => [...l, id]);
         setTimeout(() => setLiveNotices((l) => l.filter((x) => x !== id)), 5000);
