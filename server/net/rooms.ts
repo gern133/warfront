@@ -60,9 +60,9 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
   return room;
 }
 
-export const publicRoom = makeRoom('QUICK', 'normal', 'random', true);
+export const publicRoom = makeRoom('QUICK', 'easy', 'earth', true);
 publicRoom.phase = 'running';
-publicRoom.game.addBots('normal');
+publicRoom.game.addBots('easy');
 
 export function send(ws: WebSocket, msg: ServerMsg) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));

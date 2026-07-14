@@ -2616,8 +2616,9 @@ export class Game {
         const avgPct = (facPct.get(p.id) || 0) / fn;
         facBoost = 1 + avgPct * (covered / p.troops);
       }
-      // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает
-      const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost;
+      // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает.
+      // 0.85 — общий темп пополнения армии снижен на 15% (ребаланс)
+      const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost * 0.85;
       p.troops = Math.min(p.maxTroops, p.troops + growth);
       // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
       p.money += 0.5 + p.cells * 0.08;

@@ -4,41 +4,56 @@ import { DIFF_LABELS, MAP_LABELS } from '../constants/ui';
 interface Props {
   lobby: LobbyInfo;
   copied: boolean;
-  onCopyCode: () => void;
+  onCopyLink: () => void;
   onStart: () => void;
   onLeave: () => void;
 }
 
-// Лобби: код доступа, список игроков, старт (у хоста)
-export function LobbyScreen({ lobby, copied, onCopyCode, onStart, onLeave }: Props) {
+// Лобби: ссылка-приглашение, список игроков, старт (у хоста)
+export function LobbyScreen({ lobby, copied, onCopyLink, onStart, onLeave }: Props) {
   return (
     <div className="overlay">
       <div className="menu">
-        <h1 className="title">Лобби</h1>
-        <div className="frontline" aria-hidden="true" />
+        <div className="menu-head">
+          <span className="menu-eyebrow">Оперативный штаб</span>
+          <h1 className="title">Лобби</h1>
+          <div className="frontline" aria-hidden="true" />
+          <span className="lobby-meta">
+            {MAP_LABELS[lobby.map].name} · {DIFF_LABELS[lobby.difficulty].name.toLowerCase()} уровень
+          </span>
+        </div>
+
         <div className="field">
-          <span className="eyebrow">Шифр доступа — отправьте союзникам</span>
-          <button className="code-box" onClick={onCopyCode}>
-            {lobby.code}
-            <span className="copy-mark">{copied ? '✓ скопировано' : 'копировать'}</span>
+          <span className="eyebrow">Пригласить союзника — отправьте ссылку</span>
+          <button className={'invite-btn' + (copied ? ' copied' : '')} onClick={onCopyLink}>
+            <span className="invite-ico" aria-hidden="true">🔗</span>
+            <span className="invite-text">
+              <span className="invite-main">{copied ? 'Ссылка скопирована' : 'Скопировать ссылку'}</span>
+              <span className="invite-sub">код · {lobby.code}</span>
+            </span>
+            <span className="invite-mark">{copied ? '✓' : 'копировать'}</span>
           </button>
         </div>
-        <div className="lobby-meta">
-          {MAP_LABELS[lobby.map].name} · {DIFF_LABELS[lobby.difficulty].name.toLowerCase()} уровень
+
+        <div className="field">
+          <span className="eyebrow">Командиры в лобби · {lobby.players.length}</span>
+          <div className="lobby-players">
+            {lobby.players.map((n, i) => (
+              <div key={i} className="lobby-player">
+                <span className="lobby-rank">{i + 1}</span>
+                <span className="lobby-pname">{n}</span>
+                {i === 0 && <span className="lobby-host">хост</span>}
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="lobby-players">
-          {lobby.players.map((n, i) => (
-            <div key={i} className="lobby-player">
-              {n}
-            </div>
-          ))}
-        </div>
+
         {lobby.host ? (
           <button className="primary" onClick={onStart}>
-            Начать игру
+            Начать операцию<span className="btn-chev">→</span>
           </button>
         ) : (
-          <p className="hint">Ожидание хоста…</p>
+          <p className="hint">Ожидание запуска хостом…</p>
         )}
         <button className="link" onClick={onLeave}>
           Покинуть лобби

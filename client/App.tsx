@@ -35,12 +35,14 @@ import { DeadScreen, WinnerModal } from './screens/EndScreens';
 const LB_ROW_H = 24; // высота строки лидерборда (px) — должна совпадать с CSS .lb-brow
 
 export default function App() {
+  // код приглашения из ссылки (?join=XXXXX) — сразу открываем экран входа
+  const inviteFromUrl = new URLSearchParams(location.search).get('join')?.toUpperCase().slice(0, 5) || '';
   const [phase, setPhase] = useState<Phase>('menu');
-  const [menuView, setMenuView] = useState<MenuView>('main');
+  const [menuView, setMenuView] = useState<MenuView>(inviteFromUrl ? 'join' : 'main');
   const [name, setName] = useState(() => localStorage.getItem('wf-name') || '');
-  const [joinCode, setJoinCode] = useState('');
-  const [difficulty, setDifficulty] = useState<Difficulty>('normal');
-  const [mapType, setMapType] = useState<MapType>('random');
+  const [joinCode, setJoinCode] = useState(inviteFromUrl);
+  const [difficulty, setDifficulty] = useState<Difficulty>('easy');
+  const [mapType] = useState<MapType>('earth'); // только Земля
   const [lobby, setLobby] = useState<LobbyInfo | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [players, setPlayers] = useState<PlayerPub[]>([]);
@@ -433,15 +435,27 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // пришли по ссылке-приглашению и уже есть сохранённый позывной — входим сразу
+  const autoJoined = useRef(false);
+  useEffect(() => {
+    if (connected && inviteFromUrl && name.trim() && !autoJoined.current) {
+      autoJoined.current = true;
+      sendMsg({ type: 'joinLobby', name: cleanName(), code: inviteFromUrl });
+    }
+  }, [connected]);
+
   const quickPlay = () => sendMsg({ type: 'quick', name: cleanName() });
   const createLobby = () =>
     sendMsg({ type: 'create', name: cleanName(), difficulty, map: mapType });
   const joinLobby = () =>
     sendMsg({ type: 'joinLobby', name: cleanName(), code: joinCode });
 
-  const copyCode = () => {
+  const inviteLink = (code: string) =>
+    `${location.origin}${location.pathname}?join=${code}`;
+
+  const copyInviteLink = () => {
     if (!lobby) return;
-    navigator.clipboard.writeText(lobby.code).catch(() => {});
+    navigator.clipboard.writeText(inviteLink(lobby.code)).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -928,8 +942,6 @@ export default function App() {
           menuView={menuView}
           setMenuView={setMenuView}
           connected={connected}
-          mapType={mapType}
-          setMapType={setMapType}
           difficulty={difficulty}
           setDifficulty={setDifficulty}
           joinCode={joinCode}
@@ -945,7 +957,7 @@ export default function App() {
         <LobbyScreen
           lobby={lobby}
           copied={copied}
-          onCopyCode={copyCode}
+          onCopyLink={copyInviteLink}
           onStart={() => sendMsg({ type: 'start' })}
           onLeave={leaveToMenu}
         />

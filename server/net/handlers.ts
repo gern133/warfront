@@ -38,7 +38,7 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       const diff: Difficulty = ['easy', 'normal', 'hard', 'insane'].includes(msg.difficulty)
         ? msg.difficulty
         : 'normal';
-      const map: MapType = msg.map === 'earth' ? 'earth' : 'random';
+      const map: MapType = 'earth'; // только Земля (рандомная генерация убрана)
       const room = makeRoom(genCode(), diff, map, false);
       room.host = ws;
       room.clients.add(ws);
