@@ -181,6 +181,200 @@ button {
   color: var(--ink);
 }
 
+/* --- круговое меню цели (десант / союз / центр-донат) --- */
+.radial {
+  position: absolute;
+  z-index: 21;
+  width: 0;
+  height: 0;
+}
+
+.radial-label {
+  position: absolute;
+  left: 50%;
+  top: -140px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  padding: 5px 11px;
+  backdrop-filter: blur(10px);
+}
+
+.radial-btn {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+  background: rgba(16, 22, 20, 0.92);
+  backdrop-filter: blur(10px);
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  animation: radial-pop 0.16s ease-out;
+}
+
+.radial-btn:hover:not(.disabled) {
+  border-color: var(--signal);
+  background: rgba(255, 82, 48, 0.16);
+}
+
+.radial-btn.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.radial-ico {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.radial-txt {
+  font-size: 10px;
+  color: var(--ink-dim);
+}
+
+.radial-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 76px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 2px solid var(--khaki);
+  background: radial-gradient(circle at 50% 34%, rgba(199, 209, 143, 0.28), rgba(16, 22, 20, 0.96));
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  animation: radial-pop 0.16s ease-out;
+}
+
+.radial-center:hover:not(.disabled) {
+  border-color: #e8f0b0;
+  filter: brightness(1.1);
+}
+
+.radial-center.disabled {
+  opacity: 0.45;
+  cursor: default;
+  border-color: var(--edge);
+}
+
+.radial-center-ico {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.radial-center-txt {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--khaki);
+}
+
+@keyframes radial-pop {
+  from { opacity: 0; transform: scale(0.8); }
+}
+
+/* --- модалка доната союзнику --- */
+.donate-modal {
+  position: absolute;
+  z-index: 21;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(340px, calc(100vw - 32px));
+  background: linear-gradient(180deg, rgba(20, 27, 23, 0.95), rgba(11, 16, 13, 0.97));
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.donate-head {
+  font-size: 15px;
+  color: var(--ink);
+  text-align: center;
+}
+
+.donate-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.donate-tab {
+  padding: 10px;
+  border-radius: 5px;
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--ink-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.donate-tab.active {
+  border-color: var(--khaki);
+  background: rgba(199, 209, 143, 0.12);
+  color: var(--ink);
+}
+
+.donate-amount {
+  text-align: center;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 24px;
+  color: var(--ink);
+}
+
+.donate-slider {
+  width: 100%;
+  accent-color: var(--signal);
+}
+
+.donate-limit {
+  font-size: 11px;
+  color: var(--ink-dim);
+  text-align: center;
+  line-height: 1.4;
+}
+
+.donate-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.donate-actions .ctx-btn {
+  padding: 11px;
+}
+
 /* --- лидерборд --- */
 
 /* панель управления игрой — правый верхний угол */
@@ -1442,6 +1636,51 @@ button {
   font-size: 14px;
   text-align: center;
 }
+
+/* --- панель наблюдателя (после поражения) --- */
+.spectate-bar {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.spectate-tag {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--khaki);
+}
+
+.spectate-btn {
+  padding: 7px 14px;
+  border-radius: 5px;
+  border: none;
+  background: linear-gradient(180deg, var(--signal), var(--signal-deep));
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.spectate-btn.ghost {
+  background: rgba(233, 237, 227, 0.06);
+  border: 1px solid var(--edge);
+  color: var(--ink-dim);
+}
+
+.spectate-btn:hover { filter: brightness(1.1); }
+.spectate-btn.ghost:hover { color: var(--ink); border-color: var(--khaki); }
 
 @media (prefers-reduced-motion: reduce) {
   .overlay::after { animation: none; }

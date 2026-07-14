@@ -2038,6 +2038,33 @@ export class Game {
     this.breakAllianceId(a, b);
   }
 
+  // Подарок союзнику: золото или войска. Войска не могут превысить лимит
+  // получателя, а золото/войска — то, что реально есть у отправителя.
+  donate(fromId: number, cell: number, kind: 'gold' | 'troops', amount: number): string | null {
+    const from = this.players.get(fromId);
+    if (!from?.alive) return 'Нельзя';
+    const toId = this.owners[cell];
+    if (toId <= 0 || toId === fromId) return 'Неверная цель';
+    const to = this.players.get(toId);
+    if (!to?.alive) return 'Неверная цель';
+    if (this.relation(fromId, toId) !== 'allied') return 'Можно только союзнику';
+    amount = Math.floor(amount);
+    if (!(amount > 0)) return 'Некорректная сумма';
+    if (kind === 'gold') {
+      const send = Math.min(amount, Math.floor(from.money));
+      if (send <= 0) return 'Недостаточно золота';
+      from.money -= send;
+      to.money += send;
+    } else {
+      const cap = Math.max(0, Math.floor(to.maxTroops) - Math.floor(to.troops)); // сколько влезет получателю
+      const send = Math.min(amount, Math.floor(from.troops), cap);
+      if (send <= 0) return 'Нельзя отправить войска';
+      from.troops -= send;
+      to.troops = Math.min(to.maxTroops, to.troops + send);
+    }
+    return null;
+  }
+
   breakAllianceId(a: number, b: number) {
     const wasAllied = this.allies.get(a)?.has(b) ?? false;
     this.setRel(this.allies, a, b, false); // назад в нейтралитет

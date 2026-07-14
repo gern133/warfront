@@ -62,6 +62,11 @@ export default function App() {
   const [ratio, setRatio] = useState(15);
   const [connected, setConnected] = useState(false);
   const [invadeMenu, setInvadeMenu] = useState<{ cell: number; x: number; y: number } | null>(null);
+  const [spectating, setSpectating] = useState(false); // режим наблюдателя после поражения
+  // модалка доната союзнику (открывается из центра кругового меню)
+  const [donate, setDonate] = useState<{ cell: number; toId: number } | null>(null);
+  const [donateKind, setDonateKind] = useState<'gold' | 'troops'>('gold');
+  const [donateAmount, setDonateAmount] = useState(0);
   const [upgradeMenu, setUpgradeMenu] = useState<
     { cell: number; x: number; y: number; level: number } | null
   >(null);
@@ -222,6 +227,7 @@ export default function App() {
         setRoomCode(msg.code);
         setSpawnLeft(msg.spawnSeconds ?? null);
         setWinner(null); // новый раунд (в т.ч. после реванша) — закрываем модалку
+        setSpectating(false); // вернулись в игру — выходим из наблюдения
         if (msg.selfId > 0) setPhase('spawn');
       } else if (msg.type === 'update') {
         // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
@@ -277,12 +283,14 @@ export default function App() {
         gc.resync(msg.ownersRle); // полный снимок владельцев после лага
       } else if (msg.type === 'spawned') {
         setPhase('playing');
+        setSpectating(false);
         // клетки спавна придут следующим update — фокус делаем там (см. ниже)
         needFocus.current = true;
       } else if (msg.type === 'roundStart') {
         setSpawnLeft(null);
       } else if (msg.type === 'dead') {
         troopHistory.current = [];
+        setSpectating(false); // сначала показываем экран поражения
         setPhase('dead');
       } else if (msg.type === 'winner') {
         setWinner({ name: msg.name, you: msg.id === gc.selfId });
@@ -355,6 +363,7 @@ export default function App() {
     gc.selfId = -1;
     gc.setAttacks([]);
     setPhase('menu');
+    setSpectating(false);
     setMenuView('main');
     setLobby(null);
     setSpawnLeft(null);
@@ -963,83 +972,177 @@ export default function App() {
         />
       )}
 
-      {phase === 'dead' && (
-        <DeadScreen onRespawn={() => sendMsg({ type: 'respawn' })} onLeave={leaveToMenu} />
+      {phase === 'dead' && !spectating && (
+        <DeadScreen
+          onRespawn={() => sendMsg({ type: 'respawn' })}
+          onObserve={() => setSpectating(true)}
+          onLeave={leaveToMenu}
+        />
       )}
 
-      {invadeMenu && (
-        <>
-          <div className="menu-scrim" onClick={() => setInvadeMenu(null)} />
-          <div
-            className="ctx-menu"
-            style={{
-              left: Math.min(invadeMenu.x, window.innerWidth - 220),
-              top: Math.min(invadeMenu.y, window.innerHeight - 120),
-            }}
-          >
-            <div className="ctx-title">
-              Цель:{' '}
-              {gc.owners[invadeMenu.cell] === 0
-                ? 'нейтральный берег'
-                : nameOf(gc.owners[invadeMenu.cell])}
-            </div>
-            {(() => {
-              void relVer; // перерисовка при смене отношений
-              const owner = gc.owners[invadeMenu.cell];
-              const rel = owner > 0 ? gc.relationOf(owner) : 'neutral';
-              return (
-                <>
-                  {rel === 'allied' ? (
-                    <div className="ctx-note">🤝 Союзник — атаковать нельзя</div>
-                  ) : (
-                    <>
-                      <button
-                        className="ctx-btn"
-                        disabled={myBoats.length >= 3}
-                        onClick={() => {
-                          if (myBoats.length >= 3) return;
-                          sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
-                          setInvadeMenu(null);
-                        }}
-                      >
-                        🚢 Морское вторжение · {Math.min(50, ratio)}%
-                      </button>
-                      {myBoats.length >= 3 && (
-                        <div className="ctx-note">🚢 Лимит: 3 корабля в пути</div>
-                      )}
-                    </>
-                  )}
-                  {owner > 0 && rel === 'allied' && (
-                    <button
-                      className="ctx-btn"
-                      onClick={() => {
-                        sendMsg({ type: 'breakAlliance', cell: invadeMenu.cell });
-                        setInvadeMenu(null);
-                      }}
-                    >
-                      💔 Расторгнуть союз
-                    </button>
-                  )}
-                  {owner > 0 && rel !== 'allied' && (
-                    <button
-                      className="ctx-btn"
-                      onClick={() => {
-                        sendMsg({ type: 'propose', cell: invadeMenu.cell });
-                        setInvadeMenu(null);
-                      }}
-                    >
-                      🤝 Предложить союз
-                    </button>
-                  )}
-                </>
-              );
-            })()}
-            <button className="ctx-cancel" onClick={() => setInvadeMenu(null)}>
-              Отмена
-            </button>
-          </div>
-        </>
+      {/* режим наблюдателя: карту видно, сверху — компактная панель управления */}
+      {phase === 'dead' && spectating && (
+        <div className="spectate-bar">
+          <span className="spectate-tag">👁 Наблюдение</span>
+          <button className="spectate-btn" onClick={() => sendMsg({ type: 'respawn' })}>
+            Реванш
+          </button>
+          <button className="spectate-btn ghost" onClick={leaveToMenu}>
+            В меню
+          </button>
+        </div>
       )}
+
+      {invadeMenu && (() => {
+        void relVer; // перерисовка при смене отношений
+        const owner = gc.owners[invadeMenu.cell];
+        const rel = owner > 0 ? gc.relationOf(owner) : 'neutral';
+        const allied = owner > 0 && rel === 'allied';
+        // действия по кольцу — зависят от отношения к цели
+        const ring: { icon: string; label: string; disabled?: boolean; onClick: () => void }[] = [];
+        if (!allied) {
+          ring.push({
+            icon: '🚢',
+            label: `Десант ${Math.min(50, ratio)}%`,
+            disabled: myBoats.length >= 3,
+            onClick: () => {
+              if (myBoats.length >= 3) return;
+              sendMsg({ type: 'invade', cell: invadeMenu.cell, ratio: ratio / 100 });
+              setInvadeMenu(null);
+            },
+          });
+          if (owner > 0)
+            ring.push({
+              icon: '🤝',
+              label: 'Союз',
+              onClick: () => {
+                sendMsg({ type: 'propose', cell: invadeMenu.cell });
+                setInvadeMenu(null);
+              },
+            });
+        } else {
+          ring.push({
+            icon: '💔',
+            label: 'Разрыв',
+            onClick: () => {
+              sendMsg({ type: 'breakAlliance', cell: invadeMenu.cell });
+              setInvadeMenu(null);
+            },
+          });
+        }
+        const R = 92; // радиус кольца
+        const cx = Math.max(140, Math.min(invadeMenu.x, window.innerWidth - 140));
+        const cy = Math.max(160, Math.min(invadeMenu.y, window.innerHeight - 140));
+        return (
+          <>
+            <div className="menu-scrim" onClick={() => setInvadeMenu(null)} />
+            <div className="radial" style={{ left: cx, top: cy }}>
+              <div className="radial-label">
+                {owner === 0 ? 'Нейтральный берег' : nameOf(owner)}
+              </div>
+              {ring.map((it, i) => {
+                const ang = (-90 + i * (360 / ring.length)) * (Math.PI / 180);
+                const x = Math.cos(ang) * R, y = Math.sin(ang) * R;
+                return (
+                  <button
+                    key={i}
+                    className={'radial-btn' + (it.disabled ? ' disabled' : '')}
+                    style={{ transform: `translate(-50%,-50%) translate(${x}px, ${y}px)` }}
+                    disabled={it.disabled}
+                    onClick={it.onClick}
+                    title={it.label}
+                  >
+                    <span className="radial-ico">{it.icon}</span>
+                    <span className="radial-txt">{it.label}</span>
+                  </button>
+                );
+              })}
+              {/* центр — донат (только союзнику) */}
+              <button
+                className={'radial-center' + (allied ? '' : ' disabled')}
+                disabled={!allied}
+                title={allied ? 'Донат союзнику' : 'Донат только союзнику'}
+                onClick={() => {
+                  if (!allied) return;
+                  setDonateKind('gold');
+                  setDonateAmount(0);
+                  setDonate({ cell: invadeMenu.cell, toId: owner });
+                  setInvadeMenu(null);
+                }}
+              >
+                <span className="radial-center-ico">🎁</span>
+                <span className="radial-center-txt">Донат</span>
+              </button>
+            </div>
+          </>
+        );
+      })()}
+
+      {donate && (() => {
+        const to = players.find((p) => p.id === donate.toId);
+        const myMoney = Math.floor(self?.money ?? shownMoney);
+        const myTroops = Math.floor(self?.troops ?? shownTroops);
+        const recCap = to ? Math.max(0, Math.floor(to.maxTroops) - Math.floor(to.troops)) : 0;
+        const max = donateKind === 'gold' ? myMoney : Math.min(myTroops, recCap);
+        const amt = Math.min(donateAmount, max);
+        return (
+          <>
+            <div className="menu-scrim" onClick={() => setDonate(null)} />
+            <div className="donate-modal">
+              <div className="donate-head">
+                🎁 Донат · <b>{to?.name ?? '?'}</b>
+              </div>
+              <div className="donate-tabs">
+                <button
+                  className={'donate-tab' + (donateKind === 'gold' ? ' active' : '')}
+                  onClick={() => { setDonateKind('gold'); setDonateAmount(0); }}
+                >
+                  ◈ Золото
+                </button>
+                <button
+                  className={'donate-tab' + (donateKind === 'troops' ? ' active' : '')}
+                  onClick={() => { setDonateKind('troops'); setDonateAmount(0); }}
+                >
+                  🪖 Войска
+                </button>
+              </div>
+              <div className="donate-amount">
+                {donateKind === 'gold' ? '◈ ' : '🪖 '}
+                <b>{fmtK(amt)}</b>
+              </div>
+              <input
+                className="donate-slider"
+                type="range"
+                min={0}
+                max={Math.max(0, max)}
+                value={amt}
+                disabled={max <= 0}
+                onChange={(e) => setDonateAmount(Number(e.target.value))}
+              />
+              <div className="donate-limit">
+                {donateKind === 'troops'
+                  ? `Можно отправить: ${fmtK(max)} (лимит союзника ${fmtK(to?.maxTroops ?? 0)}, у него ${fmtK(Math.floor(to?.troops ?? 0))})`
+                  : `Можно отправить: ${fmtK(max)}`}
+              </div>
+              <div className="donate-actions">
+                <button
+                  className="ctx-btn"
+                  disabled={amt <= 0}
+                  onClick={() => {
+                    sendMsg({ type: 'donate', cell: donate.cell, kind: donateKind, amount: amt });
+                    setDonate(null);
+                  }}
+                >
+                  Отправить
+                </button>
+                <button className="ctx-cancel" onClick={() => setDonate(null)}>
+                  Отмена
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      })()}
 
       {proposals.length > 0 && phase === 'playing' && (
         <div className="proposals">

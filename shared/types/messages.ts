@@ -31,7 +31,8 @@ export type ClientMsg =
   | { type: 'setSpeed'; speed: number } // скорость игры (0 пауза,1,2,3,10)
   | { type: 'propose'; cell: number } // предложить союз владельцу клетки
   | { type: 'allianceResponse'; from: number; accept: boolean } // ответ на предложение
-  | { type: 'breakAlliance'; cell: number }; // расторгнуть союз с владельцем клетки
+  | { type: 'breakAlliance'; cell: number } // расторгнуть союз с владельцем клетки
+  | { type: 'donate'; cell: number; kind: 'gold' | 'troops'; amount: number }; // подарок союзнику
 
 export type ServerMsg =
   | {

@@ -194,6 +194,14 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       room.game.breakAlliance(st.playerId, msg.cell | 0);
       break;
     }
+    case 'donate': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      const kind = msg.kind === 'troops' ? 'troops' : 'gold';
+      const err = room.game.donate(st.playerId, msg.cell | 0, kind, Number(msg.amount) || 0);
+      if (err) send(ws, { type: 'error', message: err });
+      break;
+    }
     case 'setSpeed': {
       const room = st.room;
       if (!room) return;

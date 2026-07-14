@@ -1,6 +1,14 @@
 // Оверлеи конца: поражение и победа
 
-export function DeadScreen({ onRespawn, onLeave }: { onRespawn: () => void; onLeave: () => void }) {
+export function DeadScreen({
+  onRespawn,
+  onObserve,
+  onLeave,
+}: {
+  onRespawn: () => void;
+  onObserve: () => void;
+  onLeave: () => void;
+}) {
   return (
     <div className="overlay">
       <div className="menu">
@@ -8,7 +16,10 @@ export function DeadScreen({ onRespawn, onLeave }: { onRespawn: () => void; onLe
         <div className="frontline" aria-hidden="true" />
         <p className="dead-msg">Ваша территория захвачена</p>
         <button className="primary" onClick={onRespawn}>
-          Реванш
+          Реванш<span className="btn-chev">→</span>
+        </button>
+        <button className="secondary" onClick={onObserve}>
+          👁 Наблюдать за боем
         </button>
         <button className="link" onClick={onLeave}>
           В меню
