@@ -50,11 +50,13 @@ export const STRONG_COUNT = 18; // меньше сильных стран — у
 export const WEAK_GROWTH = 0.5; // вдвое медленнее игрока
 export const WEAK_MAX = 1 / 3; // потолок войск втрое меньше
 
-export const DIFFICULTY: Record<Difficulty, { strongMul: number; aggro: number }> = {
-  easy: { strongMul: 0.8, aggro: 0.7 }, // страны слабее игрока
-  normal: { strongMul: 1.0, aggro: 1.0 }, // как игрок
-  hard: { strongMul: 1.2, aggro: 1.25 }, // на 20% сильнее
-  insane: { strongMul: 1.5, aggro: 1.6 }, // на 50% сильнее
+// coalition — сила «коалиции против лидера»: на средней+ боты союзничают и
+// совместно бьют/бомбят сильнейшего игрока. 0 = выкл (лёгкий).
+export const DIFFICULTY: Record<Difficulty, { strongMul: number; aggro: number; coalition: number }> = {
+  easy: { strongMul: 0.8, aggro: 0.7, coalition: 0 }, // страны слабее игрока, без коалиции
+  normal: { strongMul: 1.0, aggro: 1.0, coalition: 0.4 }, // как игрок
+  hard: { strongMul: 1.2, aggro: 1.25, coalition: 0.7 }, // на 20% сильнее
+  insane: { strongMul: 1.5, aggro: 1.6, coalition: 1.0 }, // на 50% сильнее
 };
 
 // Слабые боты: случайные имена из сочетаний (нужно >= WEAK_COUNT комбинаций)

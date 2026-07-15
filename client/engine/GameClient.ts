@@ -1287,7 +1287,7 @@ export class GameClient {
       const maxR = cellsR * this.zoom;
       ctx.globalAlpha = (1 - p) * 0.8;
       ctx.beginPath();
-      ctx.arc(sx, sy, maxR * (0.3 + p * 0.7), 0, Math.PI * 2);
+      ctx.arc(sx, sy, maxR * (0.3 + p * 0.7), 0, Math.PI * 2 );
       ctx.fillStyle = f.nuke ? 'rgba(255,90,20,0.55)' : f.big ? 'rgba(255,120,40,0.5)' : 'rgba(255,180,60,0.5)';
       ctx.fill();
       ctx.lineWidth = f.nuke ? 5 : 3;

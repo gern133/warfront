@@ -1991,6 +1991,22 @@ export class Game {
     return p.cells + p.troops * 0.5;
   }
 
+  // Текущий лидер (сильнейший живой игрок) — цель «коалиции». Кэш на тик.
+  private leaderId = 0;
+  private leaderStamp = -1;
+  private currentLeader(): number {
+    if (this.leaderStamp === this.tickNo) return this.leaderId;
+    let best = 0, bestPow = 0;
+    for (const pl of this.players.values()) {
+      if (!pl.alive || pl.cells <= 0) continue;
+      const pw = this.powerOf(pl.id);
+      if (pw > bestPow) { bestPow = pw; best = pl.id; }
+    }
+    this.leaderId = best;
+    this.leaderStamp = this.tickNo;
+    return best;
+  }
+
   // Выгоден ли боту союз с игроком other? Да, если either (1) other не слабее бота
   // (нет смысла злить сильного), либо (2) бот сейчас в невыгодном положении —
   // воюет с кем-то сильнее себя и ему нужен друг.
@@ -3124,6 +3140,51 @@ export class Game {
       if (Math.random() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
       // активно занимаем пустые острова, пока есть свободные войска
       if (Math.random() < 0.2 && p.troops > p.maxTroops * 0.35) this.botColonize(p);
+
+      // КОАЛИЦИЯ ПРОТИВ ЛИДЕРА (средняя+ сложность): если сильнейший игрок явно
+      // оторвался — боты союзничают между собой и совместно бомбят его инфраструктуру.
+      // Чем выше сложность, тем чаще удары по сильнейшему.
+      const coalition = DIFFICULTY[this.difficulty].coalition;
+      if (coalition > 0) {
+        const leader = this.currentLeader();
+        if (leader > 0 && leader !== p.id && this.powerOf(leader) > this.powerOf(p.id) * 1.3) {
+          // 1) союзы коалиции — с другими НЕ-лидерами-ботами (чтобы не грызться,
+          //    а давить лидера вместе)
+          if (Math.random() < 0.25 * coalition) {
+            for (const k of counts.keys()) {
+              if (k <= 0 || k === leader) continue;
+              const other = this.players.get(k);
+              if (other?.alive && other.bot && this.relation(p.id, k) === 'neutral') {
+                this.acceptAlliance(p.id, k);
+                break;
+              }
+            }
+          }
+          // 2) бомбим инфраструктуру лидера ядеркой (даже не граничя с ним)
+          if (
+            Math.random() < 0.08 + 0.4 * coalition &&
+            p.money >= NUKES.basic.cost &&
+            this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
+          ) {
+            const from = this.playerCells(p.id)[0] ?? 0;
+            const fx0 = from % this.w, fy0 = (from / this.w) | 0;
+            const prio: Record<string, number> = { silo: 5, sam: 4, factory: 3, hq: 2, city: 1 };
+            let tc = -1, bs = -Infinity;
+            for (const b of this.buildings) {
+              if (b.owner !== leader) continue;
+              const pr = prio[b.type];
+              if (!pr) continue;
+              const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
+              const score = pr * 1e7 - ((bx - fx0) ** 2 + (by - fy0) ** 2);
+              if (score > bs) { bs = score; tc = b.cell; }
+            }
+            if (tc >= 0) {
+              const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.5 ? 'hydro' : 'basic';
+              this.launchNuke(p.id, tc, kind);
+            }
+          }
+        }
+      }
     }
 
     // Страны: агрессия зависит от сложности
@@ -3148,10 +3209,20 @@ export class Game {
       }
     }
     let target: number;
-    if (counts.has(0) && Math.random() < 0.6) {
+    const coal = DIFFICULTY[this.difficulty].coalition;
+    const leader = coal > 0 ? this.currentLeader() : 0;
+    // в коалиции: если граничим с оторвавшимся лидером — чаще бьём именно его
+    if (
+      leader > 0 && leader !== p.id && counts.has(leader) &&
+      this.powerOf(leader) > this.powerOf(p.id) * 1.3 &&
+      Math.random() < 0.5 + 0.5 * coal
+    ) {
+      target = leader;
+    } else if (counts.has(0) && Math.random() < 0.6) {
       target = 0;
     } else {
-      const enemies = [...counts.keys()].filter((k) => k !== 0);
+      // не бьём союзников (в т.ч. по коалиции) — иначе атака впустую блокируется
+      const enemies = [...counts.keys()].filter((k) => k !== 0 && this.relation(p.id, k) !== 'allied');
       target = enemies.length ? enemies[(Math.random() * enemies.length) | 0] : 0;
     }
     this.launchAttackOwner(p.id, target, Math.floor(p.troops * 0.5));
