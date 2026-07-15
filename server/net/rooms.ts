@@ -16,7 +16,8 @@ export interface Room {
   difficulty: Difficulty;
   map: MapType;
   isPublic: boolean;
-  speed: number; // скорость игры: 0 пауза, 1, 2, 3, 10
+  speed: number; // скорость игры: 0 пауза, 0.5, 1, 2, 3, 10
+  tickAccum: number; // накопитель для дробной скорости (0.5 — тик через раз)
   resetTimer: ReturnType<typeof setTimeout> | null;
   winnerSent: number | null; // id уже объявленного победителя (чтобы не слать повторно)
 }
@@ -53,6 +54,7 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
     map,
     isPublic,
     speed: 1,
+    tickAccum: 0,
     resetTimer: null,
     winnerSent: null,
   };

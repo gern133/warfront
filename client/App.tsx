@@ -63,6 +63,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [invadeMenu, setInvadeMenu] = useState<{ cell: number; x: number; y: number } | null>(null);
   const [spectating, setSpectating] = useState(false); // режим наблюдателя после поражения
+  const [speedOpen, setSpeedOpen] = useState(false); // раскрыт список скоростей
   // модалка доната союзнику (открывается из центра кругового меню)
   const [donate, setDonate] = useState<{ cell: number; toId: number } | null>(null);
   const [donateKind, setDonateKind] = useState<'gold' | 'troops'>('gold');
@@ -74,7 +75,7 @@ export default function App() {
   const [proposals, setProposals] = useState<{ from: number; name: string }[]>([]);
   const [relVer, setRelVer] = useState(0); // счётчик смены отношений (для перерисовки меню)
   // лента ответов на мои предложения союза (принял/отклонил): вся история + «живые» тосты
-  const [notices, setNotices] = useState<{ id: number; ok: boolean; text: string }[]>([]);
+  const [notices, setNotices] = useState<{ id: number; ok: boolean; text: string; x?: number; y?: number }[]>([]);
   const [liveNotices, setLiveNotices] = useState<number[]>([]); // id тостов, что ещё видны (5с)
   const [chatOpen, setChatOpen] = useState(false); // открыта история сообщений
   const noticeId = useRef(0);
@@ -306,7 +307,7 @@ export default function App() {
               : msg.kind === 'trade'
                 ? `${msg.name} уничтожил ваш торговый корабль`
                 : `${msg.name} отклонил ваш союз`;
-        setNotices((n) => [...n, { id, ok, text }].slice(-100));
+        setNotices((n) => [...n, { id, ok, text, x: msg.x, y: msg.y }].slice(-30)); // история — до 30
         setLiveNotices((l) => [...l, id]);
         setTimeout(() => setLiveNotices((l) => l.filter((x) => x !== id)), 5000);
       } else if (msg.type === 'error') {
@@ -547,26 +548,34 @@ export default function App() {
 
       {inGame && (
         <div className="ctrl-panel">
-          {/* пауза и ускорение — только когда ты один (без реальных игроков) */}
+          {/* скорость — только когда ты один (без реальных игроков): кнопка-переключатель,
+              по клику разворачивается список скоростей */}
           {humans <= 1 && (
-            <>
+            <div className="speed-ctrl">
               <button
-                className="ctrl-btn"
-                title={speed === 0 ? 'Продолжить' : 'Пауза'}
-                onClick={() => sendMsg({ type: 'setSpeed', speed: speed === 0 ? 1 : 0 })}
+                className={'ctrl-btn ctrl-speed-toggle' + (speedOpen ? ' active' : '')}
+                title="Скорость игры"
+                onClick={() => setSpeedOpen((v) => !v)}
               >
-                {speed === 0 ? '▶' : '⏸'}
+                {speed === 0 ? '⏸' : `${speed}×`}
               </button>
-              {[1, 2, 3, 10].map((s) => (
-                <button
-                  key={s}
-                  className={'ctrl-btn ctrl-speed' + (speed === s ? ' active' : '')}
-                  onClick={() => sendMsg({ type: 'setSpeed', speed: s })}
-                >
-                  {s}×
-                </button>
-              ))}
-            </>
+              {speedOpen && (
+                <div className="speed-pop">
+                  {[0, 0.5, 1, 2, 3, 10].map((s) => (
+                    <button
+                      key={s}
+                      className={'ctrl-btn ctrl-speed' + (speed === s ? ' active' : '')}
+                      onClick={() => {
+                        sendMsg({ type: 'setSpeed', speed: s });
+                        setSpeedOpen(false);
+                      }}
+                    >
+                      {s === 0 ? '⏸' : `${s}×`}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
           <button className="ctrl-btn" title="Полный экран" onClick={toggleFullscreen}>
             ⛶
@@ -603,6 +612,8 @@ export default function App() {
                     key={p.id}
                     className={'lb-row lb-brow' + (p.id === gc.selfId ? ' me' : '')}
                     style={{ transform: `translateY(${rank * LB_ROW_H}px)` }}
+                    title="Показать территорию"
+                    onClick={() => gc.focusPlayer(p.id)}
                   >
                     <span className="lb-rank">{rank + 1}</span>
                     <span className="dot" style={{ background: playerColorCSS(p.id) }} />
@@ -682,15 +693,20 @@ export default function App() {
         );
       })()}
 
-      {/* лента ответов на предложения союза (тосты + история) — снизу справа */}
+      {/* лента событий (союзы + потопленные трейд-корабли) — снизу справа.
+          Видно максимум 3 тоста, история — до 30 (см. slice выше). */}
       {inGame && (
         <div className="chat-log">
           {chatOpen && (
             <div className="chat-history">
-              <div className="eyebrow chat-hhead">История союзов</div>
+              <div className="eyebrow chat-hhead">История событий</div>
               {notices.length === 0 && <div className="chat-empty">Пока пусто</div>}
               {[...notices].reverse().map((n) => (
-                <div key={n.id} className={'chat-line ' + (n.ok ? 'ok' : 'no')}>
+                <div
+                  key={n.id}
+                  className={'chat-line ' + (n.ok ? 'ok' : 'no') + (n.x !== undefined ? ' clickable' : '')}
+                  onClick={n.x !== undefined ? () => gc.focusOn(n.x!, n.y!) : undefined}
+                >
                   {n.ok ? '🤝' : '✕'} {n.text}
                 </div>
               ))}
@@ -699,8 +715,13 @@ export default function App() {
           <div className="chat-toasts">
             {notices
               .filter((n) => liveNotices.includes(n.id))
+              .slice(-3) /* не больше 3 тостов, чтобы не заслонять экран */
               .map((n) => (
-                <div key={n.id} className={'chat-toast ' + (n.ok ? 'ok' : 'no')}>
+                <div
+                  key={n.id}
+                  className={'chat-toast ' + (n.ok ? 'ok' : 'no') + (n.x !== undefined ? ' clickable' : '')}
+                  onClick={n.x !== undefined ? () => gc.focusOn(n.x!, n.y!) : undefined}
+                >
                   {n.ok ? '🤝' : '✕'} {n.text}
                 </div>
               ))}
@@ -708,7 +729,7 @@ export default function App() {
           <button
             className="chat-toggle"
             onClick={() => setChatOpen((v) => !v)}
-            title="История ответов на союзы"
+            title="История событий"
           >
             🕑 {chatOpen ? 'Скрыть' : 'История'}
             {notices.length > 0 && <span className="chat-badge">{notices.length}</span>}
@@ -738,8 +759,8 @@ export default function App() {
                 <button
                   key={b.id}
                   className="incoming-row"
-                  onClick={() => gc.focusOn(b.path[0] ?? b.x, b.path[1] ?? b.y)}
-                  title="Показать агрессора"
+                  onClick={() => gc.focusOn(b.x, b.y)}
+                  title="Показать десант"
                 >
                   <span className="inc-dot" style={{ background: playerColorCSS(b.player) }} />
                   <span className="inc-text">

@@ -18,6 +18,7 @@ export interface Player {
   money: number;
   thinkAt: number;
   spawnTick: number; // когда игрок высадился (для раннего буста роста)
+  hurtTick: number; // последний тик, когда игрок терял клетку под атакой (для обороны)
 }
 
 export interface Building {

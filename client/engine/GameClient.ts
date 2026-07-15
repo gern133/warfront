@@ -656,6 +656,31 @@ export class GameClient {
     return true;
   }
 
+  // Плавный фокус на территорию любого игрока (по клику в лидерборде) — удобно
+  // найти бота, у которого осталась пара клеток непонятно где.
+  focusPlayer(id: number): boolean {
+    if (!this.w || id <= 0) return false;
+    let sx = 0, sy = 0, n = 0;
+    for (let c = 0; c < this.cells; c++) {
+      if (this.owners[c] === id) { sx += c % this.w; sy += (c / this.w) | 0; n++; }
+    }
+    if (!n) return false;
+    const cx = sx / n, cy = sy / n;
+    const span = Math.min(window.innerWidth, window.innerHeight);
+    const toZ = Math.max(this.minZoom(), Math.min(20, span / 90));
+    this.anim = {
+      t0: performance.now(),
+      dur: 700,
+      fromX: this.panX,
+      fromY: this.panY,
+      fromZ: this.zoom,
+      toX: window.innerWidth / 2 - cx * toZ,
+      toY: window.innerHeight / 2 - cy * toZ,
+      toZ,
+    };
+    return true;
+  }
+
   setAttacks(attacks: AttackPub[]) {
     this.attacks = attacks;
     const nw = new Set<number>();

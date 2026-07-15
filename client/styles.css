@@ -415,6 +415,42 @@ button {
   color: #10140c;
 }
 
+/* переключатель скорости с выпадающим списком */
+.speed-ctrl {
+  position: relative;
+  display: flex;
+}
+
+.ctrl-speed-toggle {
+  min-width: 40px;
+}
+
+.ctrl-speed-toggle.active {
+  border-color: var(--khaki);
+}
+
+.speed-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  animation: radial-pop 0.14s ease-out;
+}
+
+.speed-pop .ctrl-btn {
+  width: 100%;
+  min-width: 44px;
+}
+
 .ctrl-exit:hover {
   border-color: var(--signal);
   color: var(--signal);
@@ -460,8 +496,14 @@ button {
   right: 0;
   height: 24px;
   padding: 0;
+  cursor: pointer;
   transition: transform 0.35s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.25s ease;
   animation: lb-fade-in 0.25s ease;
+}
+
+.lb-brow:hover {
+  background: rgba(233, 237, 227, 0.06);
+  border-radius: 3px;
 }
 
 @keyframes lb-fade-in {
@@ -933,26 +975,27 @@ button {
 /* --- тултип противника (наведение на территорию) --- */
 .opp-tip {
   position: absolute;
-  top: 16px;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 30;
-  min-width: 240px;
-  padding: 12px 14px;
+  min-width: 168px;
+  border-radius: 2px; /* более прямоугольная форма */
+  padding: 7px 9px;
   pointer-events: none;
 }
 
 .opp-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 5px;
+  padding-bottom: 5px;
   border-bottom: 1px solid var(--edge);
 }
 
 .opp-name {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--ink);
 }
@@ -960,22 +1003,22 @@ button {
 .opp-rows {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 3px 12px;
+  gap: 2px 10px;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
 }
 
 .opp-lbl {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 9px;
+  font-size: 8px;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   color: var(--ink-faint);
 }
 
 .opp-val {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ink);
   text-align: right;
 }
@@ -987,21 +1030,21 @@ button {
 .opp-blds {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 10px;
+  gap: 4px 8px;
 }
 
 .opp-bld {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ink-dim);
 }
 
 .opp-bld-icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   object-fit: contain;
   filter: brightness(0) invert(1);
   opacity: 0.85;
@@ -1086,6 +1129,17 @@ button {
   padding: 6px 9px;
   border-radius: 4px;
   font-size: 12px;
+}
+
+.chat-toast.clickable,
+.chat-line.clickable {
+  cursor: pointer;
+}
+
+.chat-toast.clickable::after,
+.chat-line.clickable::after {
+  content: ' ⌖';
+  opacity: 0.7;
 }
 
 .chat-empty {
@@ -1700,7 +1754,7 @@ button {
   }
 
   .opp-tip {
-    min-width: 200px;
+    min-width: 158px;
   }
 
   .spawn-banner {

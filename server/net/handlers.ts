@@ -208,7 +208,7 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       // скоростью управляет хост лобби, либо любой в одиночной комнате
       const allowed = room.isPublic ? room.clients.size <= 1 : room.host === ws;
       if (!allowed) return;
-      if ([0, 1, 2, 3, 10].includes(msg.speed)) room.speed = msg.speed;
+      if ([0, 0.5, 1, 2, 3, 10].includes(msg.speed)) room.speed = msg.speed;
       break;
     }
     case 'leave': {

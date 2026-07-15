@@ -74,7 +74,7 @@ export type ServerMsg =
   | { type: 'resync'; ownersRle: number[] } // полный снимок владельцев (после лага)
   | { type: 'relations'; allies: number[]; enemies: number[] } // отношения игрока
   | { type: 'proposal'; from: number; name: string } // входящее предложение союза
-  | { type: 'notice'; kind: 'accept' | 'reject' | 'break' | 'trade'; name: string } // союз: принял/отклонил/расторг; trade: уничтожил мой торговый корабль
+  | { type: 'notice'; kind: 'accept' | 'reject' | 'break' | 'trade'; name: string; x?: number; y?: number } // союз: принял/отклонил/расторг; trade: уничтожил мой торговый корабль (x,y — место, куда фокусировать)
   | { type: 'spawned' }
   | { type: 'roundStart' } // все выбрали спавн или вышло время — игра пошла
   | { type: 'dead' }

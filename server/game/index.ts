@@ -72,6 +72,8 @@ import {
   NEUTRAL_COST,
   GROWTH_SLOW_FROM,
   WAVE_SPEED,
+  DEFEND_BOOST,
+  DEFEND_BOOST_TICKS,
   WEAK_COUNT,
   STRONG_COUNT,
   WEAK_GROWTH,
@@ -129,8 +131,8 @@ export class Game {
   hostiles = new Map<number, Set<number>>();
   relChanged = new Set<number>();
   // события для ленты: расторжение союза / уничтожение торгового корабля —
-  // кому и от кого; чистится в index
-  relNotices: { to: number; kind: 'break' | 'trade'; name: string }[] = [];
+  // кому, от кого и (для trade) куда фокусировать камеру; чистится в index
+  relNotices: { to: number; kind: 'break' | 'trade'; name: string; x?: number; y?: number }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
@@ -605,6 +607,7 @@ export class Game {
       money: START_MONEY,
       thinkAt: this.tickNo + 20 + ((Math.random() * 30) | 0),
       spawnTick: this.tickNo,
+      hurtTick: -1000,
     };
     this.players.set(p.id, p);
     this.cellsOf.set(p.id, []);
@@ -1212,8 +1215,9 @@ export class Game {
           (tgt as Boat).troops = 0; // десант потоплен
           boatKilled = true;
         } else {
-          (tgt as TradeShip).done = true;
-          this.noticeTradeLost((tgt as TradeShip).owner, b.owner);
+          const ts = tgt as TradeShip;
+          ts.done = true;
+          this.noticeTradeLost(ts.owner, b.owner, ts.x, ts.y); // место гибели ≈ где корабль-убийца
         }
         b.dmg = 0; // пуля отработала
       } else {
@@ -2020,10 +2024,10 @@ export class Game {
     return this.players.get(id)?.name ?? '?';
   }
 
-  // уведомление в ленту владельцу потопленного торгового корабля (кто потопил)
-  private noticeTradeLost(shipOwner: number, attacker: number) {
+  // уведомление в ленту владельцу потопленного торгового корабля (кто потопил и где)
+  private noticeTradeLost(shipOwner: number, attacker: number, x: number, y: number) {
     if (attacker <= 0 || attacker === shipOwner) return;
-    this.relNotices.push({ to: shipOwner, kind: 'trade', name: this.playerName(attacker) });
+    this.relNotices.push({ to: shipOwner, kind: 'trade', name: this.playerName(attacker), x, y });
   }
 
   acceptAlliance(a: number, b: number) {
@@ -2518,7 +2522,7 @@ export class Game {
     const bx = cx + 0.5, by = cy + 0.5;
     let sunkWar = false, sunkTrade = false, sunkBoat = false;
     for (const s of this.warships) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.hp = 0; sunkWar = true; }
-    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker); }
+    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
     for (const b of this.boats) if ((b.x - bx) ** 2 + (b.y - by) ** 2 <= R2) { b.troops = 0; sunkBoat = true; }
     if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
     if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);
@@ -2631,10 +2635,14 @@ export class Game {
         frac <= GROWTH_SLOW_FROM
           ? 1
           : Math.max(0.03, 1 - ((frac - GROWTH_SLOW_FROM) / (1 - GROWTH_SLOW_FROM)) * 0.97);
-      // догоняющий буст: чем сильнее выбита армия (мала доля от потолка), тем
-      // быстрее восполнение. frac 0 → ×2.6, frac 0.6 и выше → ×1. Так проигрывающий
-      // догоняет, а копящий у потолка армию — тормозит (невыгодно сидеть на золоте)
-      const boost = 1 + 1.6 * Math.max(0, 1 - frac / 0.6);
+      // догоняющий буст: чем сильнее выбита армия, тем быстрее восполнение.
+      // Ослаблен (макс ×1.8 при frac 0), чтобы агрессор, вывалив всю армию в
+      // атаку, НЕ восполнял её мгновенно и не мог бесконечно слать волны.
+      const boost = 1 + 0.8 * Math.max(0, 1 - frac / 0.55);
+      // ОБОРОННЫЙ буст: если игрок только что терял клетки (его атакуют), он
+      // пополняет войска заметно быстрее — успевает нарастить гарнизон и отбиться.
+      // Помогает именно защищающемуся (агрессор клетки не теряет — буста не имеет).
+      const defBoost = this.tickNo - p.hurtTick < DEFEND_BOOST_TICKS ? DEFEND_BOOST : 1;
       // завод: ускоряет реген в своей зоне — эффект на первые 30к войск/завод
       // (для больших армий буст слабее), базово +10%, +3% за каждые 10 уровней
       let facBoost = 1;
@@ -2645,8 +2653,8 @@ export class Game {
         facBoost = 1 + avgPct * (covered / p.troops);
       }
       // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает.
-      // 0.85 — общий темп пополнения армии снижен на 15% (ребаланс)
-      const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost * 0.85;
+      // 0.75 — общий темп пополнения армии снижен (армии набираются медленнее)
+      const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost * defBoost * 0.75;
       p.troops = Math.min(p.maxTroops, p.troops + growth);
       // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
       p.money += 0.5 + p.cells * 0.08;
@@ -2797,7 +2805,9 @@ export class Game {
       density = enemy.cells > 0 ? enemy.troops / enemy.cells : 0;
       baseCost = 1 + 2 * density;
       if (enemy.troops > 0) {
-        waveScale = Math.min(6, Math.max(0.2, a.troops / enemy.troops));
+        // потолок перевеса снижен (6→3.5): подавляющий агрессор больше не
+        // прорезает оборону молниеносно — у защиты есть время нарастить войска
+        waveScale = Math.min(3.5, Math.max(0.2, a.troops / enemy.troops));
       }
     }
     // остаток меньше даже обычной цены — наступление выдохлось, вернуть войска
@@ -2828,7 +2838,10 @@ export class Game {
         a.frontier.delete(c);
         this.setOwner(c, a.player);
         a.troops -= cellCost;
-        if (enemy) enemy.troops = Math.max(0, enemy.troops - density);
+        if (enemy) {
+          enemy.troops = Math.max(0, enemy.troops - density);
+          enemy.hurtTick = this.tickNo; // защищающийся под атакой — включаем оборонный буст роста
+        }
         quota--;
         // расширяем фронт на соседей захваченной клетки
         this.forNeighbors(c, (n) => {
@@ -2924,6 +2937,33 @@ export class Game {
     }
   }
 
+  // Колонизация ботом: находит НЕЙТРАЛЬНУЮ прибрежную сушу на ДРУГОМ материке
+  // (пустой остров) неподалёку и высаживает туда десант — чтобы пустые острова
+  // не простаивали. Свой материк осваивается по суше, его не трогаем.
+  private botColonize(p: Player) {
+    if (this.boats.filter((b) => b.player === p.id).length >= 2) return;
+    const my = this.playerCells(p.id);
+    if (!my.length) return;
+    const home = my[(Math.random() * my.length) | 0];
+    const hx = home % this.w, hy = (home / this.w) | 0;
+    const myLand = this.landId[home];
+    let best = -1, bestD = Infinity;
+    for (let tries = 0; tries < 60; tries++) {
+      const rx = hx + ((Math.random() * 220) | 0) - 110;
+      const ry = hy + ((Math.random() * 220) | 0) - 110;
+      if (rx < 0 || ry < 0 || rx >= this.w || ry >= this.h) continue;
+      const c = ry * this.w + rx;
+      if (!this.terrain[c] || this.owners[c] !== 0) continue; // нужна свободная суша
+      if (this.landId[c] === myLand) continue; // тот же материк — займём посуху
+      let coastal = false;
+      this.forNeighbors(c, (n) => { if (!this.terrain[n]) coastal = true; });
+      if (!coastal) continue;
+      const d = (rx - hx) ** 2 + (ry - hy) ** 2;
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    if (best >= 0) this.launchInvasion(p.id, best, 0.35);
+  }
+
   private botThink(p: Player) {
     // считаем соседей только по своим клеткам (не по всей карте), с выборкой
     const cells = this.playerCells(p.id);
@@ -2975,8 +3015,11 @@ export class Game {
     // Страны строят города (рост лимита войск) и штабы-щиты (оборона) — как игрок.
     // Ограничиваем число, чтобы не спамить, и гейтим деньгами.
     if (p.strong) {
+      // города строим активнее: лимит растёт с территорией (богатая страна —
+      // больше городов). Пока есть деньги на город — ставим.
       const myCities = this.buildings.filter((b) => b.owner === p.id && b.type === 'city').length;
-      if (myCities < 3 && p.money >= cityCost(this.cityLevels(p.id))) {
+      const cityCap = Math.min(12, 3 + Math.floor(p.cells / 350));
+      if (myCities < cityCap && p.money >= cityCost(this.cityLevels(p.id))) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
           if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
@@ -3028,9 +3071,22 @@ export class Game {
           }
         }
       }
-      // пуск ракеты по врагу: если есть заряженная шахта, деньги и цель рядом.
-      // редко (гейт), цель — вглубь врага, чтобы не накрыть себя. Если богат —
-      // иногда бьёт водородной (мощнее и дальнобойнее)
+      // улучшение своих построек: если есть свободные деньги — прокачивает
+      // город/завод/штаб/шахту/ПВО (upgrade сам спишет деньги только если хватает)
+      if (Math.random() < 0.5) {
+        const upg = this.buildings.filter(
+          (b) =>
+            b.owner === p.id &&
+            this.tickNo >= b.readyTick &&
+            b.upEnd === 0 &&
+            (b.type === 'city' || b.type === 'factory' || b.type === 'silo' || b.type === 'sam' ||
+              (b.type === 'hq' && b.level < MAX_HQ_LEVEL))
+        );
+        if (upg.length) this.upgrade(p.id, upg[(Math.random() * upg.length) | 0].cell);
+      }
+      // пуск ракеты по врагу: если есть заряженная шахта и деньги. Целимся в
+      // СТРАТЕГИЧЕСКИЕ объекты врага (шахта > ПВО > завод > штаб > город), а если
+      // таких нет — вглубь его территории. Богатая страна иногда бьёт водородной.
       if (
         enemyTo >= 0 &&
         Math.random() < 0.15 &&
@@ -3038,23 +3094,36 @@ export class Game {
         this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
       ) {
         const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.35 ? 'hydro' : 'basic';
-        const R = NUKES[kind].radius;
-        const fx = enemyFrom % this.w;
-        const fy = (enemyFrom / this.w) | 0;
-        const ex = enemyTo % this.w;
-        const ey = (enemyTo / this.w) | 0;
-        const dx = ex - fx;
-        const dy = ey - fy;
-        const len = Math.hypot(dx, dy) || 1;
-        // сдвигаем цель на ~радиус вглубь территории врага
-        const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
-        const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
-        this.launchNuke(p.id, ty * this.w + tx, kind);
+        const fx = enemyFrom % this.w, fy = (enemyFrom / this.w) | 0;
+        const prio: Record<string, number> = { silo: 5, sam: 4, factory: 3, hq: 2, city: 1 };
+        let targetCell = -1, bestScore = -Infinity;
+        for (const b of this.buildings) {
+          const pr = prio[b.type];
+          if (!pr || b.owner === p.id || b.owner <= 0) continue;
+          if (this.relation(p.id, b.owner) === 'allied') continue;
+          const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
+          const d2 = (bx - fx) ** 2 + (by - fy) ** 2;
+          if (d2 > 500 * 500) continue; // слишком далеко — не бьём через полмира
+          const score = pr * 1e7 - d2; // приоритет типа, при равенстве — ближе
+          if (score > bestScore) { bestScore = score; targetCell = b.cell; }
+        }
+        if (targetCell < 0) {
+          // стратегических целей нет — бьём вглубь территории врага (как раньше)
+          const R = NUKES[kind].radius;
+          const ex = enemyTo % this.w, ey = (enemyTo / this.w) | 0;
+          const dx = ex - fx, dy = ey - fy, len = Math.hypot(dx, dy) || 1;
+          const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
+          const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
+          targetCell = ty * this.w + tx;
+        }
+        this.launchNuke(p.id, targetCell, kind);
       }
       // Флот: строит боевые корабли, прикрывает берег/торговлю, перехватывает
       // вражеские десанты; изредка сам высаживает десант на чужой берег/остров.
       if (Math.random() < 0.35) this.botFleet(p);
       if (Math.random() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
+      // активно занимаем пустые острова, пока есть свободные войска
+      if (Math.random() < 0.2 && p.troops > p.maxTroops * 0.35) this.botColonize(p);
     }
 
     // Страны: агрессия зависит от сложности

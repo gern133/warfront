@@ -82,7 +82,13 @@ setInterval(() => {
     const game = room.game;
 
     if (room.phase === 'running') {
-      for (let i = 0; i < room.speed; i++) game.tick(); // ускорение: тик N раз
+      // накопитель поддерживает дробную скорость: 0.5 — тик раз в 2 интервала,
+      // 1/2/3/10 — целое число тиков за интервал
+      room.tickAccum += room.speed;
+      while (room.tickAccum >= 1) {
+        game.tick();
+        room.tickAccum -= 1;
+      }
     } else checkSpawnPhase(room);
 
     for (const ws of room.clients) {
@@ -153,7 +159,7 @@ setInterval(() => {
         for (const ws of room.clients) {
           const cst = clients.get(ws);
           if (cst?.playerId !== n.to) continue;
-          send(ws, { type: 'notice', kind: n.kind, name: n.name });
+          send(ws, { type: 'notice', kind: n.kind, name: n.name, x: n.x, y: n.y });
           break;
         }
       }
