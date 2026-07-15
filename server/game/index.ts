@@ -1075,8 +1075,17 @@ export class Game {
     for (const s of this.warships) {
       const p = this.players.get(s.owner);
       if (!p?.alive) { s.hp = 0; continue; }
+      // рядом ли СВОЙ порт (чинимся только в своём порту; цель могла быть
+      // захвачена, пока корабль плыл — тогда ремонт не начинаем / прерываем)
+      const nearOwnPort = () => {
+        const port = this.nearestOwnPort(s.owner, s.x, s.y);
+        if (port < 0) return false;
+        const px = port % w, py = (port / w) | 0;
+        return (px - s.x) ** 2 + (py - s.y) ** 2 <= 26 * 26;
+      };
       // стоим в порту на ремонте — плавно восполняем hp, потом обратно в зону
       if (s.healTicks > 0) {
+        if (!nearOwnPort()) { s.healTicks = 0; s.repairing = false; s.moving = false; continue; } // порт уже не наш — прекращаем
         s.hp = Math.min(WARSHIP_HP, s.hp + s.healRate);
         if (--s.healTicks <= 0) {
           s.hp = WARSHIP_HP;
@@ -1093,9 +1102,14 @@ export class Game {
         if (s.traveled >= s.totalLen) {
           s.moving = false;
           if (s.repairing) {
-            // дошли до порта — встаём на ремонт: 5с за каждое попадание
-            s.healTicks = Math.max(REPAIR_TICKS_PER_HIT, s.hits * REPAIR_TICKS_PER_HIT);
-            s.healRate = (WARSHIP_HP - s.hp) / s.healTicks;
+            // дошли до цели — встаём на ремонт ТОЛЬКО если это по-прежнему свой
+            // порт (его могли захватить, пока плыли); иначе просто патрулируем
+            if (nearOwnPort()) {
+              s.healTicks = Math.max(REPAIR_TICKS_PER_HIT, s.hits * REPAIR_TICKS_PER_HIT);
+              s.healRate = (WARSHIP_HP - s.hp) / s.healTicks;
+            } else {
+              s.repairing = false;
+            }
           }
         } else {
           const d = s.traveled;
