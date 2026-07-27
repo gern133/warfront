@@ -14,8 +14,9 @@ import {
   MAX_HQ_LEVEL,
   portUpgradeCost,
   shipsForLevel,
-  PORT_BUILD_COST,
+  portCost,
   cityCost,
+  cityUpgradeCost,
   cityTroopBonus,
   SILO_COST,
   NUKES,
@@ -339,17 +340,17 @@ export default function App() {
       const h = troopHistory.current;
       const rate = h.length > 30 ? Math.round((h[h.length - 1] - h[h.length - 31]) / 3) : 0;
       setGrowthView({ rate, points: h.slice() });
-    }, 1000);
+    }, 400);
     return () => clearInterval(iv);
   }, []);
 
-  // рейтинг: армию и золото обновляем раз в 5с (оптимизация + меньше мельтешит)
+  // рейтинг: армию и золото обновляем раз в 2с (оптимизация + меньше мельтешит)
   useEffect(() => {
     const iv = setInterval(() => {
       const m = new Map<number, { max: number; money: number }>();
       for (const p of playersRef.current) m.set(p.id, { max: p.maxTroops, money: p.money });
       statSnap.current = m;
-    }, 5000);
+    }, 2000);
     return () => clearInterval(iv);
   }, []);
 
@@ -505,11 +506,15 @@ export default function App() {
     0
   );
   const nukeReady = nukeAmmo > 0;
-  // суммарный уровень моих городов → цена следующей покупки города (в общем)
+  // суммарный уровень моих городов (для бейджа «общий уровень»)
   const myCityLevels = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'city')
     .reduce((s, b) => s + b.level, 0);
-  const nextCityCost = cityCost(myCityLevels);
+  // постройка нового города — по числу городов; грейд — прогрессивно по уровню
+  const nextCityCost = cityCost(myCities);
+  const cheapestCityUpg = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'city')
+    .reduce((min, b) => Math.min(min, cityUpgradeCost(b.level + 1)), Infinity);
   const nextHqCost = hqCost(myHqs);
   // превью выделенных на атаку — от ЖИВОГО числа войск (обновляется каждый тик),
   // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
@@ -519,9 +524,10 @@ export default function App() {
   const cheapestPortUpg = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'port')
     .reduce((min, b) => Math.min(min, portUpgradeCost(b.level + 1)), Infinity);
-  canBuildPortRef.current = shownMoney >= Math.min(PORT_BUILD_COST, cheapestPortUpg);
-  // город (клавиша 1): и постройка, и апгрейд стоят одинаково — по сумме уровней
-  canBuildCityRef.current = shownMoney >= nextCityCost;
+  const nextPortCost = portCost(myPorts); // цена нового порта растёт с их числом
+  canBuildPortRef.current = shownMoney >= Math.min(nextPortCost, cheapestPortUpg);
+  // город (клавиша 1): можно, если хватает на новый ИЛИ на апгрейд своего
+  canBuildCityRef.current = shownMoney >= Math.min(nextCityCost, cheapestCityUpg);
   // завод (клавиша 2): постройка/апгрейд по сумме уровней
   canBuildFactoryRef.current = shownMoney >= nextFactoryCost;
   // шахта (клавиша 5): постройка и апгрейд по 1млн
@@ -857,8 +863,9 @@ export default function App() {
                 type="range"
                 min={5}
                 max={100}
-                value={ratio}
-                onChange={(e) => setRatio(+e.target.value)}
+                step={5}
+                defaultValue={ratio}
+                onInput={(e) => setRatio(+(e.target as HTMLInputElement).value)}
               />
             </label>
 
@@ -872,7 +879,7 @@ export default function App() {
                   : t.fleet
                     ? nextWarshipCost
                     : t.bt === 'port'
-                      ? PORT_BUILD_COST
+                      ? nextPortCost
                       : t.bt === 'city'
                         ? nextCityCost
                         : t.bt === 'factory'
@@ -882,6 +889,8 @@ export default function App() {
                             : t.bt === 'sam'
                               ? nextSamCost
                               : nextHqCost;
+                // для города/завода/ПВО показываем СУММАРНЫЙ уровень (общий уровень —
+                // от него зависят цена и эффект), для остального — количество
                 const count = nk
                   ? nukeAmmo
                   : t.fleet
@@ -889,13 +898,13 @@ export default function App() {
                     : t.bt === 'port'
                       ? myPorts
                       : t.bt === 'city'
-                        ? myCities
+                        ? myCityLevels
                         : t.bt === 'factory'
-                          ? myFactories
+                          ? myFactoryLevels
                           : t.bt === 'silo'
                             ? mySilos
                             : t.bt === 'sam'
-                              ? mySams
+                              ? mySamLevels
                               : t.bt === 'hq'
                                 ? myHqs
                                 : 0;
@@ -1262,7 +1271,7 @@ export default function App() {
               }
               if (b?.type === 'city') {
                 const toLevel = lvl + 1;
-                const cost = nextCityCost;
+                const cost = cityUpgradeCost(toLevel); // грейд — прогрессивно по уровню
                 return (
                   <>
                     <div className="ctx-title">🏙️ Город · ур. {lvl}</div>

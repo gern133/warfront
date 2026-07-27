@@ -20,6 +20,7 @@ import {
   WarshipPub,
   TradeEarn,
   PORT_BUILD_COST,
+  portCost,
   PORT_BUILD_TICKS,
   PORT_SHIP_INTERVAL,
   PORT_RADIUS,
@@ -28,6 +29,7 @@ import {
   shipsForLevel,
   CITY_BUILD_TICKS,
   cityCost,
+  cityUpgradeCost,
   cityTroopBonus,
   FACTORY_BUILD_TICKS,
   FACTORY_RANGE,
@@ -1749,8 +1751,10 @@ export class Game {
       // порт нельзя ставить впритык к любому другому строению
       if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
-      if (p.money < PORT_BUILD_COST) return 'Недостаточно денег';
-      p.money -= PORT_BUILD_COST;
+      const ports = this.buildings.filter((b) => b.owner === playerId && b.type === 'port').length;
+      const cost = portCost(ports); // цена растёт с числом уже построенных портов
+      if (p.money < cost) return 'Недостаточно денег';
+      p.money -= cost;
       this.buildings.push({
         id: this.nextBuildingId++,
         owner: playerId,
@@ -1777,7 +1781,8 @@ export class Game {
       // города нельзя ставить впритык к любому другому строению
       if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
-      const cost = cityCost(this.cityLevels(playerId));
+      const cityN = this.buildings.filter((b) => b.owner === playerId && b.type === 'city').length;
+      const cost = cityCost(cityN); // постройка нового — по числу городов
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       this.buildings.push({
@@ -1928,7 +1933,7 @@ export class Game {
       return null;
     }
     if (b.type === 'city') {
-      const cost = cityCost(this.cityLevels(playerId)); // по текущей сумме уровней
+      const cost = cityUpgradeCost(b.level + 1); // грейд — прогрессивно по уровню города
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       b.level++; // город апгрейдится мгновенно, уровней сколько угодно
@@ -3049,7 +3054,7 @@ export class Game {
       // больше городов). Пока есть деньги на город — ставим.
       const myCities = this.buildings.filter((b) => b.owner === p.id && b.type === 'city').length;
       const cityCap = Math.min(12, 3 + Math.floor(p.cells / 350));
-      if (myCities < cityCap && p.money >= cityCost(this.cityLevels(p.id))) {
+      if (myCities < cityCap && p.money >= cityCost(myCities)) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
           if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
