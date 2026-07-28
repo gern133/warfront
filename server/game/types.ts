@@ -142,6 +142,22 @@ export interface Bullet {
   x: number;
   y: number;
   targetId: number; // id цели
-  targetKind: 'war' | 'trade' | 'boat'; // тип цели
+  targetKind: 'war' | 'trade' | 'boat' | 'drone'; // тип цели
   dmg: number;
+}
+
+// Дрон роя «Мопед»: летит над территорией цели, хаотично блуждая и бомбя её
+export interface Drone {
+  id: number;
+  owner: number;
+  target: number; // id страны-цели
+  x: number;
+  y: number;
+  wx: number; // текущая точка блуждания
+  wy: number;
+  a: number; // курс (радианы)
+  fireAt: number; // тик следующего сброса бомбы
+  bombs: number; // осталось бомб; кончились — дрон падает и взрывается
+  doomed: boolean; // по дрону уже летит ракета ПВО (чтобы не стрелять повторно)
+  done: boolean;
 }

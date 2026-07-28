@@ -16,7 +16,7 @@ export const MAP_LABELS: Record<MapType, { name: string; desc: string }> = {
 
 // панель зданий/вооружений (1–0). bt — тип постройки, nuke — тип запускаемой
 // ракеты, svg — ключ SVG-иконки (см. engine/icons); icon — эмодзи-запасной вариант
-export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name: string; nuke?: string; fleet?: boolean }[] = [
+export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name: string; nuke?: string; fleet?: boolean; drone?: boolean }[] = [
   { icon: '🏙️', svg: 'city', bt: 'city', name: 'Город' },
   { icon: '🏭', svg: 'factory', bt: 'factory', name: 'Завод' },
   { icon: '⚓', svg: 'port', bt: 'port', name: 'Торговый порт' },
@@ -26,5 +26,5 @@ export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name:
   { icon: '🚢', svg: 'warship', bt: null, name: 'Боевой флот', fleet: true },
   { icon: '☢️', svg: 'nuke', bt: null, name: 'Ядерка', nuke: 'basic' },
   { icon: '💥', svg: 'hydro', bt: null, name: 'Водородная бомба', nuke: 'hydro' },
-  { icon: '💣', bt: null, name: 'Бомба' },
+  { icon: '🛩️', bt: null, name: 'Рой дронов «Мопед»', drone: true },
 ];

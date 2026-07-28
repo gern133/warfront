@@ -9,6 +9,7 @@ import {
   TradeShipPub,
   TruckPub,
   WarshipPub,
+  DronePub,
 } from './dto';
 
 export type ClientMsg =
@@ -29,6 +30,7 @@ export type ClientMsg =
   | { type: 'upgrade'; cell: number } // прокачать здание
   | { type: 'nuke'; cell: number; kind?: string } // пуск ракеты в точку (с ближайшей шахты)
   | { type: 'warship'; cell: number } // выпустить боевой корабль из ближайшего порта в зону
+  | { type: 'drones'; cell: number } // запустить рой дронов «Мопед» по стране-владельцу клетки
   | { type: 'warshipMove'; ids: number[]; cell: number } // приказ выделенным кораблям идти в точку
   | { type: 'setSpeed'; speed: number } // скорость игры (0 пауза,1,2,3,10)
   | { type: 'propose'; cell: number } // предложить союз владельцу клетки
@@ -68,6 +70,8 @@ export type ServerMsg =
       trucks: TruckPub[]; // грузовики заводов на дорогах
       roads?: number[][]; // дороги (ломаные [x,y,...]) — шлём реже (меняются редко)
       warships: WarshipPub[]; // боевые корабли
+      drones: DronePub[]; // дроны роя «Мопед» в полёте
+      droneBlasts: number[]; // взрывы дронов за тик: [x,y,...] (для вспышек)
       shots: number[]; // выстрелы кораблей за тик: [sx,sy,tx,ty,hit,...] (для трассеров)
       missiles: MissilePub[]; // ракеты в полёте
       earnings: TradeEarn[]; // заработок портов за интервал (для всплывашек)

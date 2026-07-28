@@ -46,9 +46,11 @@ import {
   SAM_RELOAD_TICKS,
   SAM_RANGE,
   samCost,
+  DRONE_COST,
+  DRONE_COUNT,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
-import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck } from './types';
+import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
 import {
   TRADE_SPEED,
   BOAT_SPEED,
@@ -63,6 +65,11 @@ import {
   WARSHIP_DAMAGE,
   WARSHIP_PATROL_R,
   WARSHIP_PATROL_SPD,
+  DRONE_SPEED,
+  DRONE_FIRE_COOLDOWN,
+  DRONE_DAMAGE_FRAC,
+  DRONE_BOMBS,
+  DRONE_CLEAR_R,
   BULLET_SPEED,
   WARSHIP_REPAIR_AT,
   REPAIR_TICKS_PER_HIT,
@@ -111,6 +118,9 @@ export class Game {
   private nextShipId = 1;
   warships: Warship[] = []; // боевые корабли
   private nextWarshipId = 1;
+  drones: Drone[] = []; // дроны роя «Мопед» в полёте
+  private nextDroneId = 1;
+  droneBlasts: number[] = []; // взрывы дронов за тик [x,y,...] (для вспышек; чистится в index)
   trucks: Truck[] = []; // грузовики заводов на дорогах
   private nextTruckId = 1;
   // дорожная сеть по владельцам (кэш): узлы — заводы/города/порты, рёбра — пути по
@@ -192,6 +202,8 @@ export class Game {
     this.buildings = [];
     this.tradeShips = [];
     this.warships = [];
+    this.drones = [];
+    this.droneBlasts = [];
     this.trucks = [];
     this.roadNet.clear();
     this.roadEdges.clear();
@@ -713,6 +725,7 @@ export class Game {
     this.buildings = this.buildings.filter((b) => b.owner !== id);
     this.tradeShips = this.tradeShips.filter((s) => s.owner !== id);
     this.warships = this.warships.filter((s) => s.owner !== id);
+    this.drones = this.drones.filter((d) => d.owner !== id && d.target !== id);
     this.trucks = this.trucks.filter((t) => t.owner !== id);
     this.bullets = this.bullets.filter((b) => b.owner !== id);
     this.clearRelations(id);
@@ -1201,6 +1214,7 @@ export class Game {
   private stepBullets() {
     if (!this.bullets.length) return;
     let boatKilled = false;
+    let droneKilled = false;
     for (const b of this.bullets) {
       // цель по типу; если её уже нет (потоплена / десант успел высадиться) — пуля мажет
       const tgt =
@@ -1208,7 +1222,9 @@ export class Game {
           ? this.warships.find((s) => s.id === b.targetId && s.healTicks <= 0) // на починке — неуязвим
           : b.targetKind === 'boat'
             ? this.boats.find((s) => s.id === b.targetId && s.troops >= 1)
-            : this.tradeShips.find((s) => s.id === b.targetId && !s.done);
+            : b.targetKind === 'drone'
+              ? this.drones.find((s) => s.id === b.targetId && !s.done)
+              : this.tradeShips.find((s) => s.id === b.targetId && !s.done);
       if (!tgt) { b.dmg = 0; continue; } // цель исчезла — пуля гаснет (промах)
       const dx = tgt.x - b.x, dy = tgt.y - b.y;
       const dist = Math.hypot(dx, dy) || 1;
@@ -1232,6 +1248,11 @@ export class Game {
         } else if (b.targetKind === 'boat') {
           (tgt as Boat).troops = 0; // десант потоплен
           boatKilled = true;
+        } else if (b.targetKind === 'drone') {
+          const dr = tgt as Drone;
+          dr.done = true; // ракета ПВО догнала дрон — сбит
+          droneKilled = true;
+          this.droneBlasts.push(+dr.x.toFixed(1), +dr.y.toFixed(1)); // вспышка сбития
         } else {
           const ts = tgt as TradeShip;
           ts.done = true;
@@ -1246,6 +1267,7 @@ export class Game {
     this.bullets = this.bullets.filter((b) => b.dmg > 0);
     this.tradeShips = this.tradeShips.filter((s) => !s.done);
     if (boatKilled) this.boats = this.boats.filter((b) => b.troops >= 1);
+    if (droneKilled) this.drones = this.drones.filter((d) => !d.done);
   }
 
   bulletsPub(): number[] {
@@ -2409,6 +2431,148 @@ export class Game {
     return null;
   }
 
+  // Запуск роя дронов «Мопед» по стране-владельцу клетки: вылетают со ВСЕХ
+  // достроенных ракетных шахт (распределяются поровну), стоят DRONE_COST.
+  launchDrones(playerId: number, cell: number): string | null {
+    const p = this.players.get(playerId);
+    if (!p?.alive || !p.spawned) return 'Нельзя';
+    if (cell < 0 || cell >= this.cells) return 'Неверная цель';
+    const target = this.owners[cell];
+    if (target <= 0 || target === playerId) return 'Неверная цель';
+    if (this.relation(playerId, target) === 'allied') return 'Союзник';
+    const silos = this.buildings.filter(
+      (b) => b.type === 'silo' && b.owner === playerId && this.tickNo >= b.readyTick
+    );
+    if (!silos.length) return 'Нужна ракетная шахта';
+    if (p.money < DRONE_COST) return 'Недостаточно денег';
+    p.money -= DRONE_COST;
+    const tcells = this.playerCells(target);
+    for (let i = 0; i < DRONE_COUNT; i++) {
+      const silo = silos[i % silos.length];
+      const sx = (silo.cell % this.w) + 0.5, sy = ((silo.cell / this.w) | 0) + 0.5;
+      const wc = tcells.length ? tcells[(Math.random() * tcells.length) | 0] : cell;
+      this.drones.push({
+        id: this.nextDroneId++,
+        owner: playerId,
+        target,
+        x: sx,
+        y: sy,
+        wx: (wc % this.w) + 0.5,
+        wy: ((wc / this.w) | 0) + 0.5,
+        a: 0,
+        fireAt: this.tickNo + ((Math.random() * DRONE_FIRE_COOLDOWN) | 0),
+        bombs: DRONE_BOMBS,
+        doomed: false,
+        done: false,
+      });
+    }
+    return null;
+  }
+
+  // Полёт дронов: хаотичное блуждание над территорией цели, сброс бомб (−5%
+  // текущей армии за взрыв) и сбитие вражеским ПВО (расходует заряд ПВО).
+  private stepDrones() {
+    if (!this.drones.length) return;
+    const w = this.w;
+    const samR2 = SAM_RANGE * SAM_RANGE;
+    let dead = false;
+    // Новая точка полёта: случайная ещё ЗАНЯТАЯ клетка цели, ПОДАЛЬШЕ от текущей
+    // позиции (≥ SPREAD) — чтобы дроны разлетались, а не кучковались в одном месте.
+    const SPREAD = DRONE_CLEAR_R * 2.5; // минимальный разлёт между точками сброса
+    const pickSpreadCell = (target: number, fx: number, fy: number): number => {
+      const tc = this.playerCells(target);
+      if (!tc.length) return -1;
+      let fallback = -1;
+      for (let k = 0; k < 16; k++) {
+        const c = tc[(Math.random() * tc.length) | 0];
+        if (this.owners[c] !== target) continue;
+        fallback = c;
+        const cx = c % w, cy = (c / w) | 0;
+        if ((cx - fx) ** 2 + (cy - fy) ** 2 >= SPREAD * SPREAD) return c; // достаточно далеко
+      }
+      return fallback; // не нашли дальней — берём хоть какую-то занятую
+    };
+    for (const d of this.drones) {
+      if (d.done) { dead = true; continue; } // сбит ракетой ПВО (в stepBullets)
+      const tp = this.players.get(d.target);
+      if (!tp?.alive || tp.cells <= 0) { d.done = true; dead = true; continue; }
+      // Каждый дрон летит к СВОЕЙ точке (разбросаны по территории) и сбрасывает
+      // бомбу ПРИ ПРИЛЁТЕ, после чего берёт новую дальнюю точку → рой разлетается,
+      // а не бьёт кучей в одно место.
+      const dx = d.wx - d.x, dy = d.wy - d.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= 2) {
+        d.a = Math.atan2(dy, dx);
+        d.x += (dx / dist) * DRONE_SPEED;
+        d.y += (dy / dist) * DRONE_SPEED;
+      } else {
+        // прилетел к своей точке. Если она ещё вражеская — КРУЖИМ над ней и ждём
+        // перезарядку, потом сбрасываем бомбу (дрон точно атакует каждые 5с, а не
+        // улетает без сброса). Если точка уже выжжена — летим к новой занятой.
+        const destCell = (Math.floor(d.wy) | 0) * w + (Math.floor(d.wx) | 0);
+        const destOwned = destCell >= 0 && destCell < this.cells && this.owners[destCell] === d.target;
+        if (!destOwned) {
+          const nc = pickSpreadCell(d.target, d.x, d.y);
+          if (nc < 0) { d.done = true; dead = true; this.droneBlasts.push(+d.x.toFixed(1), +d.y.toFixed(1)); continue; }
+          d.wx = (nc % w) + 0.5;
+          d.wy = ((nc / w) | 0) + 0.5;
+        } else if (this.tickNo >= d.fireAt) {
+          // сброс: зачистка территории в радиусе + −5% армии
+          d.fireAt = this.tickNo + DRONE_FIRE_COOLDOWN;
+          tp.troops = Math.max(0, tp.troops * (1 - DRONE_DAMAGE_FRAC));
+          const bcx = d.x | 0, bcy = d.y | 0, R = DRONE_CLEAR_R, R2 = R * R;
+          for (let ey = -R; ey <= R; ey++) {
+            const y = bcy + ey;
+            if (y < 0 || y >= this.h) continue;
+            for (let ex = -R; ex <= R; ex++) {
+              if (ex * ex + ey * ey > R2) continue;
+              const x = bcx + ex;
+              if (x < 0 || x >= this.w) continue;
+              const n = y * this.w + x;
+              if (this.terrain[n] && this.owners[n] === d.target) this.setOwner(n, 0);
+            }
+          }
+          this.droneBlasts.push(+d.x.toFixed(1), +d.y.toFixed(1));
+          if (--d.bombs <= 0) { d.done = true; dead = true; continue; } // бомбы кончились — падает
+        } else {
+          // ждём перезарядку — медленно кружим над целью (чтобы не зависать точкой)
+          d.a += 0.25;
+          d.x += Math.cos(d.a) * 0.35;
+          d.y += Math.sin(d.a) * 0.35;
+        }
+      }
+      // ПВО цели пускает по дрону самонаводящуюся ракету (тратит заряд). Дрон не
+      // гибнет мгновенно — ракета летит и догоняет его (см. stepBullets).
+      if (!d.doomed) {
+        for (const b of this.buildings) {
+          if (b.type !== 'sam' || b.owner === d.owner || this.tickNo < b.readyTick) continue;
+          if (b.reloads.length >= b.level) continue; // нет свободных зарядов
+          const sx = (b.cell % w) + 0.5, sy = ((b.cell / w) | 0) + 0.5;
+          if ((sx - d.x) ** 2 + (sy - d.y) ** 2 <= samR2) {
+            b.reloads.push(this.tickNo + SAM_RELOAD_TICKS);
+            d.doomed = true;
+            this.bullets.push({
+              id: this.nextBulletId++,
+              owner: b.owner,
+              fromId: -1, // источник — ПВО, не корабль
+              x: sx,
+              y: sy,
+              targetId: d.id,
+              targetKind: 'drone',
+              dmg: 1,
+            });
+            break;
+          }
+        }
+      }
+    }
+    if (dead) this.drones = this.drones.filter((d) => !d.done);
+  }
+
+  dronesPub(): { x: number; y: number; a: number; owner: number }[] {
+    return this.drones.map((d) => ({ x: +d.x.toFixed(1), y: +d.y.toFixed(1), a: +d.a.toFixed(2), owner: d.owner }));
+  }
+
   private stepMissiles() {
     if (!this.missiles.length) return;
     // сперва пробуем перехватить все ещё-не-сбитые ядерки (ПВО могло только что
@@ -2741,6 +2905,7 @@ export class Game {
     this.stepTrucks();
     this.reloadSilos();
     this.stepMissiles();
+    this.stepDrones();
     for (const a of this.attacks) this.stepAttack(a);
     this.attacks = this.attacks.filter(
       (a) => a.troops >= 1 && this.players.get(a.player)?.alive
@@ -3113,9 +3278,9 @@ export class Game {
           }
         }
       }
-      // ПВО (дорогое — одно на страну, если совсем разбогатела)
+      // ПВО: до 2 на страну (прикрытие от ракет и роёв дронов)
       const mySams = this.buildings.filter((b) => b.owner === p.id && b.type === 'sam').length;
-      if (mySams < 1 && p.money >= samCost(0)) {
+      if (mySams < 2 && p.money >= samCost(this.samLevels(p.id))) {
         for (let i = 0; i < cells.length; i += step) {
           const c = cells[i];
           if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
@@ -3123,6 +3288,15 @@ export class Game {
             break;
           }
         }
+      }
+      // АКТИВНО качаем ПВО (уровень = число одновременных перехватов — критично
+      // против ракет и роёв дронов): тянем самый слабый свой ПВО вверх до 8 ур.
+      const samB = this.buildings.filter(
+        (b) => b.owner === p.id && b.type === 'sam' && this.tickNo >= b.readyTick && b.upEnd === 0
+      );
+      if (samB.length && Math.random() < 0.6) {
+        const lowest = samB.reduce((lo, b) => (b.level < lo.level ? b : lo), samB[0]);
+        if (lowest.level < 8 && p.money >= samCost(this.samLevels(p.id))) this.upgrade(p.id, lowest.cell);
       }
       // улучшение своих построек: если есть свободные деньги — прокачивает
       // город/завод/штаб/шахту/ПВО (upgrade сам спишет деньги только если хватает)
@@ -3170,6 +3344,16 @@ export class Game {
           targetCell = ty * this.w + tx;
         }
         this.launchNuke(p.id, targetCell, kind);
+      }
+      // рой дронов «Мопед»: дорого (10млн), поэтому редко — когда богата, есть
+      // шахта и граничащий враг. Мощный переломный удар по соседу.
+      if (
+        enemyTo >= 0 &&
+        Math.random() < 0.04 &&
+        p.money >= DRONE_COST &&
+        this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick)
+      ) {
+        this.launchDrones(p.id, enemyTo);
       }
       // Флот: строит боевые корабли, прикрывает берег/торговлю, перехватывает
       // вражеские десанты; изредка сам высаживает десант на чужой берег/остров.

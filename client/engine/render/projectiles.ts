@@ -1,6 +1,67 @@
-import { NUKES } from '../../../shared/protocol';
+import { NUKES, DRONE_BLAST_R } from '../../../shared/protocol';
 import { playerColorCSS } from '../../../shared/color';
 import type { GameClient } from '../GameClient';
+
+// Рой дронов «Мопед»: пиксельный самолётик (нос + крылья + хвост), повёрнутый по
+// курсу, плюс вспышки взрывов бомб (кольцо радиуса DRONE_BLAST_R).
+export function drawDrones(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const z = gc.zoom, px = gc.panX, py = gc.panY;
+  const now = performance.now();
+  // вспышки взрывов (живут ~450мс, расходятся кольцом)
+  gc.droneFlashes = gc.droneFlashes.filter((f) => now - f.t0 < 450);
+  for (const f of gc.droneFlashes) {
+    const p = (now - f.t0) / 450;
+    const cx = px + f.x * z, cy = py + f.y * z;
+    ctx.beginPath();
+    ctx.arc(cx, cy, DRONE_BLAST_R * z * (0.3 + p * 0.7), 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,${(120 + p * 100) | 0},40,${(1 - p) * 0.85})`;
+    ctx.lineWidth = Math.max(1.5, z * 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, DRONE_BLAST_R * z * 0.25 * (1 - p), 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,200,90,${(1 - p) * 0.7})`;
+    ctx.fill();
+  }
+  if (!gc.drones.length) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const s = Math.max(4, Math.min(11, z * 1.6)); // размер модельки
+  for (const d of gc.drones) {
+    const cx = px + d.x * z, cy = py + d.y * z;
+    if (cx < -20 || cy < -20 || cx > vw + 20 || cy > vh + 20) continue;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(d.a); // нос по курсу (модель смотрит в +X)
+    ctx.fillStyle = playerColorCSS(d.owner);
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 1;
+    // фюзеляж (нос вперёд) + крылья + хвостовое оперение — как маленький самолёт
+    ctx.beginPath();
+    ctx.moveTo(s, 0); // нос
+    ctx.lineTo(-s * 0.4, s * 0.28);
+    ctx.lineTo(-s * 0.4, -s * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath(); // крылья (поперёк)
+    ctx.moveTo(-s * 0.05, s * 0.85);
+    ctx.lineTo(-s * 0.05, -s * 0.85);
+    ctx.lineTo(-s * 0.3, -s * 0.7);
+    ctx.lineTo(-s * 0.3, s * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath(); // хвост
+    ctx.moveTo(-s * 0.55, s * 0.35);
+    ctx.lineTo(-s * 0.55, -s * 0.35);
+    ctx.lineTo(-s * 0.8, -s * 0.3);
+    ctx.lineTo(-s * 0.8, s * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
 
 // Трейд-корабли: кружки без следа (для производительности)
 export function drawShips(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {

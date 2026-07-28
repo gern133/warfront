@@ -18,6 +18,14 @@ export const WARSHIP_COOLDOWN = 8; // тиков между выстрелами
 export const WARSHIP_DAMAGE = 25; // урон по кораблю: 4 попадания топят (трейдер — с одного)
 export const WARSHIP_PATROL_R = 11; // радиус орбиты патруля (клетки)
 export const WARSHIP_PATROL_SPD = 0.06; // угловая скорость патруля (рад/тик)
+
+// Рой дронов «Мопед»
+export const DRONE_SPEED = TRADE_SPEED; // летят медленно — как трейдерские суда (0.6)
+export const DRONE_FIRE_COOLDOWN = 50; // тиков между сбросами бомб (5с)
+export const DRONE_DAMAGE_FRAC = 0.05; // −5% текущей армии цели за взрыв
+export const DRONE_BOMBS = 5; // бомб на дрон; кончились — падает и взрывается
+// радиус ЗАЧИСТКИ территории = радиусу взрыва (12, половина ядерной)
+export const DRONE_CLEAR_R = 12;
 export const BULLET_SPEED = 1.75; // скорость пули (клеток/тик)
 export const WARSHIP_REPAIR_AT = 0.5; // при hp ≤ этой доли уходит в порт чиниться
 export const REPAIR_TICKS_PER_HIT = 50; // 5с (при 10 тик/с) починки за каждое попадание

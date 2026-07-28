@@ -19,6 +19,7 @@ import {
   cityUpgradeCost,
   cityTroopBonus,
   SILO_COST,
+  DRONE_COST,
   NUKES,
   samCost,
   factoryCost,
@@ -53,6 +54,7 @@ export default function App() {
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
   const [nukeKind, setNukeKind] = useState<string | null>(null); // выбранная ракета для наведения
   const [fleetMode, setFleetMode] = useState(false); // выбран инструмент «Боевой флот»
+  const [droneMode, setDroneMode] = useState(false); // выбран инструмент «Рой дронов»
   const [shownMoney, setShownMoney] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [humans, setHumans] = useState(1);
@@ -98,6 +100,9 @@ export default function App() {
   nukeKindRef.current = nukeKind;
   const fleetModeRef = useRef(false);
   fleetModeRef.current = fleetMode;
+  const droneModeRef = useRef(false);
+  droneModeRef.current = droneMode;
+  const canDroneRef = useRef(false); // хватает ли денег и есть ли шахта на рой
   const canFleetRef = useRef(false); // хватает ли денег на боевой корабль
   const canBuildHqRef = useRef(false);
   const canBuildPortRef = useRef(false);
@@ -126,6 +131,7 @@ export default function App() {
   gc.buildMode = buildMode; // синхронизируем режим постройки с движком
   gc.nukeKind = nukeKind; // и режим наведения ракеты (тип или null)
   gc.fleetMode = fleetMode; // и режим выпуска боевого корабля
+  gc.droneMode = droneMode; // и режим наведения роя дронов
   // карту рисуем только в игре — в меню/лобби канвас не перерисовываем (экономим кадры)
   gc.active = phase === 'spawn' || phase === 'playing' || phase === 'dead';
 
@@ -149,6 +155,12 @@ export default function App() {
         if (fleetModeRef.current) {
           sendMsg({ type: 'warship', cell });
           setFleetMode(false);
+          return;
+        }
+        // режим роя дронов — клик по стране = запустить рой по её владельцу
+        if (droneModeRef.current) {
+          sendMsg({ type: 'drones', cell });
+          setDroneMode(false);
           return;
         }
         // клик по своему зданию — меню прокачки, иначе атака
@@ -246,6 +258,8 @@ export default function App() {
         gc.setTrucks(msg.trucks ?? []);
         if (msg.roads) gc.setRoads(msg.roads);
         gc.setWarships(msg.warships ?? []);
+        gc.setDrones(msg.drones ?? []);
+        gc.addDroneBlasts(msg.droneBlasts ?? []);
         gc.setShots(msg.shots ?? []);
         gc.setMissiles(msg.missiles ?? []);
         gc.addEarnings(msg.earnings ?? []);
@@ -394,6 +408,10 @@ export default function App() {
           setFleetMode(false);
           return;
         }
+        if (droneModeRef.current) {
+          setDroneMode(false);
+          return;
+        }
         if (gc.selectedWarships.size) {
           gc.selectedWarships.clear(); // снять выделение флота
           return;
@@ -424,7 +442,18 @@ export default function App() {
           if (canFleetRef.current) {
             setBuildMode(null);
             setNukeKind(null);
+            setDroneMode(false);
             setFleetMode((f) => !f);
+          }
+          return;
+        }
+        if (TOOLS[idx]?.drone) {
+          // 🛩️ — режим наведения роя дронов
+          if (canDroneRef.current) {
+            setBuildMode(null);
+            setNukeKind(null);
+            setFleetMode(false);
+            setDroneMode((d) => !d);
           }
           return;
         }
@@ -544,6 +573,8 @@ export default function App() {
   const nextWarshipCost =
     myWarshipCount === 0 ? 250_000 : myWarshipCount === 1 ? 500_000 : 1_000_000;
   canFleetRef.current = shownMoney >= nextWarshipCost && myPorts > 0;
+  // рой дронов (0): нужна ракетная шахта и 10млн
+  canDroneRef.current = shownMoney >= DRONE_COST && mySilos > 0;
 
   return (
     <div className="app">
@@ -873,10 +904,12 @@ export default function App() {
               {TOOLS.map((t, i) => {
                 const nk = t.nuke; // тип ракеты (☢️/💥) — действие пуска
                 const active =
-                  !!nk || !!t.fleet || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'factory' || t.bt === 'silo' || t.bt === 'sam';
+                  !!nk || !!t.fleet || !!t.drone || t.bt === 'hq' || t.bt === 'port' || t.bt === 'city' || t.bt === 'factory' || t.bt === 'silo' || t.bt === 'sam';
                 const cost = nk
                   ? NUKES[nk].cost
-                  : t.fleet
+                  : t.drone
+                    ? DRONE_COST
+                    : t.fleet
                     ? nextWarshipCost
                     : t.bt === 'port'
                       ? nextPortCost
@@ -893,7 +926,9 @@ export default function App() {
                 // от него зависят цена и эффект), для остального — количество
                 const count = nk
                   ? nukeAmmo
-                  : t.fleet
+                  : t.drone
+                    ? mySilos
+                    : t.fleet
                     ? myWarshipCount
                     : t.bt === 'port'
                       ? myPorts
@@ -910,7 +945,9 @@ export default function App() {
                                 : 0;
                 const afford = nk
                   ? nukeAffordRef.current[nk]
-                  : t.fleet
+                  : t.drone
+                    ? canDroneRef.current
+                    : t.fleet
                     ? canFleetRef.current
                     : t.bt === 'port'
                       ? canBuildPortRef.current
@@ -924,7 +961,7 @@ export default function App() {
                               ? canBuildSamRef.current
                               : shownMoney >= cost;
                 const usable = active && afford;
-                const selected = nk ? nukeKind === nk : t.fleet ? fleetMode : buildMode === t.bt && active;
+                const selected = nk ? nukeKind === nk : t.drone ? droneMode : t.fleet ? fleetMode : buildMode === t.bt && active;
                 return (
                   <button
                     key={i}
@@ -942,14 +979,22 @@ export default function App() {
                       if (nk) {
                         setBuildMode(null);
                         setFleetMode(false);
+                        setDroneMode(false);
                         setNukeKind((k) => (k === nk ? null : nk));
+                      } else if (t.drone) {
+                        setBuildMode(null);
+                        setNukeKind(null);
+                        setFleetMode(false);
+                        setDroneMode((d) => !d);
                       } else if (t.fleet) {
                         setBuildMode(null);
                         setNukeKind(null);
+                        setDroneMode(false);
                         setFleetMode((f) => !f);
                       } else if (t.bt) {
                         setNukeKind(null);
                         setFleetMode(false);
+                        setDroneMode(false);
                         setBuildMode(selected ? null : t.bt);
                       }
                     }}

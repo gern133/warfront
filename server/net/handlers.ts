@@ -161,6 +161,13 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       if (err) send(ws, { type: 'error', message: err });
       break;
     }
+    case 'drones': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      const err = room.game.launchDrones(st.playerId, msg.cell | 0);
+      if (err) send(ws, { type: 'error', message: err });
+      break;
+    }
     case 'warshipMove': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;

@@ -7,6 +7,7 @@ import {
   TradeShipPub,
   TruckPub,
   WarshipPub,
+  DronePub,
   TradeEarn,
   MissilePub,
   NUKES,
@@ -29,7 +30,7 @@ import {
   TERRAIN,
 } from './constants';
 import { fmtTroops, fmtMoney } from '../lib/format';
-import { drawShips, drawMissiles, drawFleet } from './render/projectiles';
+import { drawShips, drawMissiles, drawFleet, drawDrones } from './render/projectiles';
 import { IconSet, ICON_URLS } from './icons';
 
 export class GameClient {
@@ -53,6 +54,9 @@ export class GameClient {
   nukeKind: string | null = null; // выбранный тип ракеты для наведения (null = нет)
   active = false; // рисуем карту только в игре (в меню/лобби — не жжём кадры впустую)
   fleetMode = false; // выбран инструмент «Флот» — клик выпускает боевой корабль
+  droneMode = false; // выбран инструмент «Рой дронов» — клик наводит рой на страну
+  drones: DronePub[] = []; // дроны роя «Мопед» в полёте (читает engine/render)
+  droneFlashes: { x: number; y: number; t0: number }[] = []; // вспышки взрывов дронов
   warships: WarshipPub[] = []; // боевые корабли (читает engine/render)
   selectedWarships = new Set<number>(); // выделенные свои корабли (RTS-выделение)
   bullets: number[] = []; // пули кораблей в полёте: [x0,y0,x1,y1,...] (клетки)
@@ -400,6 +404,20 @@ export class GameClient {
       }
     }
     this.missiles = next;
+  }
+
+  setDrones(drones: DronePub[]) {
+    this.drones = drones ?? [];
+  }
+
+  // вспышки взрывов дронов за тик: [x,y,...] в клетках
+  addDroneBlasts(flat: number[]) {
+    if (!flat?.length) return;
+    const now = performance.now();
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      this.droneFlashes.push({ x: flat[i], y: flat[i + 1], t0: now });
+    }
+    if (this.droneFlashes.length > 200) this.droneFlashes.splice(0, this.droneFlashes.length - 200);
   }
 
   // заработок портов — показываем только свои (КПД игрока)
@@ -1705,6 +1723,7 @@ export class GameClient {
         this.drawRoads(ctx, dpr);
         this.drawBuildings(ctx, dpr);
         drawFleet(this, ctx, dpr);
+        drawDrones(this, ctx, dpr);
         drawMissiles(this, ctx, dpr);
         this.drawMinimap(mapChanged);
       }
@@ -1797,7 +1816,7 @@ export class GameClient {
           const cell = cellUnder(e);
           if (cell >= 0) {
             if (this.buildMode) this.onBuild?.(cell); // ставим здание
-            else if (this.selectedWarships.size && !this.nukeKind && !this.fleetMode && !this.terrain[cell]) {
+            else if (this.selectedWarships.size && !this.nukeKind && !this.fleetMode && !this.droneMode && !this.terrain[cell]) {
               // корабли выделены + клик по ВОДЕ = приказ флоту идти туда
               this.onFleetMove?.(cell);
             } else {

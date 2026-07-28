@@ -117,6 +117,8 @@ setInterval(() => {
       trucks: game.trucksPub(),
       roads: sendPlayers ? game.roadsPub() : undefined, // дороги — раз в 500мс
       warships: game.warshipsPub(),
+      drones: game.dronesPub(),
+      droneBlasts: game.droneBlasts,
       shots: game.bulletsPub(),
       missiles: game.missilesPub(),
       earnings: game.tradeEarnings,
@@ -124,6 +126,7 @@ setInterval(() => {
       humans: room.clients.size,
     } satisfies ServerMsg);
     game.tradeEarnings = []; // события уже сериализованы в update — сбрасываем
+    game.droneBlasts = []; // взрывы дронов за тик отправлены — очищаем
     for (const ws of room.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       const cst = clients.get(ws);
