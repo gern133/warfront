@@ -18,6 +18,8 @@ export interface Room {
   isPublic: boolean;
   speed: number; // скорость игры: 0 пауза, 0.5, 1, 2, 3, 10
   tickAccum: number; // накопитель для дробной скорости (0.5 — тик через раз)
+  infMoney: boolean; // настройка лобби: бесконечные деньги (100млн) у людей
+  infArmy: boolean; // настройка лобби: бесконечная армия (потолок 100млн) у людей
   resetTimer: ReturnType<typeof setTimeout> | null;
   winnerSent: number | null; // id уже объявленного победителя (чтобы не слать повторно)
 }
@@ -55,6 +57,8 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
     isPublic,
     speed: 1,
     tickAccum: 0,
+    infMoney: false,
+    infArmy: false,
     resetTimer: null,
     winnerSent: null,
   };
@@ -96,6 +100,7 @@ export function broadcastLobby(room: Room) {
       difficulty: room.difficulty,
       map: room.map,
       players: roster,
+      settings: { infMoney: room.infMoney, infArmy: room.infArmy },
     });
   }
 }
@@ -138,6 +143,9 @@ export function enterGame(ws: WebSocket, st: CState, room: Room) {
 export function beginRound(room: Room) {
   room.phase = 'spawn';
   room.spawnTicks = (SPAWN_WAIT_S * 1000) / TICK_MS;
+  if (room.clients.size > 1) { room.infMoney = false; room.infArmy = false; } // только для одиночной
+  room.game.infMoney = room.infMoney; // применяем настройки лобби к игре
+  room.game.infArmy = room.infArmy;
   room.game.addBots(room.difficulty);
   for (const cws of room.clients) {
     const cst = clients.get(cws);

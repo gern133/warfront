@@ -997,6 +997,12 @@ export default function App() {
           lobby={lobby}
           copied={copied}
           onCopyLink={copyInviteLink}
+          onSetSettings={(infMoney, infArmy) => {
+            // оптимистично обновляем локально, чтобы галочка не мерцала в ожидании
+            // ответа сервера (контролируемый чекбокс иначе откатывается на старое)
+            setLobby((l) => (l ? { ...l, settings: { infMoney, infArmy } } : l));
+            sendMsg({ type: 'lobbySettings', infMoney, infArmy });
+          }}
           onStart={() => sendMsg({ type: 'start' })}
           onLeave={leaveToMenu}
         />
@@ -1047,6 +1053,16 @@ export default function App() {
               label: 'Союз',
               onClick: () => {
                 sendMsg({ type: 'propose', cell: invadeMenu.cell });
+                setInvadeMenu(null);
+              },
+            });
+          // объявить войну — только нейтральной стране (не врагу и не союзнику)
+          if (owner > 0 && rel === 'neutral')
+            ring.push({
+              icon: '⚔️',
+              label: 'Война',
+              onClick: () => {
+                sendMsg({ type: 'war', cell: invadeMenu.cell });
                 setInvadeMenu(null);
               },
             });

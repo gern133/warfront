@@ -144,6 +144,8 @@ export class Game {
   private fortDirty = true;
   landId: Int16Array; // id связного материка для каждой клетки суши (-1 = вода)
   difficulty: Difficulty = 'normal';
+  infMoney = false; // настройка лобби: у людей всегда 100млн денег
+  infArmy = false; // настройка лобби: у людей потолок армии 100млн (набор постепенный)
   // грубая водная сетка для поиска морских путей (обход островов)
   private cw = 0;
   private ch = 0;
@@ -2055,6 +2057,18 @@ export class Game {
     return { toId, auto: false, name: to.name };
   }
 
+  // Объявить войну владельцу клетки (нейтралу): помечаем пару враждебной без
+  // необходимости физически атаковать. С союзником нельзя — сначала разорвать союз.
+  declareWar(fromId: number, cell: number): boolean {
+    const toId = this.owners[cell];
+    if (toId <= 0 || toId === fromId) return false;
+    const to = this.players.get(toId);
+    if (!to?.alive) return false;
+    if (this.relation(fromId, toId) !== 'neutral') return false; // уже враги/союзники
+    this.markHostile(fromId, toId);
+    return true;
+  }
+
   playerName(id: number): string {
     return this.players.get(id)?.name ?? '?';
   }
@@ -2657,13 +2671,16 @@ export class Game {
       const early = Math.max(0, 1 - (this.tickNo - p.spawnTick) / 450);
       // в начале даём запас потолка, чтобы армия росла сразу (а не только
       // территория); к 45с запас исчезает, но реальный потолок уже больше
-      p.maxTroops = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
+      const normalMax = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
+      // «Бесконечная армия» (настройка лобби): потолок 100млн, но набирается
+      // ПОСТЕПЕННО — темп роста считаем по обычному потолку, а не по 100млн
+      p.maxTroops = this.infArmy && !p.bot ? 100_000_000 : normalMax;
       // Прирост зависит от ТЕРРИТОРИИ (потолка), а не от текущего размера армии.
       // Иначе «богатый» с большой армией восполняет потраченное быстрее «бедного»
       // (рост ∝ армии — снежный ком). Теперь два игрока с равной территорией
       // восполняют войска одинаково быстро, независимо от того, сколько у них
       // сейчас войск — у выбитого/обороняющегося есть реальный шанс отыграться.
-      const base = Math.max(0.5, p.maxTroops * 0.004 * p.growthMul);
+      const base = Math.max(0.5, normalMax * 0.004 * p.growthMul);
       // логистическое торможение: до 70% максимума — полный рост, дальше плавно
       const frac = p.maxTroops > 0 ? p.troops / p.maxTroops : 1;
       const taper =
@@ -2693,6 +2710,7 @@ export class Game {
       p.troops = Math.min(p.maxTroops, p.troops + growth);
       // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
       p.money += 0.5 + p.cells * 0.08;
+      if (this.infMoney && !p.bot) p.money = 100_000_000; // «Бесконечные деньги» — фиксировано 100млн
       if (p.bot) {
         if (this.tickNo >= p.thinkAt) this.botThink(p);
       } else if (this.tickNo >= p.thinkAt) {
@@ -3237,12 +3255,21 @@ export class Game {
       Math.random() < 0.5 + 0.5 * coal
     ) {
       target = leader;
-    } else if (counts.has(0) && Math.random() < 0.6) {
-      target = 0;
     } else {
-      // не бьём союзников (в т.ч. по коалиции) — иначе атака впустую блокируется
-      const enemies = [...counts.keys()].filter((k) => k !== 0 && this.relation(p.id, k) !== 'allied');
-      target = enemies.length ? enemies[(Math.random() * enemies.length) | 0] : 0;
+      // граничащие игроки, кроме союзников; выбираем САМОГО СЛАБОГО — лёгкая добыча
+      // (обычно пассивный «корм»), чтобы территория страны росла быстрее
+      const foes = [...counts.keys()].filter((k) => k > 0 && this.relation(p.id, k) !== 'allied');
+      let weakest = -1, wp = Infinity;
+      for (const k of foes) { const pw = this.powerOf(k); if (pw < wp) { wp = pw; weakest = k; } }
+      // агрессия к захвату соседей растёт со сложностью: easy≈0.55 … insane≈0.9
+      const eatChance = Math.min(0.9, 0.3 + 0.35 * aggro);
+      if (weakest > 0 && Math.random() < eatChance) {
+        target = weakest; // едим слабого соседа
+      } else if (counts.has(0)) {
+        target = 0; // иначе расширяемся в свободную нейтраль
+      } else {
+        target = weakest > 0 ? weakest : 0;
+      }
     }
     this.launchAttackOwner(p.id, target, Math.floor(p.troops * 0.5));
   }

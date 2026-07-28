@@ -10,4 +10,5 @@ export interface LobbyInfo {
   difficulty: Difficulty;
   map: MapType;
   players: string[];
+  settings: { infMoney: boolean; infArmy: boolean };
 }

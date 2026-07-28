@@ -61,6 +61,8 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       st.name = cleanName(msg.name);
       st.room = target;
       target.clients.add(ws);
+      // песочные настройки доступны только в одиночку — как стало >1 игрока, сбрасываем
+      if (target.clients.size > 1) { target.infMoney = false; target.infArmy = false; }
       if (target.phase === 'lobby') broadcastLobby(target);
       else enterGame(ws, st, target);
       break;
@@ -69,6 +71,15 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       const room = st.room;
       if (!room || room.isPublic || room.phase !== 'lobby' || room.host !== ws) return;
       beginRound(room);
+      break;
+    }
+    case 'lobbySettings': {
+      const room = st.room;
+      if (!room || room.isPublic || room.phase !== 'lobby' || room.host !== ws) return;
+      if (room.clients.size > 1) return; // с несколькими игроками песочные настройки недоступны
+      room.infMoney = !!msg.infMoney;
+      room.infArmy = !!msg.infArmy;
+      broadcastLobby(room);
       break;
     }
     case 'spawn': {
@@ -192,6 +203,12 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
       room.game.breakAlliance(st.playerId, msg.cell | 0);
+      break;
+    }
+    case 'war': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      room.game.declareWar(st.playerId, msg.cell | 0);
       break;
     }
     case 'donate': {

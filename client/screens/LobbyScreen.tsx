@@ -5,12 +5,16 @@ interface Props {
   lobby: LobbyInfo;
   copied: boolean;
   onCopyLink: () => void;
+  onSetSettings: (infMoney: boolean, infArmy: boolean) => void;
   onStart: () => void;
   onLeave: () => void;
 }
 
-// Лобби: ссылка-приглашение, список игроков, старт (у хоста)
-export function LobbyScreen({ lobby, copied, onCopyLink, onStart, onLeave }: Props) {
+// Лобби: ссылка-приглашение, список игроков, настройки карты, старт (у хоста)
+export function LobbyScreen({ lobby, copied, onCopyLink, onSetSettings, onStart, onLeave }: Props) {
+  const s = lobby.settings;
+  const multiplayer = lobby.players.length > 1;
+  const canEdit = lobby.host && !multiplayer; // песочные настройки — только в одиночку
   return (
     <div className="overlay">
       <div className="menu">
@@ -46,6 +50,39 @@ export function LobbyScreen({ lobby, copied, onCopyLink, onStart, onLeave }: Pro
               </div>
             ))}
           </div>
+        </div>
+
+        <div className="field">
+          <span className="eyebrow">Настройки карты</span>
+          <div className="opt-list">
+            <label className={'setting-row' + (s.infMoney ? ' on' : '') + (canEdit ? '' : ' locked')}>
+              <input
+                type="checkbox"
+                checked={s.infMoney}
+                disabled={!canEdit}
+                onChange={(e) => onSetSettings(e.target.checked, s.infArmy)}
+              />
+              <span className="setting-body">
+                <span className="setting-name">Бесконечные деньги</span>
+                <span className="setting-desc">фиксировано 100 млн</span>
+              </span>
+            </label>
+            <label className={'setting-row' + (s.infArmy ? ' on' : '') + (canEdit ? '' : ' locked')}>
+              <input
+                type="checkbox"
+                checked={s.infArmy}
+                disabled={!canEdit}
+                onChange={(e) => onSetSettings(s.infMoney, e.target.checked)}
+              />
+              <span className="setting-body">
+                <span className="setting-name">Бесконечная армия</span>
+                <span className="setting-desc">потолок 100 млн, набор постепенный</span>
+              </span>
+            </label>
+          </div>
+          {multiplayer && (
+            <span className="setting-note">Доступно только в одиночной игре</span>
+          )}
         </div>
 
         {lobby.host ? (

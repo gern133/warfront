@@ -16,6 +16,8 @@ export type ClientMsg =
   | { type: 'create'; name: string; difficulty: Difficulty; map: MapType }
   | { type: 'joinLobby'; name: string; code: string }
   | { type: 'start' } // хост запускает игру в лобби
+  | { type: 'lobbySettings'; infMoney: boolean; infArmy: boolean } // хост меняет настройки карты
+  | { type: 'war'; cell: number } // объявить войну владельцу клетки (нейтралу)
   | { type: 'spawn'; cell: number } // выбор точки старта
   | { type: 'respawn' } // реванш после смерти в той же комнате
   | { type: 'rematch' } // новый раунд после победы (свежая карта)
@@ -42,6 +44,7 @@ export type ServerMsg =
       difficulty: Difficulty;
       map: MapType;
       players: string[];
+      settings: { infMoney: boolean; infArmy: boolean };
     }
   | {
       type: 'init';
