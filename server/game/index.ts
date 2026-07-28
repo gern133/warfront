@@ -48,6 +48,8 @@ import {
   samCost,
   DRONE_COST,
   DRONE_COUNT,
+  DRONE_CELLS_PER,
+  DRONE_COUNT_MAX,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
 import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
@@ -154,8 +156,8 @@ export class Game {
   private fortDirty = true;
   landId: Int16Array; // id связного материка для каждой клетки суши (-1 = вода)
   difficulty: Difficulty = 'normal';
-  infMoney = false; // настройка лобби: у людей всегда 100млн денег
-  infArmy = false; // настройка лобби: у людей потолок армии 100млн (набор постепенный)
+  infMoney = false; // настройка лобби: у людей всегда 10млрд денег
+  infArmy = false; // настройка лобби: у людей армия сразу 100млн (мгновенно)
   // грубая водная сетка для поиска морских путей (обход островов)
   private cw = 0;
   private ch = 0;
@@ -1252,7 +1254,7 @@ export class Game {
           const dr = tgt as Drone;
           dr.done = true; // ракета ПВО догнала дрон — сбит
           droneKilled = true;
-          this.droneBlasts.push(+dr.x.toFixed(1), +dr.y.toFixed(1)); // вспышка сбития
+          this.droneBomb(dr); // падает и взрывается с уроном по области, как сброшенная бомба
         } else {
           const ts = tgt as TradeShip;
           ts.done = true;
@@ -2446,8 +2448,16 @@ export class Game {
     if (!silos.length) return 'Нужна ракетная шахта';
     if (p.money < DRONE_COST) return 'Недостаточно денег';
     p.money -= DRONE_COST;
+    this.markHostile(playerId, target); // запуск роя = объявление войны цели
     const tcells = this.playerCells(target);
-    for (let i = 0; i < DRONE_COUNT; i++) {
+    // размер роя ∝ территории цели: минимум DRONE_COUNT, +1 дрон за DRONE_CELLS_PER
+    // клеток, но не больше DRONE_COUNT_MAX (мелкую страну — базовый рой, континент —
+    // сотни дронов).
+    const count = Math.max(
+      DRONE_COUNT,
+      Math.min(DRONE_COUNT_MAX, Math.round(tcells.length / DRONE_CELLS_PER))
+    );
+    for (let i = 0; i < count; i++) {
       const silo = silos[i % silos.length];
       const sx = (silo.cell % this.w) + 0.5, sy = ((silo.cell / this.w) | 0) + 0.5;
       const wc = tcells.length ? tcells[(Math.random() * tcells.length) | 0] : cell;
@@ -2467,6 +2477,27 @@ export class Game {
       });
     }
     return null;
+  }
+
+  // Взрыв бомбы дрона в его ТЕКУЩЕЙ точке: −5% текущей армии цели + зачистка
+  // территории цели в радиусе DRONE_CLEAR_R + вспышка. Один и тот же эффект и при
+  // обычном сбросе, и при падении дрона (сбит ПВО или кончился боезапас).
+  droneBomb(d: Drone) {
+    const tp = this.players.get(d.target);
+    if (tp?.alive) tp.troops = Math.max(0, tp.troops * (1 - DRONE_DAMAGE_FRAC));
+    const bcx = d.x | 0, bcy = d.y | 0, R = DRONE_CLEAR_R, R2 = R * R;
+    for (let ey = -R; ey <= R; ey++) {
+      const y = bcy + ey;
+      if (y < 0 || y >= this.h) continue;
+      for (let ex = -R; ex <= R; ex++) {
+        if (ex * ex + ey * ey > R2) continue;
+        const x = bcx + ex;
+        if (x < 0 || x >= this.w) continue;
+        const n = y * this.w + x;
+        if (this.terrain[n] && this.owners[n] === d.target) this.setOwner(n, 0);
+      }
+    }
+    this.droneBlasts.push(+d.x.toFixed(1), +d.y.toFixed(1));
   }
 
   // Полёт дронов: хаотичное блуждание над территорией цели, сброс бомб (−5%
@@ -2506,36 +2537,19 @@ export class Game {
         d.x += (dx / dist) * DRONE_SPEED;
         d.y += (dy / dist) * DRONE_SPEED;
       } else {
-        // прилетел к своей точке. Если она ещё вражеская — КРУЖИМ над ней и ждём
-        // перезарядку, потом сбрасываем бомбу (дрон точно атакует каждые 5с, а не
-        // улетает без сброса). Если точка уже выжжена — летим к новой занятой.
-        const destCell = (Math.floor(d.wy) | 0) * w + (Math.floor(d.wx) | 0);
-        const destOwned = destCell >= 0 && destCell < this.cells && this.owners[destCell] === d.target;
-        if (!destOwned) {
+        // прилетел к своей точке. Ждём перезарядку (кружим над ней), затем СБРАСЫВАЕМ
+        // бомбу и берём новую дальнюю точку — так рой разлетается и гарантированно
+        // тратит боезапас (не зависает вечно).
+        if (this.tickNo >= d.fireAt) {
+          this.droneBomb(d); // взрыв: −5% армии + зачистка территории + вспышка
+          if (--d.bombs <= 0) { d.done = true; dead = true; continue; } // боезапас кончился — падает и взрывается (последняя бомба = взрыв при падении)
           const nc = pickSpreadCell(d.target, d.x, d.y);
-          if (nc < 0) { d.done = true; dead = true; this.droneBlasts.push(+d.x.toFixed(1), +d.y.toFixed(1)); continue; }
+          if (nc < 0) { d.done = true; dead = true; continue; } // территории не осталось — падает
           d.wx = (nc % w) + 0.5;
           d.wy = ((nc / w) | 0) + 0.5;
-        } else if (this.tickNo >= d.fireAt) {
-          // сброс: зачистка территории в радиусе + −5% армии
           d.fireAt = this.tickNo + DRONE_FIRE_COOLDOWN;
-          tp.troops = Math.max(0, tp.troops * (1 - DRONE_DAMAGE_FRAC));
-          const bcx = d.x | 0, bcy = d.y | 0, R = DRONE_CLEAR_R, R2 = R * R;
-          for (let ey = -R; ey <= R; ey++) {
-            const y = bcy + ey;
-            if (y < 0 || y >= this.h) continue;
-            for (let ex = -R; ex <= R; ex++) {
-              if (ex * ex + ey * ey > R2) continue;
-              const x = bcx + ex;
-              if (x < 0 || x >= this.w) continue;
-              const n = y * this.w + x;
-              if (this.terrain[n] && this.owners[n] === d.target) this.setOwner(n, 0);
-            }
-          }
-          this.droneBlasts.push(+d.x.toFixed(1), +d.y.toFixed(1));
-          if (--d.bombs <= 0) { d.done = true; dead = true; continue; } // бомбы кончились — падает
         } else {
-          // ждём перезарядку — медленно кружим над целью (чтобы не зависать точкой)
+          // ждём перезарядку — медленно кружим над точкой (чтобы не зависать пикселем)
           d.a += 0.25;
           d.x += Math.cos(d.a) * 0.35;
           d.y += Math.sin(d.a) * 0.35;
@@ -2836,8 +2850,8 @@ export class Game {
       // в начале даём запас потолка, чтобы армия росла сразу (а не только
       // территория); к 45с запас исчезает, но реальный потолок уже больше
       const normalMax = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
-      // «Бесконечная армия» (настройка лобби): потолок 100млн, но набирается
-      // ПОСТЕПЕННО — темп роста считаем по обычному потолку, а не по 100млн
+      // «Бесконечная армия» (настройка лобби): потолок 100млн; армия выставляется
+      // сразу в максимум ниже (мгновенно, не постепенно)
       p.maxTroops = this.infArmy && !p.bot ? 100_000_000 : normalMax;
       // Прирост зависит от ТЕРРИТОРИИ (потолка), а не от текущего размера армии.
       // Иначе «богатый» с большой армией восполняет потраченное быстрее «бедного»
@@ -2872,9 +2886,10 @@ export class Game {
       // 0.75 — общий темп пополнения армии снижен (армии набираются медленнее)
       const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost * defBoost * 0.75;
       p.troops = Math.min(p.maxTroops, p.troops + growth);
+      if (this.infArmy && !p.bot) p.troops = p.maxTroops; // «Бесконечная армия» — сразу максимум (100млн)
       // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
       p.money += 0.5 + p.cells * 0.08;
-      if (this.infMoney && !p.bot) p.money = 100_000_000; // «Бесконечные деньги» — фиксировано 100млн
+      if (this.infMoney && !p.bot) p.money = 10_000_000_000; // «Бесконечные деньги» — фиксировано 10млрд
       if (p.bot) {
         if (this.tickNo >= p.thinkAt) this.botThink(p);
       } else if (this.tickNo >= p.thinkAt) {
@@ -3182,6 +3197,38 @@ export class Game {
     if (best >= 0) this.launchInvasion(p.id, best, 0.35);
   }
 
+  // Клетка для новой постройки бота, максимально ДАЛЁКАЯ от уже существующих своих
+  // зданий (farthest-point): постройки расходятся по всей территории, а не кучкуются
+  // в одном углу. Так города застраивают всю землю, ПВО прикрывают её целиком, а
+  // дорожная сеть (заводы → грузовики) растягивается на всю страну. -1 если некуда.
+  private spreadBuildCell(playerId: number, cells: number[], step: number): number {
+    const own = this.buildings.filter((b) => b.owner === playerId);
+    const w = this.w;
+    const EX: BuildingType[] = ['hq', 'city', 'port', 'silo', 'sam', 'factory'];
+    let best = -1;
+    let bestD = -1;
+    for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
+      const c = cells[i];
+      if (this.owners[c] !== playerId) continue;
+      if (!this.canBuildAt(playerId, c)) continue;
+      if (this.buildingNear(c, PORT_RADIUS, EX)) continue;
+      const cx = c % w;
+      const cy = (c / w) | 0;
+      let dmin = Infinity;
+      for (const b of own) {
+        const bx = b.cell % w;
+        const by = (b.cell / w) | 0;
+        const d = (bx - cx) ** 2 + (by - cy) ** 2;
+        if (d < dmin) dmin = d;
+      }
+      if (dmin > bestD) {
+        bestD = dmin;
+        best = c;
+      }
+    }
+    return best;
+  }
+
   private botThink(p: Player) {
     // считаем соседей только по своим клеткам (не по всей карте), с выборкой
     const cells = this.playerCells(p.id);
@@ -3233,83 +3280,59 @@ export class Game {
     // Страны строят города (рост лимита войск) и штабы-щиты (оборона) — как игрок.
     // Ограничиваем число, чтобы не спамить, и гейтим деньгами.
     if (p.strong) {
-      // города строим активнее: лимит растёт с территорией (богатая страна —
-      // больше городов). Пока есть деньги на город — ставим.
-      const myCities = this.buildings.filter((b) => b.owner === p.id && b.type === 'city').length;
-      const cityCap = Math.min(12, 3 + Math.floor(p.cells / 350));
-      if (myCities < cityCap && p.money >= cityCost(myCities)) {
-        for (let i = 0; i < cells.length; i += step) {
-          const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
-            this.build(p.id, 'city', c);
-            break;
-          }
+      // Экономика с ЖЁСТКИМ приоритетом обороны: сперва ПВО (покрытие территории +
+      // уровень) — их выбьют дроны/ракеты, если не вложиться; только ОСТАТОК сверх
+      // резерва идёт в экономику. Раньше дешёвые города перетягивали деньги и ПВО
+      // не качались вовсе.
+      const countType = (t: BuildingType) =>
+        this.buildings.filter((b) => b.owner === p.id && b.type === t).length;
+      const cityCap = Math.min(30, 4 + Math.floor(p.cells / 2500));
+      const factoryCap = Math.min(5, 1 + Math.floor(p.cells / 10000));
+      // ПВО должны ПОКРЫВАТЬ территорию: число растёт с площадью (радиус 72).
+      const samCap = Math.min(20, 3 + Math.floor(p.cells / 7000));
+
+      const mine = this.buildings.filter((b) => b.owner === p.id);
+      const reserve = 2_000_000; // на экономику тратим только деньги СВЕРХ этого запаса
+      const ready = (b: Building) => this.tickNo >= b.readyTick && b.upEnd === 0;
+      const lowestOf = (t: BuildingType, maxLvl = Infinity) =>
+        mine
+          .filter((b) => b.type === t && ready(b) && b.level < maxLvl)
+          .sort((a, b) => a.level - b.level)[0];
+      const spend = (t: BuildingType) => {
+        const c = this.spreadBuildCell(p.id, cells, step);
+        if (c >= 0) { this.build(p.id, t, c); return true; }
+        return false;
+      };
+
+      let newB = 0; // ограничение новых построек за ход (farthest-point дорогой)
+      let samActs = 0; // не больше N трат на ПВО за ход, чтобы экономика тоже росла
+      for (let up = 0; up < 40; up++) {
+        const samCostNow = samCost(this.samLevels(p.id));
+        // === ОБОРОНА (ПВО) — АБСОЛЮТНЫЙ приоритет: тратим как только хватает ===
+        if (samActs < 16 && p.money >= samCostNow) {
+          // 1) добираем количество до кэпа — покрытие всей территории (farthest-point)
+          if (countType('sam') < samCap && newB < 4 && spend('sam')) { newB++; samActs++; continue; }
+          // 2) качаем слабейшее ПВО до ур. 12 (уровень = число одновременных перехватов)
+          const sam = lowestOf('sam', 12);
+          if (sam) { this.upgrade(p.id, sam.cell); samActs++; continue; }
         }
-      }
-      // завод: доход (грузовики) + ускорение регена; строим 1-2, если есть деньги
-      const myFactories = this.buildings.filter((b) => b.owner === p.id && b.type === 'factory').length;
-      if (myFactories < 2 && p.money >= factoryCost(this.factoryLevels(p.id))) {
-        for (let i = 0; i < cells.length; i += step) {
-          const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
-            this.build(p.id, 'factory', c);
-            break;
-          }
-        }
-      }
-      const myHqs = this.hqCount(p.id);
-      if (myHqs < 2 && p.money >= hqCost(myHqs)) {
-        for (let i = 0; i < cells.length; i += step) {
-          const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
-            this.build(p.id, 'hq', c);
-            break;
-          }
-        }
-      }
-      // ракетная шахта (дорогая — одна на страну, если разбогатела)
-      const mySilos = this.buildings.filter((b) => b.owner === p.id && b.type === 'silo').length;
-      if (mySilos < 1 && p.money >= SILO_COST) {
-        for (let i = 0; i < cells.length; i += step) {
-          const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
-            this.build(p.id, 'silo', c);
-            break;
-          }
-        }
-      }
-      // ПВО: до 2 на страну (прикрытие от ракет и роёв дронов)
-      const mySams = this.buildings.filter((b) => b.owner === p.id && b.type === 'sam').length;
-      if (mySams < 2 && p.money >= samCost(this.samLevels(p.id))) {
-        for (let i = 0; i < cells.length; i += step) {
-          const c = cells[i];
-          if (this.canBuildAt(p.id, c) && !this.buildingNear(c, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory'])) {
-            this.build(p.id, 'sam', c);
-            break;
-          }
-        }
-      }
-      // АКТИВНО качаем ПВО (уровень = число одновременных перехватов — критично
-      // против ракет и роёв дронов): тянем самый слабый свой ПВО вверх до 8 ур.
-      const samB = this.buildings.filter(
-        (b) => b.owner === p.id && b.type === 'sam' && this.tickNo >= b.readyTick && b.upEnd === 0
-      );
-      if (samB.length && Math.random() < 0.6) {
-        const lowest = samB.reduce((lo, b) => (b.level < lo.level ? b : lo), samB[0]);
-        if (lowest.level < 8 && p.money >= samCost(this.samLevels(p.id))) this.upgrade(p.id, lowest.cell);
-      }
-      // улучшение своих построек: если есть свободные деньги — прокачивает
-      // город/завод/штаб/шахту/ПВО (upgrade сам спишет деньги только если хватает)
-      if (Math.random() < 0.5) {
-        const upg = this.buildings.filter(
-          (b) =>
-            b.owner === p.id &&
-            this.tickNo >= b.readyTick &&
-            b.upEnd === 0 &&
-            (b.type === 'city' || b.type === 'factory' || b.type === 'silo' || b.type === 'sam' ||
-              (b.type === 'hq' && b.level < MAX_HQ_LEVEL))
-        );
-        if (upg.length) this.upgrade(p.id, upg[(Math.random() * upg.length) | 0].cell);
+        // === ЭКОНОМИКА — только на ОСТАТОК сверх резерва ===
+        if (p.money <= reserve) break;
+        // достройка недостающего (город → завод → шахта → штаб)
+        if (countType('city') < cityCap && newB < 4 && p.money >= cityCost(countType('city')) + reserve && spend('city')) { newB++; continue; }
+        if (countType('factory') < factoryCap && newB < 4 && p.money >= factoryCost(this.factoryLevels(p.id)) + reserve && spend('factory')) { newB++; continue; }
+        if (countType('silo') < 1 && p.money >= SILO_COST + reserve && spend('silo')) { newB++; continue; }
+        if (this.hqCount(p.id) < 2 && p.money >= hqCost(this.hqCount(p.id)) + reserve && spend('hq')) { newB++; continue; }
+        // апгрейд экономики (город → завод → шахта → штаб)
+        const city = lowestOf('city');
+        if (city && p.money - cityUpgradeCost(city.level + 1) >= reserve) { this.upgrade(p.id, city.cell); continue; }
+        const fac = lowestOf('factory');
+        if (fac && p.money - factoryCost(this.factoryLevels(p.id)) >= reserve) { this.upgrade(p.id, fac.cell); continue; }
+        const silo = lowestOf('silo');
+        if (silo && p.money - SILO_COST >= reserve) { this.upgrade(p.id, silo.cell); continue; }
+        const hq = lowestOf('hq', MAX_HQ_LEVEL);
+        if (hq && p.money - hqUpgradeCost(hq.level + 1) >= reserve) { this.upgrade(p.id, hq.cell); continue; }
+        break; // делать нечего — выходим
       }
       // пуск ракеты по врагу: если есть заряженная шахта и деньги. Целимся в
       // СТРАТЕГИЧЕСКИЕ объекты врага (шахта > ПВО > завод > штаб > город), а если

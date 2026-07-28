@@ -700,8 +700,15 @@ export default function App() {
           { t: 'silo', svg: 'silo' },
           { t: 'sam', svg: 'sam' },
         ];
+        // n — суммарный УРОВЕНЬ построек типа (база ур.1 = 1, апгрейд до ур.2 = 2, и т.д.),
+        // а не просто число зданий: так виден реальный «вес» инфраструктуры страны.
         const counts = types
-          .map((x) => ({ ...x, n: buildings.filter((b) => b.owner === op.id && b.type === x.t).length }))
+          .map((x) => ({
+            ...x,
+            n: buildings
+              .filter((b) => b.owner === op.id && b.type === x.t)
+              .reduce((s, b) => s + (b.level || 1), 0),
+          }))
           .filter((x) => x.n > 0);
         return (
           <div className="panel opp-tip">
