@@ -81,6 +81,7 @@ export class GameClient {
   private players: PlayerPub[] = [];
   private playersTick = 0; // троттлинг отображаемых армий на карте (раз в 1с)
   private labels = new Map<number, { x: number; y: number }>();
+  private labelSeen = new Uint8Array(0); // буфер посещённых клеток для поиска связных кусков
   private miniCanvas: HTMLCanvasElement | null = null;
   private miniCtx: CanvasRenderingContext2D | null = null;
   icons = new IconSet(ICON_URLS); // SVG-иконки зданий/юнитов (тонируются под canvas)
@@ -290,22 +291,42 @@ export class GameClient {
     if (this.playersTick++ % 10 === 0) this.players = players;
     if (!this.labelsVisible()) return; // отдалено — метки не рисуются
     if (this.labelTick++ % 20 !== 0) return;
-    const acc = new Map<number, { sx: number; sy: number; n: number }>();
-    for (let c = 0; c < this.cells; c++) {
-      const o = this.owners[c];
-      if (o <= 0) continue;
-      let a = acc.get(o);
-      if (!a) {
-        a = { sx: 0, sy: 0, n: 0 };
-        acc.set(o, a);
+    // Метку страны ставим в центр её САМОГО БОЛЬШОГО связного куска территории.
+    // Иначе у игрока с землёй на разных континентах (напр. Америка+Европа) «средний»
+    // центр всех клеток попадал в океан между ними. Ищем компоненты связности
+    // (4-связность) и для каждого владельца берём крупнейшую.
+    const w = this.w;
+    if (this.labelSeen.length !== this.cells) this.labelSeen = new Uint8Array(this.cells);
+    const seen = this.labelSeen;
+    seen.fill(0);
+    const best = new Map<number, { sx: number; sy: number; n: number }>();
+    const stack: number[] = [];
+    for (let c0 = 0; c0 < this.cells; c0++) {
+      const o = this.owners[c0];
+      if (o <= 0 || seen[c0]) continue;
+      stack.length = 0;
+      stack.push(c0);
+      seen[c0] = 1;
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      while (stack.length) {
+        const cc = stack.pop()!;
+        const x = cc % w;
+        sx += x;
+        sy += (cc / w) | 0;
+        n++;
+        if (x > 0 && this.owners[cc - 1] === o && !seen[cc - 1]) { seen[cc - 1] = 1; stack.push(cc - 1); }
+        if (x < w - 1 && this.owners[cc + 1] === o && !seen[cc + 1]) { seen[cc + 1] = 1; stack.push(cc + 1); }
+        if (cc >= w && this.owners[cc - w] === o && !seen[cc - w]) { seen[cc - w] = 1; stack.push(cc - w); }
+        if (cc < this.cells - w && this.owners[cc + w] === o && !seen[cc + w]) { seen[cc + w] = 1; stack.push(cc + w); }
       }
-      a.sx += c % this.w;
-      a.sy += (c / this.w) | 0;
-      a.n++;
+      const b = best.get(o);
+      if (!b || n > b.n) best.set(o, { sx, sy, n });
     }
     this.labels.clear();
-    for (const [id, a] of acc) {
-      this.labels.set(id, { x: a.sx / a.n + 0.5, y: a.sy / a.n + 0.5 });
+    for (const [id, b] of best) {
+      this.labels.set(id, { x: b.sx / b.n + 0.5, y: b.sy / b.n + 0.5 });
     }
   }
 
