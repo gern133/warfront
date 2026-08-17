@@ -20,6 +20,7 @@ import {
 } from '../../shared/protocol';
 import { playerColorRGB, playerColorCSS } from '../../shared/color';
 import { rleDecode } from '../../shared/rle';
+import { buildWaterFields } from '../../shared/map/water';
 import {
   FORT_BORDER,
   WATER,
@@ -27,6 +28,7 @@ import {
   LABEL_ZOOM_MUL,
   FOOD_LABEL_MUL,
   FOOD_LABEL_CELLS,
+  BADGE_ZOOM_MUL,
   TERRAIN,
 } from './constants';
 import { fmtTroops, fmtMoney } from '../lib/format';
@@ -38,6 +40,9 @@ export class GameClient {
   h = 0;
   cells = 0;
   terrain = new Uint8Array(0);
+  // берег океана (1 = суша, примыкающая к океану) — критерий для курсора порта,
+  // считается локально в applyInit из terrain, как на сервере
+  shore: Uint8Array = new Uint8Array(0);
   owners = new Int16Array(0);
   selfId = -1;
   fps = 0;
@@ -140,6 +145,11 @@ export class GameClient {
     }
     rleDecode(terrainRle, this.terrain);
     rleDecode(ownersRle, this.owners);
+    // Берег ОКЕАНА для курсора порта: тот же критерий, что на сервере, иначе
+    // курсор разрешал бы ставить порт на берегу озера, а сервер отказывал.
+    // Считаем локально из своей же копии terrain (компоненты воды клиенту не
+    // нужны) — по протоколу ничего гонять не надо.
+    this.shore = buildWaterFields(this.terrain, w, h, false).shore;
     if (selfId > 0) this.selfId = selfId;
     this.warSet.clear();
     this.warLabels = [];
@@ -551,23 +561,22 @@ export class GameClient {
     return !this.buildings.some((b) => b.cell === cell);
   }
 
-  // Порт: своя прибрежная клетка (рядом вода), без вражеских соседей, без здания
+  // Порт: своя клетка на берегу ОКЕАНА, без вражеских соседей, без здания
   canBuildPortAt(cell: number): boolean {
     if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
     if (this.owners[cell] !== this.selfId) return false;
+    if (!this.shore[cell]) return false; // берег озера портом не считается
     const x = cell % this.w;
     const y = (cell / this.w) | 0;
-    let coastal = false;
     let enemyAdj = false;
     const chk = (n: number) => {
-      if (!this.terrain[n]) coastal = true;
-      else if (this.owners[n] !== this.selfId) enemyAdj = true;
+      if (this.terrain[n] && this.owners[n] !== this.selfId) enemyAdj = true;
     };
     if (x > 0) chk(cell - 1);
     if (x < this.w - 1) chk(cell + 1);
     if (y > 0) chk(cell - this.w);
     if (y < this.h - 1) chk(cell + this.w);
-    if (!coastal || enemyAdj) return false;
+    if (enemyAdj) return false;
     return !this.buildings.some((b) => b.cell === cell);
   }
 
@@ -1035,13 +1044,22 @@ export class GameClient {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const r = Math.max(5, Math.min(16, this.zoom * 2.2));
-    const badge = r >= 9; // мелкие цифры-бейджи при отдалении не читаются — не рисуем
+    // Цифры уровня — важная информация, поэтому показываем почти всегда: гасим
+    // только на обзорном виде «вся карта целиком». Раньше порог был r >= 9
+    // (зум ≥ 4.1), из-за чего уровни пропадали при любом отдалении.
+    const badge = this.zoom >= this.minZoom() * BADGE_ZOOM_MUL;
     // При отдалении карты рисуем здания дешёвыми фигурами (LOD): круг — город/
     // завод/щит, ромб — порт, треугольник — шахта, квадрат — ПВО. Это резко
     // экономит FPS на общем виде (нет drawImage/текста), а размер фигуры РАСТЁТ
     // при отдалении, чтобы постройки оставались заметны.
     const shapeMode = this.zoom < 2.4;
     const hs = Math.max(3.5, Math.min(9, 6 / this.zoom)); // полуразмер фигуры (px)
+    // Цифра уровня в режиме фигур: шрифт задаём ОДИН раз до цикла (смена ctx.font
+    // на каждое здание — самая дорогая часть отрисовки текста), в цикле меняется
+    // только цвет. Так уровни видны и на отдалённом виде, не убивая FPS.
+    const shapeBadge = shapeMode && badge;
+    // (выравнивание — center/middle, как у остальных бейджей выше)
+    if (shapeBadge) ctx.font = `800 ${Math.max(10, hs * 1.5)}px 'IBM Plex Mono', monospace`;
     const now = performance.now();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -1073,6 +1091,16 @@ export class GameClient {
           ctx.arc(sx, sy, hs, 0, Math.PI * 2);
           ctx.fill(); ctx.stroke();
         }
+        // уровень цифрой справа-сверху (шрифт уже задан до цикла): тёмная
+        // подложка-обводка + цвет по типу, как у крупных бейджей ниже
+        if (shapeBadge && b.level > 1 && b.progress >= 1) {
+          const bx = sx + hs, by = sy - hs;
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+          ctx.strokeText(String(b.level), bx, by);
+          ctx.fillStyle = b.type === 'port' ? '#8fe9f2' : b.type === 'hq' ? '#ff9d5c' : '#ffd27a';
+          ctx.fillText(String(b.level), bx, by);
+        }
         ctx.globalAlpha = 1;
         continue;
       }
@@ -1095,7 +1123,9 @@ export class GameClient {
           ctx.lineWidth = Math.max(2, fs / 5);
           ctx.strokeStyle = 'rgba(0,0,0,0.85)';
           ctx.fillStyle = b.ammo > 0 ? '#ffd27a' : '#ff6a55';
-          const txt = `${b.ammo}/${b.level}`;
+          // очередь оплаченных апгрейдов показываем как «+N» — видно, что уровни
+          // уже накликаны и подтянутся сами
+          const txt = `${b.ammo}/${b.level}` + (b.upQueue > 0 ? `+${b.upQueue}` : '');
           ctx.strokeText(txt, sx + r, sy - r);
           ctx.fillText(txt, sx + r, sy - r);
         }
@@ -1134,7 +1164,9 @@ export class GameClient {
           ctx.lineWidth = Math.max(2, fs / 5);
           ctx.strokeStyle = 'rgba(0,0,0,0.85)';
           ctx.fillStyle = b.ammo > 0 ? '#8fe9f2' : '#ff6a55';
-          const txt = `${b.ammo}/${b.level}`;
+          // очередь оплаченных апгрейдов показываем как «+N» — видно, что уровни
+          // уже накликаны и подтянутся сами
+          const txt = `${b.ammo}/${b.level}` + (b.upQueue > 0 ? `+${b.upQueue}` : '');
           ctx.strokeText(txt, sx + r, sy - r);
           ctx.fillText(txt, sx + r, sy - r);
         }
@@ -1281,6 +1313,18 @@ export class GameClient {
         ctx.stroke();
       }
       this.drawIcon(ctx, 'hq', sx, sy, r * 1.7);
+      // уровень цифрой: сопротивление в зоне штаба сильно зависит от уровня
+      // (1:5 / 1:7 / 1:10 + торможение наступления), поэтому одного цвета кольца
+      // мало — цифра нужна так же, как у города и порта
+      if (badge && b.level > 1 && !building) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = b.level >= 3 ? '#ff7a2a' : '#f2c94c';
+        ctx.strokeText(String(b.level), sx + r, sy - r);
+        ctx.fillText(String(b.level), sx + r, sy - r);
+      }
       ctx.globalAlpha = 1;
       // прогресс-бар постройки/апгрейда над зданием
       if (building || upgrading) {

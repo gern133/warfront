@@ -28,3 +28,7 @@ export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name:
   { icon: '💥', svg: 'hydro', bt: null, name: 'Водородная бомба', nuke: 'hydro' },
   { icon: '🛩️', bt: null, name: 'Рой дронов «Мопед»', drone: true },
 ];
+
+// Сколько входящих десантов показывать в HUD списком. Остальные скрываются под
+// строку «ещё N»: при массированной высадке десяток строк занимал пол-экрана.
+export const INCOMING_VISIBLE = 3;

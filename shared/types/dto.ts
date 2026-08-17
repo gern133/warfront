@@ -23,6 +23,7 @@ export interface BuildingPub {
   level: number; // hq: 1..3; port/city: любой; silo: размер залпа
   fuse: number; // секунд до взрыва после захвата (0 = не тикает)
   upProgress: number; // 0..1 — прогресс апгрейда (0 = не улучшается)
+  upQueue: number; // сколько апгрейдов оплачено и стоит в очереди после текущего
   ammo: number; // silo: сколько ракет заряжено сейчас (иначе 0)
 }
 

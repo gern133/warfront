@@ -27,7 +27,7 @@ import {
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
 import { Phase, MenuView, LobbyInfo } from './types';
-import { TOOLS } from './constants/ui';
+import { TOOLS, INCOMING_VISIBLE } from './constants/ui';
 import { ICON_URLS } from './engine/icons';
 import { fmtK } from './lib/format';
 import { MenuScreen } from './screens/MenuScreen';
@@ -49,6 +49,8 @@ export default function App() {
   const [roomCode, setRoomCode] = useState('');
   const [players, setPlayers] = useState<PlayerPub[]>([]);
   const [attacks, setAttacks] = useState<AttackPub[]>([]);
+  // список входящих десантов: видно максимум 3, остальные — в раскрываемом списке
+  const [incomingOpen, setIncomingOpen] = useState(false);
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
@@ -799,7 +801,10 @@ export default function App() {
         <div className="hud-stack">
           {incoming.length > 0 && (
             <div className="incoming">
-              {incoming.map((b) => (
+              {/* Видно максимум INCOMING_VISIBLE строк: при массированной высадке
+                  список из десятка десантов занимал пол-экрана. Остальные — под
+                  раскрывающейся строкой «ещё N». */}
+              {(incomingOpen ? incoming : incoming.slice(0, INCOMING_VISIBLE)).map((b) => (
                 <button
                   key={b.id}
                   className="incoming-row"
@@ -813,6 +818,22 @@ export default function App() {
                   <span className="inc-focus">⌖</span>
                 </button>
               ))}
+              {incoming.length > INCOMING_VISIBLE && (
+                <button
+                  className="incoming-row inc-more"
+                  onClick={() => setIncomingOpen((v) => !v)}
+                  title={incomingOpen ? 'Свернуть' : 'Показать все десанты'}
+                >
+                  <span className="inc-text">
+                    {incomingOpen
+                      ? '▲ свернуть'
+                      : `▼ ещё ${incoming.length - INCOMING_VISIBLE} · всего ${incoming.length
+                        } десантов, ${incoming
+                          .reduce((s, b) => s + b.troops, 0)
+                          .toLocaleString('ru')} войск`}
+                  </span>
+                </button>
+              )}
             </div>
           )}
           {myBoats.length > 0 && (

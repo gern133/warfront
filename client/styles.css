@@ -1828,3 +1828,12 @@ button {
     transition: none;
   }
 }
+
+/* «ещё N» в списке входящих десантов — та же строка, но приглушённая и по центру */
+.incoming-row.inc-more {
+  justify-content: center;
+  opacity: 0.75;
+  font-size: 12px;
+  cursor: pointer;
+}
+.incoming-row.inc-more:hover { opacity: 1; }

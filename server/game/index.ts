@@ -13,6 +13,7 @@ import {
   HQ_FUSE_TICKS,
   HQ_EXPLODE_RADIUS,
   MAX_HQ_LEVEL,
+  UPGRADE_QUEUE_MAX,
   hqUpgradeCost,
   hqUpgradeTicks,
   TradeShipPub,
@@ -24,6 +25,7 @@ import {
   PORT_BUILD_TICKS,
   PORT_SHIP_INTERVAL,
   PORT_RADIUS,
+  PORT_MAX_SHIP_LEVEL,
   portUpgradeCost,
   tradeValue,
   shipsForLevel,
@@ -35,6 +37,7 @@ import {
   FACTORY_RANGE,
   factoryCost,
   factoryBoostPct,
+  factoryIncome,
   FACTORY_COVER,
   SILO_COST,
   SILO_BUILD_TICKS,
@@ -50,8 +53,14 @@ import {
   DRONE_COUNT,
   DRONE_CELLS_PER,
   DRONE_COUNT_MAX,
+  TERRAIN_DEF,
+  TERRAIN_SPEED,
+  TERRAIN_DEF_MIN,
+  TERRAIN_TIER,
+  TERRAIN_TIERS,
 } from '../../shared/protocol';
 import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
+import { buildWaterFields, buildCoarseWater, losWater, smoothWaterPath } from '../../shared/map/water';
 import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
 import {
   TRADE_SPEED,
@@ -85,6 +94,38 @@ import {
   WAVE_SPEED,
   DEFEND_BOOST,
   DEFEND_BOOST_TICKS,
+  ROUTE_BUDGET,
+  LANDING_CLICK_W,
+  LANDING_SEARCH_SLACK,
+  BOT_TRIGGER,
+  BOT_RESERVE,
+  BOT_GUARD,
+  BOT_MIN_ODDS,
+  BOT_RETALIATE_TICKS,
+  BOT_RATIO_PORT,
+  BOT_RATIO_FACTORY,
+  BOT_RATIO_SAM,
+  BOT_RATIO_SILO,
+  BOT_RATIO_HQ,
+  BOT_MAX_SILO,
+  BOT_MAX_SAM_LEVEL,
+  BOT_UPGRADE_DENSITY,
+  BOT_CHEST_BASE,
+  BOT_CHEST_WAR,
+  BOT_DRONE_CHANCE_WAR,
+  BOT_DRONE_CHANCE_IDLE,
+  BOT_DRONE_WAVES,
+  BOT_ECON_SHARE,
+  BOT_MAX_SILO_LEVEL,
+  BOT_MAX_FACTORY_LEVEL,
+  BOT_QUEUE_BATCH,
+  cellFactor,
+  COMMITTED_COUNTS,
+  DEF_FLOOR,
+  RATIO_COST_MIN,
+  RATIO_COST_MAX,
+  WAVE_SCALE_MAX,
+  FORT_SLOW,
   WEAK_COUNT,
   STRONG_COUNT,
   WEAK_GROWTH,
@@ -93,7 +134,6 @@ import {
   STRONG_NAMES,
   weakNames,
   pickShuffled,
-  chaikin,
   dpSimplify,
 } from './constants';
 
@@ -158,16 +198,40 @@ export class Game {
   difficulty: Difficulty = 'normal';
   infMoney = false; // настройка лобби: у людей всегда 10млрд денег
   infArmy = false; // настройка лобби: у людей армия сразу 100млн (мгновенно)
-  // грубая водная сетка для поиска морских путей (обход островов)
+  // Водная модель карты (см. server/map/water.ts): океан ≠ вода, компоненты
+  // связности воды, берег. Пересобирается только при генерации карты.
+  ocean: Uint8Array = new Uint8Array(0); // 1 = вода, связанная с краем карты
+  lake: Uint8Array = new Uint8Array(0); // 1 = вода, НЕ связанная с океаном
+  private coastal: Uint8Array = new Uint8Array(0); // 1 = вода у берега
+  shore: Uint8Array = new Uint8Array(0); // 1 = суша, примыкающая к океану
+  private waterId: Int32Array = new Int32Array(0); // компонента воды (-1 = суша)
+  // грубая водная сетка для поиска морских путей (обход островов). Блок проходим,
+  // если в нём есть ХОТЯ БЫ одна водная клетка («вода побеждает», как minimap в
+  // OpenFront) — узкие проливы и будущие реки не теряются. Поэтому грубый путь —
+  // только коридор-подсказка, он уточняется точным поиском (waterPathCorridor).
   private cw = 0;
   private ch = 0;
   private ck = 1; // коэффициент огрубления
   private cwater: Uint8Array = new Uint8Array(0); // 1 = проходимая вода
+  // переиспользуемые буферы грубого BFS и маски коридора
+  private coarsePrev: Int32Array = new Int32Array(0);
+  private coarseSeen: Int32Array = new Int32Array(0); // «поколение» посещения блока
+  private coarseGen = 0;
+  private coarseG: Int32Array = new Int32Array(0); // стоимость пути до блока
+  private coarseHeapCell: Int32Array = new Int32Array(0);
+  private coarseHeapKey: Int32Array = new Int32Array(0);
+  private corrStamp: Int32Array = new Int32Array(0);
+  private corrGen = 0;
+  // сколько новых морских маршрутов ещё можно построить в этом тике
+  private routeBudget = ROUTE_BUDGET;
   // переиспользуемые буферы для пиксельного A*-поиска морского пути (строго по воде)
   private finePrev: Int32Array = new Int32Array(0);
   private fineDisc: Int32Array = new Int32Array(0); // «поколение» открытия клетки
   private fineClosed: Int32Array = new Int32Array(0);
   private fineG: Int32Array = new Int32Array(0); // стоимость пути до клетки
+  // ДЛИНА пути в шагах (без штрафа за прибрежность): по ней сравниваются варианты
+  // высадки, иначе штраф ×3 искажает выбор в пользу берега рядом с нашим
+  private fineSteps: Int32Array = new Int32Array(0);
   private heapCell: Int32Array = new Int32Array(0);
   private heapKey: Int32Array = new Int32Array(0);
   private fineGen = 0;
@@ -230,74 +294,285 @@ export class Game {
     this.buildWaterGrid();
   }
 
-  // Грубая сетка воды: блок K×K проходим, если он полностью вода. Так корабль
-  // держится открытого моря и не режет острова.
+  // Водные поля карты + грубая сетка для поиска морских путей.
+  //
+  // Раньше блок 5×5 считался водой только если в нём НОЛЬ суши: узкие проливы и
+  // реки исчезали с сетки, и приходилось вручную прорубать коридоры (CANALS), а
+  // сглаженный маршрут всё равно резал сушу. Теперь, как minimap в OpenFront,
+  // огрубление вдвое (k=2) и «вода побеждает» — блок проходим, если в нём есть
+  // хоть одна водная клетка. Узкая вода сохраняется, а оптимистичность правила
+  // компенсируется уточнением пути точным поиском (см. waterRoute).
   private buildWaterGrid() {
-    this.ck = Math.max(1, Math.round(this.w / 400));
+    const f = buildWaterFields(this.terrain, this.w, this.h);
+    this.ocean = f.ocean;
+    this.lake = f.lake;
+    this.coastal = f.coastal;
+    this.shore = f.shore;
+    this.waterId = f.waterId;
+    this.ck = this.w > 900 ? 2 : 1; // мелкие карты и так считаем точно
     const k = this.ck;
     this.cw = Math.ceil(this.w / k);
     this.ch = Math.ceil(this.h / k);
-    this.cwater = new Uint8Array(this.cw * this.ch);
-    for (let cy = 0; cy < this.ch; cy++) {
-      for (let cx = 0; cx < this.cw; cx++) {
-        let land = 0;
-        let total = 0;
-        for (let dy = 0; dy < k; dy++) {
-          for (let dx = 0; dx < k; dx++) {
-            const x = cx * k + dx;
-            const y = cy * k + dy;
-            if (x >= this.w || y >= this.h) continue;
-            total++;
-            if (this.terrain[y * this.w + x]) land++;
-          }
-        }
-        this.cwater[cy * this.cw + cx] = total > 0 && land === 0 ? 1 : 0;
-      }
-    }
-    // узкие каналы/проливы грубая сетка не видит (блок не полностью водный) —
-    // принудительно открываем судоходный коридор вдоль них
+    // по океану, а не по любой воде: коридор не должен уходить через озеро
+    this.cwater = buildCoarseWater(this.ocean, this.w, this.h, k, this.cw, this.ch);
+    // Каналы (Суэц, Панама) — рукотворные: в данных Natural Earth воды там нет
+    // вовсе, поэтому их по-прежнему прорубаем вручную. Естественные проливы
+    // (Гибралтар, Босфор, Малакка) теперь видны сетке сами.
     if (this.mapType === 'earth') {
       for (const c of canalCoarseCells(this.w, this.h, k, this.cw, this.ch)) {
         this.cwater[c] = 1;
       }
     }
+    const cn = this.cw * this.ch;
+    this.coarsePrev = new Int32Array(cn);
+    this.coarseSeen = new Int32Array(cn);
+    this.coarseGen = 0;
+    this.coarseG = new Int32Array(cn);
+    this.coarseHeapCell = new Int32Array(cn + 1);
+    this.coarseHeapKey = new Int32Array(cn + 1);
+    this.corrStamp = new Int32Array(this.cells);
+    this.corrGen = 0;
+  }
+
+  /** Достижима ли клетка воды `b` из клетки воды `a` морем — за O(1). */
+  private sameWaterBody(a: number, b: number): boolean {
+    return this.waterId[a] >= 0 && this.waterId[a] === this.waterId[b];
+  }
+
+  /** Лучший водный (океанский) сосед клетки берега — точка входа/выхода судна. */
+  private oceanNeighbor(cell: number): number {
+    if (this.ocean[cell]) return cell;
+    const x = cell % this.w;
+    const y = (cell / this.w) | 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= this.w || ny >= this.h) continue;
+        const nc = ny * this.w + nx;
+        if (!this.ocean[nc]) continue;
+        // по диагонали — только если не протискиваемся между двумя мысами
+        if (dx && dy && this.terrain[y * this.w + nx] && this.terrain[ny * this.w + x]) continue;
+        return nc;
+      }
+    }
+    return -1;
+  }
+
+  // Точный A* по воде ВНУТРИ коридора, заданного грубым путём: коридор — это
+  // блоки грубого пути, расширенные на один блок в каждую сторону. Так поиск
+  // остаётся дешёвым (площадь ≈ длина пути × k²), а путь получается строго по
+  // воде, клетка к клетке. Это наш аналог связки MiniMapTransformer +
+  // SmoothingWaterTransformer из OpenFront. corridor = null — искать без
+  // ограничения (страховка, если оптимистичный коридор оказался тупиком).
+  private waterPathCorridor(startCell: number, goalCell: number, corridor: number[] | null): number[] | null {
+    const w = this.w;
+    const h = this.h;
+    const N = this.cells;
+    if (!this.ocean[startCell] || !this.ocean[goalCell]) return null;
+    if (this.finePrev.length !== N) {
+      this.finePrev = new Int32Array(N);
+      this.fineDisc = new Int32Array(N);
+      this.fineClosed = new Int32Array(N);
+      this.fineG = new Int32Array(N);
+      this.fineSteps = new Int32Array(N);
+      this.heapCell = new Int32Array(N + 1);
+      this.heapKey = new Int32Array(N + 1);
+    }
+    // маска коридора
+    let mask = 0;
+    if (corridor) {
+      mask = ++this.corrGen;
+      const k = this.ck;
+      for (const cc of corridor) {
+        const bx = cc % this.cw;
+        const by = (cc / this.cw) | 0;
+        for (let y = (by - 1) * k; y < (by + 2) * k; y++) {
+          if (y < 0 || y >= h) continue;
+          const row = y * w;
+          for (let x = (bx - 1) * k; x < (bx + 2) * k; x++) {
+            if (x < 0 || x >= w) continue;
+            this.corrStamp[row + x] = mask;
+          }
+        }
+      }
+      // концы обязаны быть в коридоре, даже если порт у самого края блока
+      this.corrStamp[startCell] = mask;
+      this.corrStamp[goalCell] = mask;
+    }
+    const gx = goalCell % w;
+    const gy = (goalCell / w) | 0;
+    const gen = ++this.fineGen;
+    const prev = this.finePrev;
+    const disc = this.fineDisc;
+    const closed = this.fineClosed;
+    const g = this.fineG;
+    const hc = this.heapCell;
+    const hk = this.heapKey;
+    let hn = 0;
+    const siftUp = (i: number) => {
+      while (i > 1) {
+        const p = i >> 1;
+        if (hk[p] <= hk[i]) break;
+        const tc = hc[p]; hc[p] = hc[i]; hc[i] = tc;
+        const tk = hk[p]; hk[p] = hk[i]; hk[i] = tk;
+        i = p;
+      }
+    };
+    const siftDown = (i: number) => {
+      for (;;) {
+        let m = i;
+        const l = i << 1;
+        const r = l + 1;
+        if (l <= hn && hk[l] < hk[m]) m = l;
+        if (r <= hn && hk[r] < hk[m]) m = r;
+        if (m === i) break;
+        const tc = hc[m]; hc[m] = hc[i]; hc[i] = tc;
+        const tk = hk[m]; hk[m] = hk[i]; hk[i] = tk;
+        i = m;
+      }
+    };
+    const cheb = (c: number) => {
+      const dx = Math.abs((c % w) - gx);
+      const dy = Math.abs(((c / w) | 0) - gy);
+      return dx > dy ? dx : dy;
+    };
+    const COAST = 3; // держимся открытого моря, у берега идём только в обход
+    disc[startCell] = gen;
+    g[startCell] = 0;
+    prev[startCell] = -1;
+    hc[++hn] = startCell;
+    hk[hn] = cheb(startCell);
+    let found = false;
+    // Потолок на число раскрытых клеток. Без коридора (страховочный проход) поиск
+    // иначе может обойти весь океан — это и был источник пиков по времени тика.
+    // Такой же предохранитель стоит в waterPathFine (EXPLORE_CAP).
+    let explored = 0;
+    const cap = mask ? 200_000 : 60_000;
+    while (hn > 0) {
+      const c = hc[1];
+      hc[1] = hc[hn]; hk[1] = hk[hn]; hn--;
+      if (hn) siftDown(1);
+      if (closed[c] === gen) continue;
+      closed[c] = gen;
+      if (++explored > cap) break;
+      if (c === goalCell) { found = true; break; }
+      const x = c % w;
+      const y = (c / w) | 0;
+      const gc = g[c];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const nc = ny * w + nx;
+          if (!this.ocean[nc] || disc[nc] === gen) continue;
+          if (mask && this.corrStamp[nc] !== mask) continue;
+          if (dx && dy && (this.terrain[y * w + nx] || this.terrain[ny * w + x])) continue;
+          disc[nc] = gen;
+          g[nc] = gc + 1 + (this.coastal[nc] ? COAST : 0);
+          prev[nc] = c;
+          hc[++hn] = nc;
+          hk[hn] = g[nc] + cheb(nc);
+          siftUp(hn);
+        }
+      }
+    }
+    if (!found) return null;
+    const path: number[] = [];
+    for (let c = goalCell; c !== -1; c = prev[c]) path.push(c);
+    path.reverse();
+    return path;
   }
 
   // Путь по воде между грубыми клетками (BFS, 8 направлений). Возвращает
   // список грубых индексов от start к goal или null, если пути нет.
   private waterPath(startC: number, goalC: number): number[] | null {
     if (this.cwater[startC] !== 1 || this.cwater[goalC] !== 1) return null;
-    const n = this.cw * this.ch;
-    const prev = new Int32Array(n).fill(-2);
-    const queue = new Int32Array(n);
-    let head = 0;
-    let tail = 0;
-    queue[tail++] = startC;
+    const cw = this.cw;
+    const ch = this.ch;
+    const prev = this.coarsePrev;
+    const seen = this.coarseSeen;
+    const g = this.coarseG;
+    const hc = this.coarseHeapCell;
+    const hk = this.coarseHeapKey;
+    // Штамп поколения вместо prev.fill(-2): заливка обходит лишь малую часть
+    // сетки, а fill стирал все 432 тыс. блоков на КАЖДЫЙ маршрут. Приём взят из
+    // OpenFront (bumpTraversalGeneration / tileTraversalScratch).
+    const gen = ++this.coarseGen;
+    // Поиск — A* с эвристикой Чебышёва, а не «слепой» BFS. Раньше это была
+    // обычная волна в ширину: без подсказки о направлении она обходила половину
+    // океана (в профиле 18% тика). Эвристика тянет фронт к цели и режет число
+    // раскрытых блоков в разы. Коридору оптимальность не нужна, но с
+    // допустимой эвристикой путь всё равно кратчайший.
+    const gx = goalC % cw;
+    const gy = (goalC / cw) | 0;
+    const cheb = (c: number) => {
+      const dx = Math.abs((c % cw) - gx);
+      const dy = Math.abs(((c / cw) | 0) - gy);
+      return dx > dy ? dx : dy;
+    };
+    let hn = 0;
+    const siftUp = (i: number) => {
+      while (i > 1) {
+        const par = i >> 1;
+        if (hk[par] <= hk[i]) break;
+        const tc = hc[par]; hc[par] = hc[i]; hc[i] = tc;
+        const tk = hk[par]; hk[par] = hk[i]; hk[i] = tk;
+        i = par;
+      }
+    };
+    const siftDown = (i: number) => {
+      for (;;) {
+        let m = i;
+        const l = i << 1;
+        const r = l + 1;
+        if (l <= hn && hk[l] < hk[m]) m = l;
+        if (r <= hn && hk[r] < hk[m]) m = r;
+        if (m === i) break;
+        const tc = hc[m]; hc[m] = hc[i]; hc[i] = tc;
+        const tk = hk[m]; hk[m] = hk[i]; hk[i] = tk;
+        i = m;
+      }
+    };
+    seen[startC] = gen;
+    g[startC] = 0;
     prev[startC] = -1;
-    while (head < tail) {
-      const c = queue[head++];
-      if (c === goalC) break;
-      const cx = c % this.cw;
-      const cy = (c / this.cw) | 0;
+    hc[++hn] = startC;
+    hk[hn] = cheb(startC);
+    let found = false;
+    while (hn > 0) {
+      const c = hc[1];
+      hc[1] = hc[hn]; hk[1] = hk[hn]; hn--;
+      if (hn) siftDown(1);
+      if (c === goalC) { found = true; break; }
+      const cx = c % cw;
+      const cy = (c / cw) | 0;
+      const gc = g[c];
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (!dx && !dy) continue;
           const nx = cx + dx;
           const ny = cy + dy;
-          if (nx < 0 || ny < 0 || nx >= this.cw || ny >= this.ch) continue;
-          const nc = ny * this.cw + nx;
-          if (this.cwater[nc] !== 1 || prev[nc] !== -2) continue;
+          if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+          const nc = ny * cw + nx;
+          if (this.cwater[nc] !== 1 || seen[nc] === gen) continue;
           // диагональ не должна срезать угол суши
           if (dx && dy) {
-            if (this.cwater[cy * this.cw + nx] !== 1 && this.cwater[ny * this.cw + cx] !== 1)
-              continue;
+            if (this.cwater[cy * cw + nx] !== 1 && this.cwater[ny * cw + cx] !== 1) continue;
           }
+          seen[nc] = gen;
+          g[nc] = gc + 1;
           prev[nc] = c;
-          queue[tail++] = nc;
+          hc[++hn] = nc;
+          hk[hn] = gc + 1 + cheb(nc);
+          siftUp(hn);
         }
       }
     }
-    if (prev[goalC] === -2) return null;
+    if (!found) return null;
     const path: number[] = [];
     for (let c = goalC; c !== -1; c = prev[c]) path.push(c);
     path.reverse();
@@ -356,6 +631,31 @@ export class Game {
     return -1;
   }
 
+  // Клетка суши ИМЕННО целевого материка рядом с водной клеткой (конец маршрута
+  // десанта). Раньше брался nearestLandCell в радиусе ck*2 — любая суша, включая
+  // свою и третьих лиц, из-за чего десант мог «высадиться» не на том берегу.
+  private nearestLandCellOfIsland(waterCell: number, land: number, owner = -2): number {
+    const w = this.w;
+    const x = waterCell % w;
+    const y = (waterCell / w) | 0;
+    for (let r = 1; r <= 4; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= this.h) continue;
+        const stepX = Math.abs(dy) === r ? 1 : 2 * r;
+        for (let dx = -r; dx <= r; dx += stepX) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= w) continue;
+          const c = ny * w + nx;
+          if (!this.terrain[c] || this.landId[c] !== land) continue;
+          if (owner !== -2 && this.owners[c] !== owner) continue;
+          return c;
+        }
+      }
+    }
+    return -1;
+  }
+
   // ближайшая клетка суши, принадлежащая игроку owner (для точки посадки десанта —
   // чтобы десант выходил именно с нашего берега, даже если вражеский ближе)
   private nearestOwnedLand(owner: number, px: number, py: number, maxR: number): number {
@@ -372,15 +672,10 @@ export class Game {
     return -1;
   }
 
-  // клетка воды считается «прибрежной», если рядом (4-соседство) есть суша
+  // клетка воды «прибрежная», если рядом (4-соседство) есть суша — предпосчитано
+  // при генерации карты (было 4 чтения массива на каждого соседа в цикле A*)
   private isCoastalCell(x: number, y: number): boolean {
-    const w = this.w, t = this.terrain;
-    return (
-      (x > 0 && !!t[y * w + x - 1]) ||
-      (x < w - 1 && !!t[y * w + x + 1]) ||
-      (y > 0 && !!t[(y - 1) * w + x]) ||
-      (y < this.h - 1 && !!t[(y + 1) * w + x])
-    );
+    return this.coastal[y * this.w + x] === 1;
   }
 
   // Пиксельный A*-поиск морского пути СТРОГО по воде от водных клеток-засева
@@ -388,7 +683,13 @@ export class Game {
   // материку с этим landId (десант к берегу); targetLand < 0 — сама точка (cx,cy)
   // (боевой корабль идёт в морскую зону). Путь держится открытой воды, проходит
   // проливы, по суше НЕ идёт. null — цель морем недостижима.
-  private waterPathFine(seeds: number[], targetLand: number, cx: number, cy: number): number[] | null {
+  private waterPathFine(
+    seeds: number[],
+    targetLand: number,
+    cx: number,
+    cy: number,
+    landOwner = -2,
+  ): number[] | null {
     const w = this.w, h = this.h, N = w * h;
     const gx = cx, gy = cy; // эвристика тянет к точке цели
     const R2 = 25; // окно «дошли вплотную к цели» (5 клеток)
@@ -398,11 +699,13 @@ export class Game {
       this.fineDisc = new Int32Array(N);
       this.fineClosed = new Int32Array(N);
       this.fineG = new Int32Array(N);
+      this.fineSteps = new Int32Array(N);
       this.heapCell = new Int32Array(N + 1);
       this.heapKey = new Int32Array(N + 1);
     }
     const gen = ++this.fineGen;
     const prev = this.finePrev, disc = this.fineDisc, closed = this.fineClosed, g = this.fineG;
+    const steps = this.fineSteps;
     const hc = this.heapCell, hk = this.heapKey;
     let hn = 0;
     const cheb = (c: number) => {
@@ -437,18 +740,31 @@ export class Game {
     // засев: все переданные водные клетки у берега игрока
     for (const c of seeds) {
       if (c < 0 || c >= N || this.terrain[c] || disc[c] === gen) continue;
-      disc[c] = gen; g[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c);
+      disc[c] = gen; g[c] = 0; steps[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c);
     }
     if (hn === 0) return null;
-    // вода примыкает к материку цели? (4-соседство — любая клетка СУШИ (terrain>0:
-    // трава/песок/камень/снег) с landId=targetLand). Важно: снег (Антарктида,
-    // арктические острова) — тоже суша, поэтому проверяем >0, а не ===1
+    // Годится ли клетка суши как берег высадки: тот же материк и, если задан
+    // landOwner, — именно его земля.
+    //
+    // Фильтр по владельцу обязателен, когда цель на НАШЕМ ЖЕ материке (общая
+    // сухопутная граница): без него «берегом цели» оказывался и наш собственный
+    // берег — он на том же материке, да ещё и с нулевой стоимостью рейса (это
+    // засев). Десант «высаживался» на свою землю в двух клетках от старта, то есть
+    // выплывал и сразу возвращался. Замер: 50% запусков по соседу с общей
+    // границей. Снег (Антарктида, арктические острова) — тоже суша, поэтому
+    // проверяем terrain > 0, а не === 1.
+    const okLand = (lc: number) =>
+      this.terrain[lc] > 0 &&
+      this.landId[lc] === targetLand &&
+      (landOwner === -2 || this.owners[lc] === landOwner);
     const touchesTarget = (x: number, y: number) =>
-      (x > 0 && this.terrain[y * w + x - 1] > 0 && this.landId[y * w + x - 1] === targetLand) ||
-      (x < w - 1 && this.terrain[y * w + x + 1] > 0 && this.landId[y * w + x + 1] === targetLand) ||
-      (y > 0 && this.terrain[(y - 1) * w + x] > 0 && this.landId[(y - 1) * w + x] === targetLand) ||
-      (y < h - 1 && this.terrain[(y + 1) * w + x] > 0 && this.landId[(y + 1) * w + x] === targetLand);
+      (x > 0 && okLand(y * w + x - 1)) ||
+      (x < w - 1 && okLand(y * w + x + 1)) ||
+      (y > 0 && okLand((y - 1) * w + x)) ||
+      (y < h - 1 && okLand((y + 1) * w + x));
     let endCell = -1, bestCell = -1, bestD = Infinity, explored = 0;
+    let bestScore = Infinity; // лучшая оценка варианта высадки (см. ниже)
+    let foundAt = -1; // на каком шаге нашли первый вариант
     // страховка от «недостижимого» берега: если исследовали слишком много воды и
     // так и не коснулись цели — считаем недостижимым (обычному маршруту хватает тысяч)
     const EXPLORE_CAP = 300_000;
@@ -460,16 +776,38 @@ export class Game {
       closed[c] = gen;
       if (++explored > EXPLORE_CAP) break;
       const x = c % w, y = (c / w) | 0;
+      const gc = g[c];
       const ex = x - gx, ey = y - gy, ed = ex * ex + ey * ey;
       if (pointMode) {
         // цель — морская точка: ближайшую всегда помним, финиш вплотную
         if (ed < bestD) { bestD = ed; bestCell = c; }
         if (ed <= 4) { endCell = c; break; }
-      } else if (touchesTarget(x, y)) { // вода у берега цели — кандидат на высадку
-        if (ed < bestD) { bestD = ed; bestCell = c; }
-        if (ed <= R2) { endCell = c; break; } // прямо у точки клика — финиш
+      } else if (touchesTarget(x, y)) {
+        // Вода у берега цели — кандидат на высадку. Оценка варианта:
+        //   score = стоимость рейса (g) + LANDING_CLICK_W · удалённость от клика.
+        // Раньше выбирался просто БЛИЖАЙШИЙ к клику берег. При клике внутрь
+        // территории (а так обычно и целятся) ближайший к клику берег часто на
+        // противоположной от нас стороне материка — десант шёл вокруг, и старт
+        // получался с дальней точки. Замер на случайной карте: 28% запусков с
+        // рейсом ≥1.5× длиннее необходимого, худший — 934 клетки вместо 174.
+        // Длина рейса в ШАГАХ, а не в стоимости g: g содержит штраф ×3 за
+        // прибрежные клетки, из-за которого «дорогой» дальний рейс проигрывал
+        // высадке у самого нашего берега — при общей сухопутной границе десант
+        // высаживался в двух клетках от старта вместо места клика.
+        const score = steps[c] + LANDING_CLICK_W * Math.sqrt(ed);
+        if (score < bestScore) { bestScore = score; bestCell = c; }
+        if (foundAt < 0) foundAt = explored;
+        // ДОШЛИ до места клика (вода у берега цели в пяти клетках от него) —
+        // дальше искать нечего, это и есть желаемая высадка. Эвристика поиска
+        // тянет фронт к клику, поэтому такой финиш и дёшев, и предсказуем.
+        if (ed <= R2) { endCell = c; break; }
+        // Страховка на случай, когда до клика морем не добраться вовсе: тогда
+        // берём лучший из найденных вариантов, изучив ограниченный запас. Предел
+        // должен быть БОЛЬШИМ: первый вариант часто находится у нашего же берега,
+        // и маленький запас (пробовал 1200) обрывал поиск задолго до клика — из-за
+        // этого вес близости к клику вообще ни на что не влиял.
+        if (explored > foundAt + LANDING_SEARCH_SLACK) break;
       }
-      const gc = g[c];
       for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++) {
           if (!dx && !dy) continue;
@@ -480,6 +818,7 @@ export class Game {
           // не срезаем угол суши по диагонали
           if (dx && dy && (this.terrain[y * w + nx] || this.terrain[ny * w + x])) continue;
           disc[nc] = gen; g[nc] = gc + 1 + (this.isCoastalCell(nx, ny) ? COAST : 0); prev[nc] = c;
+          steps[nc] = steps[c] + 1;
           hc[++hn] = nc; hk[hn] = g[nc] + cheb(nc); siftUp(hn);
         }
     }
@@ -591,6 +930,22 @@ export class Game {
     }
   }
 
+  // Соседи по 4 направлениям в переиспользуемый буфер; возвращает их число.
+  // В горячих циклах (стройка фронта, шаг атаки) это заметно дешевле, чем
+  // forNeighbors с колбэком: там на КАЖДУЮ клетку создаётся замыкание, которое
+  // к тому же мешает движку встроить вызов. Так же сделано в OpenFront
+  // (GameMap.neighbors4(tile, buf) с буферами-полями вместо forEachNeighbor).
+  private nbuf: Int32Array = new Int32Array(4);
+  private neighbors4(c: number, buf: Int32Array): number {
+    const x = c % this.w;
+    let n = 0;
+    if (x > 0) buf[n++] = c - 1;
+    if (x < this.w - 1) buf[n++] = c + 1;
+    if (c >= this.w) buf[n++] = c - this.w;
+    if (c < this.cells - this.w) buf[n++] = c + this.w;
+    return n;
+  }
+
   private forNeighbors(c: number, fn: (n: number) => void) {
     const x = c % this.w;
     if (x > 0) fn(c - 1);
@@ -680,7 +1035,7 @@ export class Game {
     p.spawned = true;
     p.spawnTick = this.tickNo;
     p.thinkAt = this.tickNo + 5; // расширяться начинаем сразу, без застоя
-    p.troops = (150 + p.cells * 12) * p.maxMul + 1500;
+    p.troops = (150 + cellFactor(p.cells) * 12) * p.maxMul + 1500;
     return true;
   }
 
@@ -824,71 +1179,33 @@ export class Game {
     return this.launchBoat(playerId, cell, Math.floor(p.troops * r));
   }
 
-  // все водные клетки, примыкающие к берегу игрока — засев для морского маршрута
-  private coastalWaterOf(playerId: number): number[] {
-    const out: number[] = [];
-    const w = this.w, h = this.h;
+
+
+
+
+
+  // Вода, примыкающая к нашему берегу: и засев морского маршрута, и множество
+  // достижимых нами водных бассейнов. Один проход по своим клеткам вместо двух.
+  private ownShoreWater(playerId: number): { seeds: number[]; comps: Set<number> } {
+    const seeds: number[] = [];
+    const comps = new Set<number>();
+    const w = this.w;
+    const h = this.h;
+    const add = (n: number) => {
+      if (this.terrain[n] || !this.ocean[n]) return; // только океан, не озёра
+      seeds.push(n);
+      comps.add(this.waterId[n]);
+    };
     for (const c of this.playerCells(playerId)) {
       if (this.owners[c] !== playerId) continue;
-      const x = c % w, y = (c / w) | 0;
-      if (x > 0 && !this.terrain[c - 1]) out.push(c - 1);
-      if (x < w - 1 && !this.terrain[c + 1]) out.push(c + 1);
-      if (y > 0 && !this.terrain[c - w]) out.push(c - w);
-      if (y < h - 1 && !this.terrain[c + w]) out.push(c + w);
+      const x = c % w;
+      const y = (c / w) | 0;
+      if (x > 0) add(c - 1);
+      if (x < w - 1) add(c + 1);
+      if (y > 0) add(c - w);
+      if (y < h - 1) add(c + w);
     }
-    return out;
-  }
-
-  // прилегающая к берегу игрока вода в радиусе R вокруг ближайшей к (tx,ty)
-  // береговой клетки — чтобы десант выходил с ближайшей к высадке точки берега
-  private nearCoastalWaterOf(playerId: number, tx: number, ty: number, R: number): number[] {
-    const w = this.w, h = this.h;
-    let bestCoast = -1, bestD = Infinity;
-    for (const c of this.playerCells(playerId)) {
-      if (this.owners[c] !== playerId) continue;
-      const x = c % w, y = (c / w) | 0;
-      const coastal =
-        (x > 0 && !this.terrain[c - 1]) || (x < w - 1 && !this.terrain[c + 1]) ||
-        (y > 0 && !this.terrain[c - w]) || (y < h - 1 && !this.terrain[c + w]);
-      if (!coastal) continue;
-      const d = (x - tx) ** 2 + (y - ty) ** 2;
-      if (d < bestD) { bestD = d; bestCoast = c; }
-    }
-    if (bestCoast < 0) return [];
-    const bx = bestCoast % w, by = (bestCoast / w) | 0, R2 = R * R;
-    const out: number[] = [];
-    for (let dy = -R; dy <= R; dy++)
-      for (let dx = -R; dx <= R; dx++) {
-        if (dx * dx + dy * dy > R2) continue;
-        const x = bx + dx, y = by + dy;
-        if (x < 0 || y < 0 || x >= w || y >= h) continue;
-        const c = y * w + x;
-        if (!this.terrain[c]) out.push(c);
-      }
-    return out;
-  }
-
-  // берег материка клетки targetCell, ближайший к (fromX,fromY) — точка высадки
-  private landingShore(targetCell: number, fromX: number, fromY: number): number {
-    const land = this.landId[targetCell];
-    let best = targetCell;
-    let bestD = Infinity;
-    for (let c = 0; c < this.cells; c++) {
-      if (this.landId[c] !== land) continue;
-      let coastal = false;
-      this.forNeighbors(c, (n) => {
-        if (!this.terrain[n]) coastal = true;
-      });
-      if (!coastal) continue;
-      const dx = (c % this.w) - fromX;
-      const dy = ((c / this.w) | 0) - fromY;
-      const d = dx * dx + dy * dy;
-      if (d < bestD) {
-        bestD = d;
-        best = c;
-      }
-    }
-    return best;
+    return { seeds, comps };
   }
 
   // Морской десант: маршрут по воде от берега игрока к берегу цели (в обход суши)
@@ -899,54 +1216,54 @@ export class Game {
     let afloat = 0;
     for (const b of this.boats) if (b.player === playerId && ++afloat >= MAX_BOATS) break;
     if (afloat >= MAX_BOATS) return false;
-    const tx = targetCell % this.w;
-    const ty = (targetCell / this.w) | 0;
-    // берег высадки — кромка целевого материка у самой точки клика (а не у
-    // нашего берега), чтобы высаживаться туда, куда целишься, в т.ч. на свой
-    // же остров рядом с врагом
-    let landCell = this.landingShore(targetCell, tx, ty);
+    // наш выход к морю: вода у своего берега + бассейны, куда мы вообще можем плыть
+    const own = this.ownShoreWater(playerId);
+    if (own.seeds.length === 0) return false; // нет выхода к морю
+    // Клетка высадки и точка отправки выбираются ОДНИМ поиском: засеваем все свои
+    // выходы к морю с нулевой ценой, и A* сам находит вариант высадки с лучшей
+    // оценкой «короткий рейс + рядом с кликом» (см. waterPathFine), а началом пути
+    // оказывается тот наш берег, с которого этот рейс и идёт — то есть ближайший
+    // к цели по воде. Это логика closestShoreByWater из OpenFront.
+    const lx0 = targetCell % this.w;
+    const ly0 = (targetCell / this.w) | 0;
+    const targetLand = this.landId[targetCell];
+    // Высаживаемся на берег ТОГО, по кому кликнули (владелец кликнутой клетки;
+    // 0 — нейтраль). Иначе на своём же материке «берегом цели» оказывается наш
+    // собственный берег, и лодка возвращается, не доплыв до врага.
+    const victim = this.owners[targetCell];
+    const fine = this.waterPathFine(own.seeds, targetLand, lx0, ly0, victim);
+    if (!fine) return false;
+    // фактическая клетка высадки — берег цели у конца найденного маршрута
+    const arr = fine[fine.length - 1];
+    const landCell = this.nearestLandCellOfIsland(arr, targetLand, victim);
+    if (landCell < 0) return false;
     const lx = landCell % this.w;
     const ly = (landCell / this.w) | 0;
-    const targetLand = this.landId[landCell];
-    // Сначала пробуем выйти с БЛИЖАЙШЕГО к высадке берега (десант стартует рядом
-    // с целью). Если оттуда морем не пройти (заперто) — засеваем весь берег.
-    let fine = this.waterPathFine(this.nearCoastalWaterOf(playerId, lx, ly, 10), targetLand, lx, ly);
-    if (!fine) {
-      const seeds = this.coastalWaterOf(playerId);
-      if (seeds.length === 0) return false; // нет выхода к морю
-      fine = this.waterPathFine(seeds, targetLand, lx, ly);
-    }
-    if (!fine) return false;
-    // фактическая клетка высадки — суша цели у конца маршрута (лодка могла прийти
-    // не точно в кликнутую точку, если та в отрезанном фьорде)
-    const arr = fine[fine.length - 1];
-    const near = this.nearestLandCell(arr % this.w, (arr / this.w) | 0, this.ck * 2);
-    if (near >= 0) landCell = near;
     // отправка десанта на чужую территорию — уже объявление войны: жертва
     // становится врагом сразу (её корабли начинают бить наш десант в пути)
-    const victim = this.owners[landCell];
     if (victim > 0 && victim !== playerId) this.markHostile(playerId, victim);
-    // точка старта = НАШ берег рядом с началом маршрута. Ищем именно свою сушу
-    // (иначе при десанте «в упор» к врагу ближайшей сушей к воде оказывается его
-    // берег, и лодка визуально стартовала бы с вражеской территории)
+    // Засев — вода, примыкающая к нашей суше, поэтому наш берег ровно в одной
+    // клетке от начала маршрута. Если его там нет — что-то не так, и лодку лучше
+    // не выпускать вовсе, чем стартовать из открытого моря (именно так выглядел
+    // баг «десант стартует с моря»: радиус поиска берега не находил сушу, и
+    // стартовой точкой становилась сама водная клетка).
     const startCell = fine[0];
     const sxw = startCell % this.w, syw = (startCell / this.w) | 0;
-    let embark = this.nearestOwnedLand(playerId, sxw, syw, this.ck * 2);
-    if (embark < 0) embark = this.nearestLandCell(sxw, syw, this.ck * 2); // подстраховка
-    const sx = embark >= 0 ? embark % this.w : sxw;
-    const sy = embark >= 0 ? (embark / this.w) | 0 : syw;
+    const embark = this.nearestOwnedLand(playerId, sxw, syw, 2);
+    if (embark < 0) return false;
+    const sx = embark % this.w;
+    const sy = (embark / this.w) | 0;
     // Путь: наш берег → клетки A* (строго вода) → берег высадки. Засев A* у берега,
     // поэтому переход берег↔вода — всего пара клеток (лодка стартует ОТ берега и
     // причаливает К берегу), а вся середина маршрута идёт по воде.
-    const raw: number[] = [sx + 0.5, sy + 0.5];
-    for (let i = 0; i < fine.length; i++) {
-      const c = fine[i];
-      raw.push((c % this.w) + 0.5, ((c / this.w) | 0) + 0.5);
+    // Спрямляем плотный водный путь так, что КАЖДЫЙ отрезок проверен как
+    // полностью водный (раньше было chaikin + Дуглас–Пекер с eps 0.8: срезание
+    // углов и допуск давали лодке заезжать на мыс примерно на клетку).
+    const path: number[] = [sx + 0.5, sy + 0.5];
+    for (const c of smoothWaterPath(this.terrain, this.w, this.h, fine)) {
+      path.push((c % this.w) + 0.5, ((c / this.w) | 0) + 0.5);
     }
-    raw.push((landCell % this.w) + 0.5, ((landCell / this.w) | 0) + 0.5);
-    // сглаживаем плотный водный путь (держится воды), затем прорежаем по Дугласу–
-    // Пекеру — компактно и в пределах ~пикселя от воды, без «вылезаний» на сушу
-    const path = dpSimplify(chaikin(raw), 0.8);
+    path.push((landCell % this.w) + 0.5, ((landCell / this.w) | 0) + 0.5);
     // накопленная длина маршрута
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2) {
@@ -997,10 +1314,12 @@ export class Game {
     if (!seeds.length) return null;
     const fine = this.waterPathFine(seeds, -1, wx, wy);
     if (!fine) return null;
-    const raw: number[] = [fromX + 0.5, fromY + 0.5];
-    for (const c of fine) raw.push((c % w) + 0.5, ((c / w) | 0) + 0.5);
-    raw.push(wx + 0.5, wy + 0.5);
-    const path = dpSimplify(chaikin(raw), 0.8);
+    // спрямление с проверкой воды на каждом отрезке (см. launchBoat)
+    const path: number[] = [fromX + 0.5, fromY + 0.5];
+    for (const c of smoothWaterPath(this.terrain, w, h, fine)) {
+      path.push((c % w) + 0.5, ((c / w) | 0) + 0.5);
+    }
+    path.push(wx + 0.5, wy + 0.5);
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2)
       cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
@@ -1687,13 +2006,15 @@ export class Game {
   private canBuildPort(playerId: number, cell: number): boolean {
     if (cell < 0 || cell >= this.cells || !this.terrain[cell]) return false;
     if (this.owners[cell] !== playerId) return false;
-    let coastal = false;
+    // берег именно ОКЕАНА (shore), а не любой воды: на берегу озера порт был бы
+    // построен, но не дал бы ни одного маршрута — деньги в пустоту. Река,
+    // впадающая в море, — тоже океан, поэтому речные порты заработают сами.
+    if (!this.shore[cell]) return false;
     let enemyAdj = false;
     this.forNeighbors(cell, (n) => {
-      if (!this.terrain[n]) coastal = true;
-      else if (this.owners[n] !== playerId) enemyAdj = true;
+      if (this.terrain[n] && this.owners[n] !== playerId) enemyAdj = true;
     });
-    if (!coastal || enemyAdj) return false;
+    if (enemyAdj) return false;
     return !this.buildings.some((b) => b.cell === cell);
   }
 
@@ -1791,6 +2112,7 @@ export class Game {
         fuseTick: 0,
         upStart: 0,
         upEnd: 0,
+        upQueue: 0,
         nextShipTick: 0,
         ships: 0,
         stock: 0,
@@ -1821,6 +2143,7 @@ export class Game {
         fuseTick: 0,
         upStart: 0,
         upEnd: 0,
+        upQueue: 0,
         nextShipTick: 0,
         ships: 0,
         stock: 0,
@@ -1849,6 +2172,7 @@ export class Game {
         fuseTick: 0,
         upStart: 0,
         upEnd: 0,
+        upQueue: 0,
         nextShipTick: 0,
         ships: 0,
         stock: 0,
@@ -1876,6 +2200,7 @@ export class Game {
         fuseTick: 0,
         upStart: 0,
         upEnd: 0,
+        upQueue: 0,
         nextShipTick: 0,
         ships: 0,
         stock: 1, // одна ракета готова к пуску после постройки
@@ -1904,6 +2229,7 @@ export class Game {
         fuseTick: 0,
         upStart: 0,
         upEnd: 0,
+        upQueue: 0,
         nextShipTick: 0,
         ships: 0,
         stock: 0,
@@ -1934,6 +2260,7 @@ export class Game {
       fuseTick: 0,
       upStart: 0,
       upEnd: 0,
+      upQueue: 0,
       nextShipTick: 0,
       ships: 0,
       stock: 0,
@@ -1972,32 +2299,54 @@ export class Game {
       b.level++; // завод апгрейдится мгновенно
       return null;
     }
-    if (b.upEnd > 0) return 'Уже улучшается';
+    // Апгрейды с временем постройки (шахта, ПВО, штаб) можно накликать ВПЕРЁД:
+    // повторный клик оплачивает следующий уровень и ставит его в очередь, вместо
+    // ответа «Уже улучшается». Оплата считается по БУДУЩЕМУ уровню (с учётом уже
+    // стоящих в очереди), иначе можно было бы накликать пачку по цене первого.
+    const queued = b.upQueue; // сколько уже оплачено сверх текущего апгрейда
+    const inProgress = b.upEnd > 0 ? 1 : 0;
+    const pending = inProgress + queued;
+    if (pending >= UPGRADE_QUEUE_MAX) return 'Очередь улучшений заполнена';
     if (b.type === 'silo') {
       // шахта: апгрейд по 1млн, идёт 5с; уровень = размер залпа
       if (p.money < SILO_COST) return 'Недостаточно денег';
       p.money -= SILO_COST;
+      if (pending > 0) { b.upQueue++; return null; }
       b.upStart = this.tickNo;
       b.upEnd = this.tickNo + SILO_BUILD_TICKS;
       return null;
     }
     if (b.type === 'sam') {
-      // ПВО: апгрейд «в общем» по сумме уровней, идёт 5с; уровень = число перехватов
-      const cost = samCost(this.samLevels(playerId));
+      // ПВО: апгрейд «в общем» по сумме уровней, идёт 5с; уровень = число перехватов.
+      // В сумму уровней добавляем всё, что уже стоит в очереди у наших ПВО.
+      const cost = samCost(this.samLevels(playerId) + this.pendingUpgrades(playerId, 'sam'));
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
+      if (pending > 0) { b.upQueue++; return null; }
       b.upStart = this.tickNo;
       b.upEnd = this.tickNo + SAM_BUILD_TICKS;
       return null;
     }
-    if (b.level >= MAX_HQ_LEVEL) return 'Максимальный уровень';
-    const toLevel = b.level + 1;
+    if (b.level + pending >= MAX_HQ_LEVEL) return 'Максимальный уровень';
+    const toLevel = b.level + pending + 1;
     const cost = hqUpgradeCost(toLevel);
     if (p.money < cost) return 'Недостаточно денег';
     p.money -= cost;
+    if (pending > 0) { b.upQueue++; return null; }
     b.upStart = this.tickNo;
     b.upEnd = this.tickNo + hqUpgradeTicks(toLevel);
     return null;
+  }
+
+  /** Сколько апгрейдов данного типа у игрока сейчас в работе и в очереди. */
+  private pendingUpgrades(playerId: number, type: BuildingType): number {
+    let n = 0;
+    for (const b of this.buildings) {
+      if (b.owner !== playerId || b.type !== type) continue;
+      if (b.upEnd > 0) n++;
+      n += b.upQueue;
+    }
+    return n;
   }
 
   // --- Связи (союзы/вражда) ---
@@ -2164,23 +2513,39 @@ export class Game {
     const key = fromCell * this.cells + toCell;
     const cached = this.routeCache.get(key);
     if (cached !== undefined) return cached;
+    // Новый маршрут — это точный поиск по воде, самая дорогая операция в тике.
+    // Готовые лежат в кэше (порты статичны), но когда портов много, в один тик
+    // может прилететь десяток первых запросов сразу — отсюда пики по 57 мс.
+    // Считаем не больше ROUTE_BUDGET новых маршрутов за тик, остальные подождут
+    // следующего: судно просто не отправится этим тиком.
+    if (this.routeBudget <= 0) return null;
+    this.routeBudget--;
     const sx = fromCell % this.w;
     const sy = (fromCell / this.w) | 0;
     const lx = toCell % this.w;
     const ly = (toCell / this.w) | 0;
     let result: { path: number[]; cum: number[]; totalLen: number } | null = null;
-    const startC = this.nearestWaterCoarse(sx, sy);
-    const goalC = this.nearestWaterCoarse(lx, ly);
-    if (startC >= 0 && goalC >= 0) {
-      const coarse = this.waterPath(startC, goalC);
-      if (coarse) {
-        const raw: number[] = [sx + 0.5, sy + 0.5];
-        for (let i = 0; i < coarse.length; i += 2) {
-          const cc = coarse[i];
-          raw.push((cc % this.cw) * this.ck + this.ck / 2, ((cc / this.cw) | 0) * this.ck + this.ck / 2);
-        }
-        raw.push(lx + 0.5, ly + 0.5);
-        const path = chaikin(chaikin(raw));
+    // Порты стоят на суше — судно выходит/входит через океанскую клетку рядом.
+    const startW = this.oceanNeighbor(fromCell);
+    const goalW = this.oceanNeighbor(toCell);
+    // O(1) отсечение недостижимого: разные водные бассейны — маршрута нет, и мы
+    // не тратим обход всей карты (как ComponentCheckTransformer в OpenFront)
+    if (startW >= 0 && goalW >= 0 && this.sameWaterBody(startW, goalW)) {
+      // 1) грубый коридор (сетка оптимистична — «вода побеждает»)
+      const startC = this.nearestWaterCoarse(startW % this.w, (startW / this.w) | 0);
+      const goalC = this.nearestWaterCoarse(goalW % this.w, (goalW / this.w) | 0);
+      const coarse = startC >= 0 && goalC >= 0 ? this.waterPath(startC, goalC) : null;
+      // 2) точный путь по воде внутри коридора; если коридор оказался тупиком
+      // (правило «вода побеждает» могло его наврать) — ищем без ограничения
+      let cells = coarse ? this.waterPathCorridor(startW, goalW, coarse) : null;
+      if (!cells) cells = this.waterPathCorridor(startW, goalW, null);
+      if (cells && cells.length) {
+        // 3) спрямление: из тысяч клеток остаётся десяток точек, и КАЖДЫЙ
+        // отрезок между ними проверен как полностью водный
+        const keep = smoothWaterPath(this.terrain, this.w, this.h, cells);
+        const path: number[] = [sx + 0.5, sy + 0.5]; // от самого порта
+        for (const c of keep) path.push((c % this.w) + 0.5, ((c / this.w) | 0) + 0.5);
+        path.push(lx + 0.5, ly + 0.5); // и до самого порта-получателя
         const cum: number[] = [0];
         for (let i = 2; i < path.length; i += 2) {
           cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
@@ -2646,6 +3011,7 @@ export class Game {
             b.reloads = []; // ПВО достаётся с полными зарядами
             b.upStart = 0;
             b.upEnd = 0;
+            b.upQueue = 0; // очередь улучшений прежнего хозяина не наследуется
           } else {
             remove.add(b);
           }
@@ -2653,6 +3019,12 @@ export class Game {
           b.level++; // апгрейд завершён (силос — залп, ПВО — число перехватов)
           b.upStart = 0;
           b.upEnd = 0;
+          if (b.upQueue > 0) {
+            // следующий уровень из очереди — он уже оплачен при клике
+            b.upQueue--;
+            b.upStart = this.tickNo;
+            b.upEnd = this.tickNo + (b.type === 'silo' ? SILO_BUILD_TICKS : SAM_BUILD_TICKS);
+          }
         }
         continue;
       }
@@ -2818,6 +3190,7 @@ export class Game {
 
   tick() {
     this.tickNo++;
+    this.routeBudget = ROUTE_BUDGET;
     // здание завершилось на этом тике — пересобрать поле укреплений
     for (const b of this.buildings) if (b.readyTick === this.tickNo) this.fortDirty = true;
     this.checkBuildings(); // захват/фитиль/взрыв щитов
@@ -2834,6 +3207,7 @@ export class Game {
     // заводы: число и суммарный % ускорения регена по игрокам (деньги — через грузовики)
     const facN = new Map<number, number>();
     const facPct = new Map<number, number>();
+    const facGold = new Map<number, number>(); // доход заводов за тик
     for (const b of this.buildings) {
       if (this.tickNo < b.readyTick) continue;
       if (b.type === 'city') {
@@ -2841,15 +3215,29 @@ export class Game {
       } else if (b.type === 'factory') {
         facN.set(b.owner, (facN.get(b.owner) || 0) + 1);
         facPct.set(b.owner, (facPct.get(b.owner) || 0) + factoryBoostPct(b.level));
+        // Доход завода за тик. Функция factoryIncome существовала с самого начала,
+        // но нигде не вызывалась: заводы «добывали золото» только на словах, а на
+        // деле давали лишь ускорение регена. Из-за этого у экономики был всего один
+        // реальный источник — торговля, а она требует НЕ ВРАЖДЕБНОГО партнёра с
+        // портом, которых у воюющего бота почти нет.
+        facGold.set(b.owner, (facGold.get(b.owner) || 0) + factoryIncome(b.level));
       }
+    }
+    // войска, вложенные каждым игроком в его активные атаки (см. COMMITTED_COUNTS)
+    const committed = new Map<number, number>();
+    for (const a of this.attacks) {
+      if (a.troops >= 1) committed.set(a.player, (committed.get(a.player) || 0) + a.troops);
     }
     for (const p of this.players.values()) {
       if (!p.alive || !p.spawned) continue;
       // ранний фактор: 1 на старте → 0 через 45с
       const early = Math.max(0, 1 - (this.tickNo - p.spawnTick) / 450);
       // в начале даём запас потолка, чтобы армия росла сразу (а не только
-      // территория); к 45с запас исчезает, но реальный потолок уже больше
-      const normalMax = (150 + p.cells * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
+      // территория); к 45с запас исчезает, но реальный потолок уже больше.
+      // cellFactor — сублинейный вклад территории (CAP_EXP): большая империя
+      // держит меньше войск на клетку, то есть её оборона тоньше (см. P1 в
+      // docs/balance-openfront.md). Города обходят этот мягкий потолок флэтом.
+      const normalMax = (150 + cellFactor(p.cells) * 12) * p.maxMul + early * 1500 + (cityBonus.get(p.id) || 0);
       // «Бесконечная армия» (настройка лобби): потолок 100млн; армия выставляется
       // сразу в максимум ниже (мгновенно, не постепенно)
       p.maxTroops = this.infArmy && !p.bot ? 100_000_000 : normalMax;
@@ -2859,8 +3247,14 @@ export class Game {
       // восполняют войска одинаково быстро, независимо от того, сколько у них
       // сейчас войск — у выбитого/обороняющегося есть реальный шанс отыграться.
       const base = Math.max(0.5, normalMax * 0.004 * p.growthMul);
+      // ВСЯ сила игрока = гарнизон + войска, вложенные в его активные атаки. Пока
+      // атака жива, эти войска никуда не делись, поэтому и потолок для прироста
+      // считается по ним: слив армию в наступление, агрессор НЕ получает пустой
+      // гарнизон и не запускает догоняющий буст (см. COMMITTED_COUNTS).
+      const inAttacks = (committed.get(p.id) || 0) * COMMITTED_COUNTS;
+      const force = p.troops + inAttacks;
       // логистическое торможение: до 70% максимума — полный рост, дальше плавно
-      const frac = p.maxTroops > 0 ? p.troops / p.maxTroops : 1;
+      const frac = p.maxTroops > 0 ? force / p.maxTroops : 1;
       const taper =
         frac <= GROWTH_SLOW_FROM
           ? 1
@@ -2885,10 +3279,13 @@ export class Game {
       // ранний буст: рост вдвое быстрее + флэт ~+200/с на старте, затухает.
       // 0.75 — общий темп пополнения армии снижен (армии набираются медленнее)
       const growth = (base * (1 + early) + early * 20) * taper * boost * facBoost * defBoost * 0.75;
-      p.troops = Math.min(p.maxTroops, p.troops + growth);
+      // потолок — на ВСЮ силу: иначе, вывалив половину армии в атаку, можно было
+      // бы отрастить гарнизон снова до потолка и получить суммарно больше предела
+      const room = Math.max(0, p.maxTroops - force);
+      p.troops = Math.min(p.maxTroops, p.troops + Math.min(growth, room));
       if (this.infArmy && !p.bot) p.troops = p.maxTroops; // «Бесконечная армия» — сразу максимум (100млн)
       // пассивный доход денег — на копейки, от размера территории (заводы — через грузовики)
-      p.money += 0.5 + p.cells * 0.08;
+      p.money += 0.5 + p.cells * 0.08 + (facGold.get(p.id) || 0);
       if (this.infMoney && !p.bot) p.money = 10_000_000_000; // «Бесконечные деньги» — фиксировано 10млрд
       if (p.bot) {
         if (this.tickNo >= p.thinkAt) this.botThink(p);
@@ -2962,11 +3359,11 @@ export class Game {
     for (let i = 0; i < cells.length; i += step) {
       const c = cells[i];
       if (this.owners[c] !== id) continue;
-      let found = false;
-      this.forNeighbors(c, (n) => {
-        if (this.terrain[n] && this.owners[n] === 0) found = true;
-      });
-      if (found) return true;
+      const k = this.neighbors4(c, this.nbuf);
+      for (let i = 0; i < k; i++) {
+        const n = this.nbuf[i];
+        if (this.terrain[n] && this.owners[n] === 0) return true;
+      }
     }
     return false;
   }
@@ -2974,17 +3371,21 @@ export class Game {
   private buildFrontier(a: Attack) {
     a.frontier.clear();
     // клетки цели, граничащие с нами = соседи-цели у наших клеток
+    const buf = this.nbuf;
     for (const c of this.playerCells(a.player)) {
       if (this.owners[c] !== a.player) continue; // протухшая запись
-      this.forNeighbors(c, (n) => {
+      const k = this.neighbors4(c, buf);
+      for (let i = 0; i < k; i++) {
+        const n = buf[i];
         if (this.terrain[n] && this.owners[n] === a.target) a.frontier.add(n);
-      });
+      }
     }
   }
 
   // Волновой захват: фронт поддерживается инкрементально, клетки с большим
   // числом своих соседей берутся первыми — дыры зарастают, граница ровная
   private stepAttack(a: Attack) {
+    const nb = this.nbuf;
     const attacker = this.players.get(a.player);
     if (!attacker?.alive) {
       a.troops = 0;
@@ -3007,22 +3408,24 @@ export class Game {
         return;
       }
     }
-    // корзины по числу своих соседей: сначала 4 (дыры), потом 3, 2, 1
-    const buckets: number[][] = [[], [], [], [], []];
+    // Корзины фронта: сначала по числу своих соседей (4 — дыры, потом 3, 2, 1),
+    // внутри — по местности (песок → трава → камень/снег, TERRAIN_TIER). Так
+    // дыры зарастают первыми, а наступление обтекает горы вместо лба в гору.
+    const buckets: number[][] = [];
+    for (let i = 0; i < 5 * TERRAIN_TIERS; i++) buckets.push([]);
     for (const c of a.frontier) {
       if (this.owners[c] !== a.target) {
         a.frontier.delete(c); // клетку уже кто-то занял
         continue;
       }
       let own = 0;
-      this.forNeighbors(c, (n) => {
-        if (this.owners[n] === a.player) own++;
-      });
+      const kn = this.neighbors4(c, nb);
+      for (let i = 0; i < kn; i++) if (this.owners[nb[i]] === a.player) own++;
       if (own === 0) {
         a.frontier.delete(c); // потеряли контакт с этой клеткой
         continue;
       }
-      buckets[own].push(c);
+      buckets[own * TERRAIN_TIERS + TERRAIN_TIER[this.terrain[c]]].push(c);
     }
     if (a.frontier.size === 0) return; // пересоберём фронт на следующем тике
     a.rescanned = false;
@@ -3034,52 +3437,77 @@ export class Game {
     let baseCost = NEUTRAL_COST; // цена клетки без штрафа обороны
     let density = 0;
     let waveScale = 1;
+    let ratioMul = 1; // множитель цены от соотношения сил
+    let costDensity = 0; // плотность для ЦЕНЫ (с полом обороны)
     if (enemy) {
       density = enemy.cells > 0 ? enemy.troops / enemy.cells : 0;
-      baseCost = 1 + 2 * density;
+      // пол обороны: территория стоит войск, даже если гарнизон выбит начисто —
+      // считаем не ниже DEF_FLOOR от плотности при армии у потолка. Потери самого
+      // защитника при этом остаются равны РЕАЛЬНОЙ плотности (больше, чем есть,
+      // он потерять не может) — пол удорожает захват, а не выкачивает призрачные
+      // войска. Это наш аналог флэта mag из OpenFront.
+      const fullDensity = enemy.cells > 0 ? enemy.maxTroops / enemy.cells : 0;
+      costDensity = Math.max(density, fullDensity * DEF_FLOOR);
       if (enemy.troops > 0) {
-        // потолок перевеса снижен (6→3.5): подавляющий агрессор больше не
-        // прорезает оборону молниеносно — у защиты есть время нарастить войска
-        waveScale = Math.min(3.5, Math.max(0.2, a.troops / enemy.troops));
+        // потолок перевеса снижен (6→3.5→WAVE_SCALE_MAX): подавляющий агрессор
+        // больше не прорезает оборону молниеносно — у защиты есть время
+        // нарастить войска. Снижен ещё раз, т.к. перевес теперь влияет и на цену.
+        waveScale = Math.min(WAVE_SCALE_MAX, Math.max(0.2, a.troops / enemy.troops));
+        // Перевес влияет и на ЦЕНУ клетки: вложенная атака берёт клетки до 40%
+        // дешевле, атака «каплей» — до вдвое дороже. Раньше цена от размера
+        // атаки не зависела вообще, и спам мелкими волнами был оптимален.
+        ratioMul = Math.min(RATIO_COST_MAX, Math.max(RATIO_COST_MIN, enemy.troops / a.troops));
       }
+      baseCost = (1 + 2 * costDensity) * ratioMul;
     }
-    // остаток меньше даже обычной цены — наступление выдохлось, вернуть войска
-    if (a.troops < baseCost) {
+    // остаток меньше даже самой дешёвой клетки (песок) — наступление выдохлось
+    const minCost = baseCost * TERRAIN_DEF_MIN;
+    if (a.troops < minCost) {
       this.refund(a, attacker);
       return;
     }
     let quota = Math.max(1, Math.ceil(a.frontier.size * WAVE_SPEED * waveScale));
-    for (let own = 4; own >= 1 && quota > 0; own--) {
-      const list = buckets[own];
-      while (list.length && quota > 0) {
-        const i = (Math.random() * list.length) | 0;
-        const c = list[i];
-        // укреплена ли клетка штабом её владельца; сопротивление по уровню:
-        // 1 ур. — 1:5, 2 ур. — 1:7, 3 ур. — 1:10
-        const fortified = enemy && this.fortField[c] === a.target;
-        const fl = this.fortLevel[c];
-        const mul = fl >= 3 ? 10 : fl === 2 ? 7 : 5;
-        const cellCost = fortified ? 1 + mul * density : baseCost;
-        if (a.troops < cellCost) {
-          // не по карману именно эта клетка — пропускаем её в этом тике
-          if (a.troops < baseCost) break;
-          list.splice(i, 1);
-          continue;
+    outer: for (let own = 4; own >= 1; own--) {
+      for (let tier = 0; tier < TERRAIN_TIERS; tier++) {
+        const list = buckets[own * TERRAIN_TIERS + tier];
+        while (list.length && quota > 0) {
+          const i = (Math.random() * list.length) | 0;
+          const c = list[i];
+          const t = this.terrain[c];
+          // укреплена ли клетка штабом её владельца; сопротивление по уровню:
+          // 1 ур. — 1:5, 2 ур. — 1:7, 3 ур. — 1:10
+          const fortified = enemy && this.fortField[c] === a.target;
+          const fl = this.fortLevel[c];
+          const mul = fl >= 3 ? 10 : fl === 2 ? 7 : 5;
+          // местность множит цену: камень/снег дороже, песок дешевле
+          const cellCost =
+            (fortified ? (1 + mul * costDensity) * ratioMul : baseCost) * TERRAIN_DEF[t];
+          if (a.troops < cellCost) {
+            // не по карману именно эта клетка — пропускаем её в этом тике
+            if (a.troops < minCost) break outer; // не хватает уже ни на что
+            list.splice(i, 1);
+            continue;
+          }
+          list[i] = list[list.length - 1];
+          list.pop();
+          a.frontier.delete(c);
+          this.setOwner(c, a.player);
+          a.troops -= cellCost;
+          if (enemy) {
+            enemy.troops = Math.max(0, enemy.troops - density);
+            enemy.hurtTick = this.tickNo; // защищающийся под атакой — включаем оборонный буст роста
+          }
+          // расход квоты (темп): горы тормозят, зона штаба тормозит втрое —
+          // укрепление даёт защите ВРЕМЯ, а не только берёт с атаки налог
+          quota -= (fortified ? FORT_SLOW : 1) * TERRAIN_SPEED[t];
+          // расширяем фронт на соседей захваченной клетки
+          const kn2 = this.neighbors4(c, nb);
+          for (let i = 0; i < kn2; i++) {
+            const n = nb[i];
+            if (this.terrain[n] && this.owners[n] === a.target) a.frontier.add(n);
+          }
         }
-        list[i] = list[list.length - 1];
-        list.pop();
-        a.frontier.delete(c);
-        this.setOwner(c, a.player);
-        a.troops -= cellCost;
-        if (enemy) {
-          enemy.troops = Math.max(0, enemy.troops - density);
-          enemy.hurtTick = this.tickNo; // защищающийся под атакой — включаем оборонный буст роста
-        }
-        quota--;
-        // расширяем фронт на соседей захваченной клетки
-        this.forNeighbors(c, (n) => {
-          if (this.terrain[n] && this.owners[n] === a.target) a.frontier.add(n);
-        });
+        if (quota <= 0) break outer;
       }
     }
   }
@@ -3111,7 +3539,14 @@ export class Game {
       }
     }
     // постройка нового корабля (не больше 3), если хватает денег
-    if (myWar.length < 3 && p.money >= warshipCost(myWar.length)) {
+    // Флот — роскошь: покупаем корабли только когда базовая оборона уже стоит
+    // (ПВО и ракетная шахта) и из свободных денег, а не мимо всякого бюджета.
+    // 37 кораблей за партию — это порядка 19 млн, ровно тот масштаб, которого боту
+    // не хватало на ПВО (1.5 млн) и стратегический удар.
+    const hasBase =
+      this.buildings.some((b) => b.owner === p.id && b.type === 'sam') &&
+      this.buildings.some((b) => b.owner === p.id && b.type === 'silo');
+    if (hasBase && myWar.length < 3 && p.money >= warshipCost(myWar.length) + BOT_CHEST_BASE) {
       let zone = -1;
       if (threats.length) {
         const t = threats[0];
@@ -3201,7 +3636,33 @@ export class Game {
   // зданий (farthest-point): постройки расходятся по всей территории, а не кучкуются
   // в одном углу. Так города застраивают всю землю, ПВО прикрывают её целиком, а
   // дорожная сеть (заводы → грузовики) растягивается на всю страну. -1 если некуда.
-  private spreadBuildCell(playerId: number, cells: number[], step: number): number {
+  // Клетка под ОБОРОННУЮ постройку — рядом с угрожаемой границей. Штаб обороны
+  // имеет смысл только там, где будет прорыв; spreadBuildCell (farthest-point)
+  // отправлял его в глубокий тыл, где его зона не пересекалась с фронтом вообще.
+  private borderBuildCell(playerId: number, near: number, maxR = 40): number {
+    const nx = near % this.w;
+    const ny = (near / this.w) | 0;
+    const EX: BuildingType[] = ['hq', 'city', 'port', 'silo', 'sam', 'factory'];
+    for (let r = 2; r <= maxR; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        const y = ny + dy;
+        if (y < 0 || y >= this.h) continue;
+        const stepX = Math.abs(dy) === r ? 1 : 2 * r; // только кромка кольца
+        for (let dx = -r; dx <= r; dx += stepX) {
+          const x = nx + dx;
+          if (x < 0 || x >= this.w) continue;
+          const c = y * this.w + x;
+          if (this.owners[c] !== playerId) continue;
+          if (!this.canBuildAt(playerId, c)) continue;
+          if (this.buildingNear(c, PORT_RADIUS, EX)) continue;
+          return c;
+        }
+      }
+    }
+    return -1;
+  }
+
+  private spreadBuildCell(playerId: number, cells: number[], step: number, minGap = PORT_RADIUS): number {
     const own = this.buildings.filter((b) => b.owner === playerId);
     const w = this.w;
     const EX: BuildingType[] = ['hq', 'city', 'port', 'silo', 'sam', 'factory'];
@@ -3211,7 +3672,7 @@ export class Game {
       const c = cells[i];
       if (this.owners[c] !== playerId) continue;
       if (!this.canBuildAt(playerId, c)) continue;
-      if (this.buildingNear(c, PORT_RADIUS, EX)) continue;
+      if (this.buildingNear(c, minGap, EX)) continue;
       const cx = c % w;
       const cy = (c / w) | 0;
       let dmin = Infinity;
@@ -3261,86 +3722,276 @@ export class Game {
       return;
     }
 
-    // Страны изредка строят торговый порт — так у трейда всегда есть партнёры
-    // (корабли игрока идут в порты соседей, и наоборот)
-    if (
-      p.strong &&
-      p.money >= PORT_BUILD_COST &&
-      !this.buildings.some((b) => b.owner === p.id && b.type === 'port')
-    ) {
-      for (let i = 0; i < cells.length; i += step) {
-        const c = cells[i];
-        if (this.owners[c] === p.id && this.canBuildPort(p.id, c)) {
-          this.build(p.id, 'port', c);
-          break;
-        }
-      }
-    }
-
+    // Идёт ли наше наступление и есть ли готовая шахта — от этого зависят и
+    // боевая касса, и запуск роя дронов.
+    const atWar = this.attacks.some((a) => a.player === p.id && a.troops >= 1 && a.target > 0);
+    const hasSilo = this.buildings.some(
+      (b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick
+    );
+    const aggroSam = DIFFICULTY[this.difficulty].aggro; // на высокой сложности ПВО больше
     // Страны строят города (рост лимита войск) и штабы-щиты (оборона) — как игрок.
     // Ограничиваем число, чтобы не спамить, и гейтим деньгами.
     if (p.strong) {
-      // Экономика с ЖЁСТКИМ приоритетом обороны: сперва ПВО (покрытие территории +
-      // уровень) — их выбьют дроны/ракеты, если не вложиться; только ОСТАТОК сверх
-      // резерва идёт в экономику. Раньше дешёвые города перетягивали деньги и ПВО
-      // не качались вовсе.
+      // === Постройки и экономика: модель OpenFront (NationStructureBehavior) ===
+      // Количества — ДОЛЯ ОТ ЧИСЛА ГОРОДОВ (их ratioPerCity), а не фиксированные
+      // потолки. Раньше: заводов максимум 5, порт и шахта по одной, ПВО до 12
+      // уровня и не больше 20, штабов 2 — в поздней игре бот упирался во всё это и
+      // сливал золото в города, единственное, что росло без ограничений.
       const countType = (t: BuildingType) =>
         this.buildings.filter((b) => b.owner === p.id && b.type === t).length;
-      const cityCap = Math.min(30, 4 + Math.floor(p.cells / 2500));
-      const factoryCap = Math.min(5, 1 + Math.floor(p.cells / 10000));
-      // ПВО должны ПОКРЫВАТЬ территорию: число растёт с площадью (радиус 72).
-      const samCap = Math.min(20, 3 + Math.floor(p.cells / 7000));
-
       const mine = this.buildings.filter((b) => b.owner === p.id);
-      const reserve = 2_000_000; // на экономику тратим только деньги СВЕРХ этого запаса
       const ready = (b: Building) => this.tickNo >= b.readyTick && b.upEnd === 0;
       const lowestOf = (t: BuildingType, maxLvl = Infinity) =>
         mine
           .filter((b) => b.type === t && ready(b) && b.level < maxLvl)
           .sort((a, b) => a.level - b.level)[0];
+      const EX: BuildingType[] = ['hq', 'city', 'port', 'silo', 'sam', 'factory'];
       const spend = (t: BuildingType) => {
-        const c = this.spreadBuildCell(p.id, cells, step);
-        if (c >= 0) { this.build(p.id, t, c); return true; }
-        return false;
+        let c = -1;
+        if (t === 'port') {
+          // порт ставится только на свой океанский берег, farthest-point тут не годится
+          for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
+            if (this.canBuildPort(p.id, cells[i]) && !this.buildingNear(cells[i], PORT_RADIUS, EX)) {
+              c = cells[i];
+              break;
+            }
+          }
+        } else if (t === 'hq' && enemyFrom >= 0) {
+          // штаб обороны — к угрожаемой границе, а не в глубокий тыл
+          c = this.borderBuildCell(p.id, enemyFrom);
+        }
+        if (c < 0 && t !== 'port') c = this.spreadBuildCell(p.id, cells, step);
+        if (c < 0) return false;
+        return this.build(p.id, t, c) === null;
       };
 
-      let newB = 0; // ограничение новых построек за ход (farthest-point дорогой)
-      let samActs = 0; // не больше N трат на ПВО за ход, чтобы экономика тоже росла
-      for (let up = 0; up < 40; up++) {
-        const samCostNow = samCost(this.samLevels(p.id));
-        // === ОБОРОНА (ПВО) — АБСОЛЮТНЫЙ приоритет: тратим как только хватает ===
-        if (samActs < 16 && p.money >= samCostNow) {
-          // 1) добираем количество до кэпа — покрытие всей территории (farthest-point)
-          if (countType('sam') < samCap && newB < 4 && spend('sam')) { newB++; samActs++; continue; }
-          // 2) качаем слабейшее ПВО до ур. 12 (уровень = число одновременных перехватов)
-          const sam = lowestOf('sam', 12);
-          if (sam) { this.upgrade(p.id, sam.cell); samActs++; continue; }
+      // есть ли выход к океану — иначе порты строить некуда
+      let coastal = false;
+      for (let i = 0; i < cells.length; i += step) {
+        if (this.owners[cells[i]] === p.id && this.shore[cells[i]]) { coastal = true; break; }
+      }
+      const cityCount = countType('city');
+      const want: Partial<Record<BuildingType, number>> = {
+        city: 4 + Math.floor(p.cells / 2500),
+        port: coastal ? Math.max(1, Math.round(cityCount * BOT_RATIO_PORT)) : 0,
+        factory: Math.max(1, Math.round(cityCount * BOT_RATIO_FACTORY)),
+        sam: Math.max(2, Math.round(cityCount * BOT_RATIO_SAM * aggroSam)),
+        silo: Math.min(BOT_MAX_SILO, Math.max(1, Math.round(cityCount * BOT_RATIO_SILO))),
+        hq: Math.max(1, Math.round(cityCount * BOT_RATIO_HQ)),
+      };
+      // Порог плотности из OpenFront (UPGRADE_DENSITY_THRESHOLD = 1 постройка на
+      // 1500 клеток) нам не подходит: у них у игрока единицы построек, у нас — сотни
+      // (одних городов больше сотни на страну). При таком пороге «плотно» наступало
+      // почти сразу и ВЫКЛЮЧАЛО всю фазу расширения — ПВО строились только по
+      // обязательному минимуму, то есть по одному, и покрытия территории не было.
+      // Ограничителем количества служат цели want (доля от числа городов), а
+      // «некуда ставить» и так определяется тем, что spend() не находит клетку.
+      const dense = mine.length > p.cells * BOT_UPGRADE_DENSITY;
+      // Боевая касса: не тратим её на стройку, иначе не остаётся ни на ракету, ни
+      // на рой дронов. Пока идёт наше наступление — копим на рой.
+      // Касса включается, ТОЛЬКО когда шахта уже есть: она стоит всего 1 млн, а
+      // средние деньги страны — единицы миллионов, поэтому безусловная касса
+      // делала бюджет отрицательным и бот не строил вообще ничего.
+      const chest = hasSilo ? (atWar ? BOT_CHEST_WAR : BOT_CHEST_BASE) : 0;
+      const spendable = p.money - chest;
+      const newCost = (t: BuildingType) =>
+        t === 'city' ? cityCost(countType('city'))
+        : t === 'port' ? portCost(countType('port'))
+        : t === 'factory' ? factoryCost(this.factoryLevels(p.id))
+        : t === 'sam' ? samCost(this.samLevels(p.id))
+        : t === 'silo' ? SILO_COST
+        : hqCost(this.hqCount(p.id));
+      const upCost = (b: Building) =>
+        b.type === 'city' ? cityUpgradeCost(b.level + 1)
+        : b.type === 'port' ? portUpgradeCost(b.level + 1)
+        : b.type === 'factory' ? factoryCost(this.factoryLevels(p.id))
+        : b.type === 'sam' ? samCost(this.samLevels(p.id))
+        : b.type === 'silo' ? SILO_COST
+        : hqUpgradeCost(b.level + 1);
+      // Порядок достройки: сперва ЭКОНОМИКА (порт, завод), потом оборона (ПВО),
+      // потом наступление (шахта), щит и города. Раньше ПВО имели абсолютный
+      // приоритет, а экономика получала только остаток сверх запаса в 2 млн.
+      // Шахта раньше ПВО: она дешёвая (1 млн) и открывает и ракеты, и рой дронов, а
+      // ПВО без чужих шахт защищать нечего.
+      const buildOrder: BuildingType[] = ['port', 'factory', 'silo', 'sam', 'hq', 'city'];
+      // ОБЯЗАТЕЛЬНЫЙ МИНИМУМ до расширения экономики. Без него цели по портам и
+      // заводам (доля от числа городов — это десятки штук) создают вечный дефицит,
+      // и деньги никогда не доходят до шахты и ПВО: в замере страна доживала до
+      // 6000-го тика с 39 портами 12-го уровня и НУЛЁМ шахт, то есть не запускала
+      // ни ракет, ни роя дронов вообще.
+      // Минимум — только ДЕШЁВАЯ база. Шахту и ПВО сюда включать нельзя: на них бот
+      // копит, а копить, ничего не строя и не улучшая, он может очень долго — в
+      // замере это давало 112 городов и 23 порта, все 1-го уровня, потому что до
+      // апгрейдов дело не доходило вообще.
+      const minWant: Partial<Record<BuildingType, number>> = {
+        city: 4,
+        hq: 1,
+        port: coastal ? 1 : 0,
+        factory: 1,
+        silo: 1,
+        sam: 1,
+      };
+      // Порядок минимума: сперва ДЕШЁВАЯ база (город 50к, штаб 40к, порт 50к,
+      // завод 125к), и только потом дорогая «техника», на которую бот копит
+      // (шахта 1 млн, ПВО 1.5 млн). Если поставить шахту раньше городов, бот копит
+      // на неё и не строит вообще ничего: в замере — 0 городов, 0 штабов, 0 ПВО.
+      // ПВО раньше шахты: оборона важнее наступления, и раньше бот, не накопив на
+      // шахту (1 млн), до ПВО просто не доходил.
+      const minOrder: BuildingType[] = ['city', 'hq', 'port', 'factory', 'sam', 'silo'];
+      // Порядок апгрейдов: ПОРТ первым — это главный источник дохода (уровень порта
+      // задаёт и число торговых судов, и цену рейса, поэтому порт 14-го уровня
+      // приносит примерно в двадцать раз больше первого). Раньше первым стояло ПВО,
+      // и бот всю партию жил на доходе портов 1-го уровня — отсюда и «нет денег ни
+      // на ракеты, ни на рой дронов».
+      const upOrder: BuildingType[] = ['port', 'factory', 'city', 'sam', 'silo', 'hq'];
+      const maxLvl: Partial<Record<BuildingType, number>> = {
+        hq: MAX_HQ_LEVEL,
+        sam: BOT_MAX_SAM_LEVEL,
+        silo: BOT_MAX_SILO_LEVEL,
+        factory: BOT_MAX_FACTORY_LEVEL,
+      };
+      const haveOf = (t: BuildingType) => (t === 'hq' ? this.hqCount(p.id) : countType(t));
+      let newB = 0; // новых построек за ход (farthest-point дорогой)
+      // ПВО и ракетные шахты ставятся ПАЧКОЙ: первое — покрытие площади, второе —
+      // глубина залпа, и того и другого нужно несколько сразу. Остальное — по одной
+      // постройке за ход (выбор места farthest-point дорогой). Стройка не
+      // сериализуется: здания возводятся параллельно, поэтому очередь работает.
+      const queued = new Map<BuildingType, number>(); // ПВО/шахт в очереди за ход
+      const batchable = (t: BuildingType) => t === 'sam' || t === 'silo';
+      const canStart = (t: BuildingType) =>
+        batchable(t) ? (queued.get(t) ?? 0) < BOT_QUEUE_BATCH : newB < 4;
+      const noteStart = (t: BuildingType) => {
+        if (batchable(t)) queued.set(t, (queued.get(t) ?? 0) + 1);
+        else newB++;
+      };
+
+      // === 1. ОБЯЗАТЕЛЬНЫЙ МИНИМУМ ===
+      // Пока он не выполнен, бот КОПИТ на него. Если постройку некуда поставить —
+      // не блокируемся, идём дальше (иначе бот замирал бы навсегда).
+      let missing: BuildingType | null = null;
+      for (const t of minOrder) {
+        while (haveOf(t) < (minWant[t] ?? 0)) {
+          const cost = newCost(t);
+          if (p.money < cost) { missing = t; break; }
+          if (!canStart(t) || !spend(t)) break;
+          noteStart(t);
         }
-        // === ЭКОНОМИКА — только на ОСТАТОК сверх резерва ===
-        if (p.money <= reserve) break;
-        // достройка недостающего (город → завод → шахта → штаб)
-        if (countType('city') < cityCap && newB < 4 && p.money >= cityCost(countType('city')) + reserve && spend('city')) { newB++; continue; }
-        if (countType('factory') < factoryCap && newB < 4 && p.money >= factoryCost(this.factoryLevels(p.id)) + reserve && spend('factory')) { newB++; continue; }
-        if (countType('silo') < 1 && p.money >= SILO_COST + reserve && spend('silo')) { newB++; continue; }
-        if (this.hqCount(p.id) < 2 && p.money >= hqCost(this.hqCount(p.id)) + reserve && spend('hq')) { newB++; continue; }
-        // апгрейд экономики (город → завод → шахта → штаб)
-        const city = lowestOf('city');
-        if (city && p.money - cityUpgradeCost(city.level + 1) >= reserve) { this.upgrade(p.id, city.cell); continue; }
-        const fac = lowestOf('factory');
-        if (fac && p.money - factoryCost(this.factoryLevels(p.id)) >= reserve) { this.upgrade(p.id, fac.cell); continue; }
-        const silo = lowestOf('silo');
-        if (silo && p.money - SILO_COST >= reserve) { this.upgrade(p.id, silo.cell); continue; }
-        const hq = lowestOf('hq', MAX_HQ_LEVEL);
-        if (hq && p.money - hqUpgradeCost(hq.level + 1) >= reserve) { this.upgrade(p.id, hq.cell); continue; }
-        break; // делать нечего — выходим
+        if (missing) break;
+      }
+
+      // === 2. ЦЕЛЬ НАКОПЛЕНИЯ И СВОБОДНЫЙ БЮДЖЕТ ===
+      // Копим либо на недостающую обязательную постройку, либо (если минимум есть,
+      // идёт наше наступление и есть шахта) на рой дронов, либо держим небольшой
+      // запас на ракету.
+      // Цель на рой дронов — МЯГКАЯ: включается только когда бот уже нащупал
+      // деньги (сорок процентов стоимости). Иначе недостижимая цель в 11 млн
+      // заклинивала всё: бюджет всегда отрицательный, бот сидел в режиме
+      // накопления и не строил и не улучшал ничего, кроме портов.
+      const droneGoal = DRONE_COST + BOT_CHEST_BASE;
+      // Цель на рой — ПОСТОЯННАЯ, как только есть шахта. Привязка к «сейчас идёт
+      // атака» не работала: состояние мимолётное, и накопления тут же сбрасывались
+      // обратно в стройку — за 14 000 тиков не вылетело ни одного роя.
+      // Копим на рой только когда он в пределах досягаемости (см. strikeReserve),
+      // иначе бот вечно сидит в режиме накопления на недостижимую цель.
+      const goal = missing
+        ? newCost(missing)
+        : hasSilo && p.money >= DRONE_COST * 0.5
+          ? droneGoal
+          : BOT_CHEST_BASE;
+      let budget = p.money - goal;
+
+      if (budget <= 0) {
+        // ДЕНЕГ НА ЦЕЛЬ НЕ ХВАТАЕТ — значит надо их ЗАРАБОТАТЬ, а не сидеть и копить
+        // на статичном доходе. Вкладываемся в экономику по отдаче:
+        //   1) новый порт — линейный прирост дохода;
+        //   2) уровень порта — уровень задаёт И число торговых судов, И цену рейса,
+        //      поэтому доход растёт быстрее, чем цена апгрейда (30к × уровень);
+        //   3) завод — золото с суши и ускорение регена.
+        // Вкладываем только ДОЛЮ денег (BOT_ECON_SHARE), остальное накапливается:
+        // иначе «зарабатывай, если не хватает» превращается в вечное вложение —
+        // доход растёт, а на счету всегда ноль, и до роя дронов бот не доживает.
+        // Пока копим на ПВО или шахту — НЕ вкладываемся: это разовые крупные суммы
+        // (1.5 и 1 млн), а вложения «доля от текущих денег» ровно съедают доход, и
+        // накопление стоит на месте (в замере равновесие на 0.7 млн при цели 1.5).
+        // На дешёвую базу (город/штаб/порт/завод) копить не нужно — она и есть экономика.
+        const savingHard = missing === 'sam' || missing === 'silo';
+        let econ = savingHard ? 0 : p.money * BOT_ECON_SHARE;
+        for (let act = 0; act < 6 && econ > 0; act++) {
+          let did = false;
+          if (coastal && newB < 4 && countType('port') < (want.port ?? 0)) {
+            const cost = portCost(countType('port'));
+            if (econ >= cost && spend('port')) { econ -= cost; newB++; did = true; }
+          }
+          if (!did) {
+            const pb = lowestOf('port', PORT_MAX_SHIP_LEVEL);
+            const cost = pb ? upCost(pb) : Infinity;
+            if (pb && econ >= cost && this.upgrade(p.id, pb.cell) === null) { econ -= cost; did = true; }
+          }
+          if (!did) {
+            const fb = lowestOf('factory');
+            const cost = fb ? upCost(fb) : Infinity;
+            if (fb && econ >= cost && this.upgrade(p.id, fb.cell) === null) { econ -= cost; did = true; }
+          }
+          if (!did) break;
+        }
+      } else {
+        // === 3. РАСШИРЕНИЕ И АПГРЕЙДЫ на свободные деньги ===
+        const builtNow = new Set<BuildingType>();
+        const upNow = new Set<BuildingType>();
+        for (let act = 0; act < 24 && budget > 0; act++) {
+          let did = false;
+          if (!dense) {
+            for (const t of buildOrder) {
+              // ПВО и шахты можно ставить пачкой в один ход, остальное — по одному
+              if (!batchable(t) && builtNow.has(t)) continue;
+              if (!canStart(t) || haveOf(t) >= (want[t] ?? 0)) continue;
+              const cost = newCost(t);
+              if (budget < cost) continue;
+              builtNow.add(t);
+              if (!spend(t)) continue;
+              budget -= cost;
+              noteStart(t);
+              did = true;
+              break;
+            }
+          }
+          if (did) continue;
+          for (const t of upOrder) {
+            if (upNow.has(t)) continue;
+            const b = lowestOf(t, maxLvl[t] ?? Infinity);
+            if (!b) continue;
+            const cost = upCost(b);
+            if (budget < cost) continue;
+            upNow.add(t);
+            if (this.upgrade(p.id, b.cell) !== null) continue;
+            budget -= cost;
+            did = true;
+            break;
+          }
+          if (!did) break;
+        }
       }
       // пуск ракеты по врагу: если есть заряженная шахта и деньги. Целимся в
       // СТРАТЕГИЧЕСКИЕ объекты врага (шахта > ПВО > завод > штаб > город), а если
       // таких нет — вглубь его территории. Богатая страна иногда бьёт водородной.
+      // Пока идёт наше наступление, приоритет удара — за роем дронов: ракеты не
+      // должны съедать деньги, отложенные на рой. Раньше бот при каждом удобном
+      // случае тратил накопления на ракету (750к), поэтому до 10 млн на рой не
+      // доживал никогда — за партию не вылетало ни одного роя.
+      // Резерв на рой копим, только когда рой уже В ПРЕДЕЛАХ ДОСЯГАЕМОСТИ (половина
+      // стоимости на руках). Постоянный резерв блокировал ракеты навсегда: пик
+      // денег бота за партию — около 6.5 млн, то есть до 10 млн он не доходит, и
+      // при жёстком резерве бот не запускал НИЧЕГО — ни роя, ни ракет.
+      // Пуск ракеты обязан считаться с НАКОПЛЕНИЯМИ. Раньше проверка смотрела только
+      // на свою цену (750к), поэтому съедала деньги, отложенные на ПВО: бот копил на
+      // первое ПВО (1.5 млн), на 750к запускал ракету — и всё начиналось заново. В
+      // замере страны доходили до конца партии с 0 ПВО при доходе на 5–10 штук.
+      const droneReserve = hasSilo && p.money >= DRONE_COST * 0.5 ? DRONE_COST : 0;
+      const strikeReserve = missing ? Math.max(goal, droneReserve) : droneReserve;
       if (
         enemyTo >= 0 &&
         Math.random() < 0.15 &&
-        p.money >= NUKES.basic.cost &&
+        p.money >= NUKES.basic.cost + strikeReserve &&
         this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
       ) {
         const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.35 ? 'hydro' : 'basic';
@@ -3368,15 +4019,18 @@ export class Game {
         }
         this.launchNuke(p.id, targetCell, kind);
       }
-      // рой дронов «Мопед»: дорого (10млн), поэтому редко — когда богата, есть
-      // шахта и граничащий враг. Мощный переломный удар по соседу.
-      if (
-        enemyTo >= 0 &&
-        Math.random() < 0.04 &&
-        p.money >= DRONE_COST &&
-        this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick)
-      ) {
-        this.launchDrones(p.id, enemyTo);
+      // Рой дронов «Мопед» — часть НАСТУПЛЕНИЯ, а не редкая случайность. Раньше
+      // шанс был 4% при любых условиях, и рой практически никогда не вылетал: к
+      // тому же бот тратил все деньги на стройку и до 10 млн не доживал. Теперь
+      // деньги на удар придерживаются боевой кассой (BOT_CHEST_WAR), а пока идёт
+      // наше наступление бот бьёт роем часто и может послать ДВЕ волны подряд —
+      // так перелом выглядит логично и динамично.
+      if (enemyTo >= 0 && hasSilo) {
+        const chance = atWar ? BOT_DRONE_CHANCE_WAR : BOT_DRONE_CHANCE_IDLE;
+        for (let wave = 0; wave < BOT_DRONE_WAVES; wave++) {
+          if (p.money < DRONE_COST || Math.random() >= chance) break;
+          if (this.launchDrones(p.id, enemyTo) !== null) break; // не вышло — не пытаемся снова
+        }
       }
       // Флот: строит боевые корабли, прикрывает берег/торговлю, перехватывает
       // вражеские десанты; изредка сам высаживает десант на чужой берег/остров.
@@ -3384,6 +4038,28 @@ export class Game {
       if (Math.random() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
       // активно занимаем пустые острова, пока есть свободные войска
       if (Math.random() < 0.2 && p.troops > p.maxTroops * 0.35) this.botColonize(p);
+
+      // СОЮЗЫ МЕЖДУ БОТАМИ. Раньше бот заключал союз только в коалиции против
+      // оторвавшегося лидера, поэтому обычной дипломатии между странами не было
+      // вовсе: они лишь копили враждебность через бои. Теперь сосед-страна, с
+      // которой мы ещё нейтральны и которая сопоставима по силе, иногда становится
+      // союзником — это и даёт мирные границы, и открывает торговлю (партнёр по
+      // трейду обязан быть НЕ враждебным).
+      if (Math.random() < 0.2) {
+        for (const k of counts.keys()) {
+          if (k <= 0 || k === p.id) continue;
+          if (this.relation(p.id, k) !== 'neutral') continue;
+          const other = this.players.get(k);
+          if (!other?.alive || !other.bot) continue;
+          const pw = this.powerOf(p.id);
+          const ow = this.powerOf(k);
+          // союз имеет смысл с сопоставимым соседом: слабого проще съесть, а
+          // намного более сильный всё равно не станет считаться с нами
+          if (ow < pw * 0.6 || ow > pw * 1.8) continue;
+          this.acceptAlliance(p.id, k);
+          break;
+        }
+      }
 
       // КОАЛИЦИЯ ПРОТИВ ЛИДЕРА (средняя+ сложность): если сильнейший игрок явно
       // оторвался — боты союзничают между собой и совместно бомбят его инфраструктуру.
@@ -3407,7 +4083,7 @@ export class Game {
           // 2) бомбим инфраструктуру лидера ядеркой (даже не граничя с ним)
           if (
             Math.random() < 0.08 + 0.4 * coalition &&
-            p.money >= NUKES.basic.cost &&
+            p.money >= NUKES.basic.cost + strikeReserve &&
             this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
           ) {
             const from = this.playerCells(p.id)[0] ?? 0;
@@ -3434,9 +4110,32 @@ export class Game {
     // Страны: агрессия зависит от сложности
     const aggro = DIFFICULTY[this.difficulty].aggro;
     p.thinkAt = this.tickNo + Math.round(18 / aggro) + ((Math.random() * 30) | 0);
-    const readiness = 0.25 / Math.max(1, aggro);
-    if (p.troops < p.maxTroops * readiness || p.troops < 150) return;
+    // Порог начала наступления (их triggerRatio)
+    const trigger = BOT_TRIGGER / Math.max(1, aggro);
+    if (p.troops < p.maxTroops * trigger || p.troops < 150) return;
     if (!counts.size) return;
+
+    // === Сколько войск бот вообще может отправить ===
+    // 1) РЕЗЕРВ: доля потолка всегда остаётся дома. Раньше бот отправлял ровно
+    //    половину армии независимо ни от чего, уходил в ноль и не мог обороняться.
+    const reserve = p.maxTroops * BOT_RESERVE;
+    // 2) уже вложенное в наши атаки: наступление не «докапываем» второй волной —
+    //    с COMMITTED_COUNTS это к тому же придавливает свой же прирост
+    let inFlight = 0;
+    for (const a of this.attacks) if (a.player === p.id) inFlight += a.troops;
+    let send = Math.floor(Math.min(p.troops - reserve, p.troops * 0.5) - inFlight);
+    if (send < 150) return;
+    // 3) СТРАЖ СИЛЬНЕЙШЕГО СОСЕДА (их troopSendCap): не опускаем гарнизон ниже
+    //    доли войск самого сильного не-союзного соседа, иначе бот уходит в атаку
+    //    и его тут же съедают с другой стороны.
+    let strongestFoe = 0;
+    for (const k of counts.keys()) {
+      if (k <= 0 || this.relation(p.id, k) === 'allied') continue;
+      const q = this.players.get(k);
+      if (q?.alive && q.troops > strongestFoe) strongestFoe = q.troops;
+    }
+    send = Math.min(send, Math.floor(p.troops - strongestFoe * BOT_GUARD));
+    if (send < 150) return;
     // Предательство: если бот заметно сильнее граничащего союзника и его самого
     // не давит более сильный враг — иногда рвёт союз и бьёт в спину.
     if (Math.random() < 0.06 * aggro) {
@@ -3452,7 +4151,24 @@ export class Game {
         }
       }
     }
-    let target: number;
+    let target = -1;
+    // ОТВЕТНЫЙ УДАР (их findIncomingAttackPlayer): если нас бьют, приоритетная
+    // цель — самый крупный нападающий, а не случайный слабый сосед на другой
+    // стороне. Раньше бот под ударом продолжал спокойно есть «корм».
+    if (this.tickNo - p.hurtTick < BOT_RETALIATE_TICKS) {
+      let biggest = 0;
+      for (const a of this.attacks) {
+        if (a.target !== p.id || a.troops <= biggest) continue;
+        if (this.relation(p.id, a.player) === 'allied') continue;
+        biggest = a.troops;
+        target = a.player;
+      }
+      if (target > 0 && send >= biggest * BOT_MIN_ODDS) {
+        this.launchAttackOwner(p.id, target, send);
+        return;
+      }
+      target = -1;
+    }
     const coal = DIFFICULTY[this.difficulty].coalition;
     const leader = coal > 0 ? this.currentLeader() : 0;
     // в коалиции: если граничим с оторвавшимся лидером — чаще бьём именно его
@@ -3463,22 +4179,31 @@ export class Game {
     ) {
       target = leader;
     } else {
-      // граничащие игроки, кроме союзников; выбираем САМОГО СЛАБОГО — лёгкая добыча
-      // (обычно пассивный «корм»), чтобы территория страны росла быстрее
-      const foes = [...counts.keys()].filter((k) => k > 0 && this.relation(p.id, k) !== 'allied');
-      let weakest = -1, wp = Infinity;
-      for (const k of foes) { const pw = this.powerOf(k); if (pw < wp) { wp = pw; weakest = k; } }
-      // агрессия к захвату соседей растёт со сложностью: easy≈0.55 … insane≈0.9
-      const eatChance = Math.min(0.9, 0.3 + 0.35 * aggro);
-      if (weakest > 0 && Math.random() < eatChance) {
-        target = weakest; // едим слабого соседа
-      } else if (counts.has(0)) {
-        target = 0; // иначе расширяемся в свободную нейтраль
-      } else {
-        target = weakest > 0 ? weakest : 0;
+      // Цель выбирается по ЦЕНЕ ПРОРЫВА, а не по «слабости вообще». У нас цена
+      // клетки ∝ плотности обороны, а темп ∝ ширине фронта — значит лучший сосед
+      // тот, у кого низкая плотность и широкая граница с нами. counts как раз
+      // хранит ширину границы по каждому соседу. (В OpenFront соседи-боты
+      // сортируются по density = troops/tiles — та же идея.)
+      // Свободная нейтраль участвует в том же сравнении по своей цене, поэтому
+      // бот сам предпочтёт даровую землю, пока она есть, вместо случайного броска.
+      const neutralWidth = counts.get(0) ?? 0;
+      let bestScore = neutralWidth > 0 ? neutralWidth / NEUTRAL_COST : -Infinity;
+      target = neutralWidth > 0 ? 0 : -1;
+      for (const [k, width] of counts) {
+        if (k <= 0 || this.relation(p.id, k) === 'allied') continue;
+        const q = this.players.get(k);
+        if (!q?.alive) continue;
+        // безнадёжные атаки не начинаем вовсе (их isAttackTooWeak): при таком
+        // соотношении сил клетка ещё и вдвое дороже — чистая потеря войск
+        if (send < q.troops * BOT_MIN_ODDS) continue;
+        const dens = q.cells > 0 ? q.troops / q.cells : 0;
+        // агрессия по сложности склоняет выбор к живым соседям, а не к нейтрали
+        const score = (width / (1 + 2 * dens)) * aggro;
+        if (score > bestScore) { bestScore = score; target = k; }
       }
+      if (target < 0) return; // некого бить по силам — копим войска
     }
-    this.launchAttackOwner(p.id, target, Math.floor(p.troops * 0.5));
+    this.launchAttackOwner(p.id, target, send);
   }
 
   playersPub(): PlayerPub[] {
@@ -3511,6 +4236,7 @@ export class Game {
         b.upEnd > b.upStart
           ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
           : 0,
+      upQueue: b.upQueue,
       ammo:
         b.type === 'silo'
           ? b.stock
