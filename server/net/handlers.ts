@@ -64,7 +64,7 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       // песочные настройки доступны только в одиночку — как стало >1 игрока, сбрасываем
 
       if (target.phase === 'lobby') broadcastLobby(target);
-      else enterGame(ws, st, target);
+      else { enterGame(ws, st, target); target.game.resendBoatPaths(); } // новый клиент должен увидеть маршруты уже плывущих десантов
       break;
     }
     case 'start': {

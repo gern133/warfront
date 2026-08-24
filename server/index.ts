@@ -107,9 +107,12 @@ setInterval(() => {
     const update = JSON.stringify({
       type: 'update',
       changes,
-      // список игроков (300 объектов, ~30КБ) шлём реже — клиент всё равно
-      // показывает армии/золото раз в 1–5с; дельты клеток идут каждый тик
+      // Динамика игроков шлётся раз в 500мс (клиент всё равно показывает армии и
+      // золото не чаще), дельты клеток — каждый тик. Статика (имена, флаги) уходит
+      // отдельным полем и только когда набор игроков изменился: раньше имена всех
+      // 293 игроков ехали в каждой такой посылке и составляли почти её половину.
       players: sendPlayers ? game.playersPub() : [],
+      playersMeta: sendPlayers ? game.playersMetaPub() : undefined,
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
       buildings: game.buildingsPub(),

@@ -55,17 +55,27 @@ export type ServerMsg =
       h: number;
       terrainRle: number[]; // RLE: [значение, длина, ...]
       ownersRle: number[];
-      players: PlayerPub[];
+      // Игроки: динамика — плоский массив по 6 чисел [id, войска, потолок, клетки, деньги,
+      // жив?]; статика (имя, флаги) приходит в playersMeta и только при изменении набора.
+      players: number[];
+      playersMeta?: { id: number; name: string; bot: boolean; strong: boolean }[] | null;
       spawnSeconds?: number; // сколько осталось на выбор спавна (фаза spawn)
     }
   | {
       type: 'update';
       changes: number[];
-      players: PlayerPub[];
+      // Игроки: динамика — плоский массив по 6 чисел [id, войска, потолок, клетки,
+      // деньги, жив?]; статика (имя, флаги) — в playersMeta и только при изменении набора
+      players: number[];
+      playersMeta?: { id: number; name: string; bot: boolean; strong: boolean }[] | null;
       attacks: AttackPub[];
       boats: BoatPub[];
-      buildings: BuildingPub[];
-      ships: TradeShipPub[]; // трейд-корабли (кружки без следа)
+      // Здания — плоский массив целых по 10 чисел на здание: [id, владелец, клетка,
+      // тип (индекс в BUILDING_TYPES), уровень, заряд, прогресс·100, апгрейд·100,
+      // фитиль·10, очередь апгрейдов]
+      buildings: number[];
+      // Трейд-суда — плоский массив целых по 3 числа на судно: [x·10, y·10, владелец]
+      ships: number[];
       trucks: TruckPub[]; // грузовики заводов на дорогах
       roads?: number[][]; // дороги (ломаные [x,y,...]) — шлём реже (меняются редко)
       warships: WarshipPub[]; // боевые корабли

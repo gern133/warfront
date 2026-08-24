@@ -5,6 +5,7 @@ import {
   BoatPub,
   BuildingPub,
   BuildingType,
+  BUILDING_TYPES,
   ServerMsg,
   PORT,
   Difficulty,
@@ -48,6 +49,55 @@ export default function App() {
   const [lobby, setLobby] = useState<LobbyInfo | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [players, setPlayers] = useState<PlayerPub[]>([]);
+  // Статика игроков (имя, бот/страна) — приходит только при изменении набора, а
+  // динамика каждый раз плоским массивом по 6 чисел. Собираем обратно в объекты,
+  // чтобы весь остальной интерфейс работал как раньше.
+  const playersMeta = useRef(new Map<number, { id: number; name: string; bot: boolean; strong: boolean }>());
+  // Здания приходят плоским массивом по 10 чисел — собираем обратно в объекты, чтобы
+  // весь интерфейс и рендер работали как раньше.
+  const buildBuildings = (flat: number[]): BuildingPub[] => {
+    const list: BuildingPub[] = [];
+    for (let i = 0; i + 9 < flat.length; i += 10) {
+      list.push({
+        id: flat[i],
+        owner: flat[i + 1],
+        cell: flat[i + 2],
+        type: BUILDING_TYPES[flat[i + 3]] as BuildingType,
+        level: flat[i + 4],
+        ammo: flat[i + 5],
+        progress: flat[i + 6] / 100,
+        upProgress: flat[i + 7] / 100,
+        fuse: flat[i + 8] / 10,
+        upQueue: flat[i + 9],
+      });
+    }
+    return list;
+  };
+  const buildPlayers = (
+    flat: number[],
+    meta?: { id: number; name: string; bot: boolean; strong: boolean }[] | null,
+  ): PlayerPub[] => {
+    if (meta) {
+      playersMeta.current.clear();
+      for (const m of meta) playersMeta.current.set(m.id, m);
+    }
+    const list: PlayerPub[] = [];
+    for (let i = 0; i + 5 < flat.length; i += 6) {
+      const m = playersMeta.current.get(flat[i]);
+      list.push({
+        id: flat[i],
+        name: m?.name ?? '',
+        troops: flat[i + 1],
+        maxTroops: flat[i + 2],
+        cells: flat[i + 3],
+        money: flat[i + 4],
+        alive: flat[i + 5] === 1,
+        bot: m?.bot ?? true,
+        strong: m?.strong ?? false,
+      });
+    }
+    return list;
+  };
   const [attacks, setAttacks] = useState<AttackPub[]>([]);
   // список входящих десантов: видно максимум 3, остальные — в раскрываемом списке
   const [incomingOpen, setIncomingOpen] = useState(false);
@@ -250,8 +300,9 @@ export default function App() {
         setPhase('lobby');
       } else if (msg.type === 'init') {
         gc.applyInit(msg.selfId, msg.w, msg.h, msg.terrainRle, msg.ownersRle);
-        gc.setPlayers(msg.players);
-        setPlayers(msg.players);
+        const initList = buildPlayers(msg.players, msg.playersMeta);
+        gc.setPlayers(initList);
+        setPlayers(initList);
         setRoomCode(msg.code);
         setSpawnLeft(msg.spawnSeconds ?? null);
         setWinner(null); // новый раунд (в т.ч. после реванша) — закрываем модалку
@@ -261,7 +312,7 @@ export default function App() {
         // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
         const upAttacks = msg.attacks ?? [];
         const upBoats = msg.boats ?? [];
-        const upBuildings = msg.buildings ?? [];
+        const upBuildings = buildBuildings(msg.buildings ?? []);
         gc.applyUpdate(msg.changes);
         // отложенный автозум к спавну — когда клетки уже пришли
         if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
@@ -287,7 +338,7 @@ export default function App() {
           setHumans(msg.humans ?? 1);
         }
         // список игроков сервер шлёт реже (раз в 500мс) — обрабатываем, когда есть
-        const pl = msg.players;
+        const pl = msg.players && msg.players.length ? buildPlayers(msg.players, msg.playersMeta) : null;
         if (pl && pl.length) {
           gc.setPlayers(pl);
           playersRef.current = pl;

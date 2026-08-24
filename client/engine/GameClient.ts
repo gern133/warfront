@@ -4,7 +4,6 @@ import {
   BoatPub,
   BuildingPub,
   BuildingType,
-  TradeShipPub,
   TruckPub,
   WarshipPub,
   TradeEarn,
@@ -83,6 +82,8 @@ export class GameClient {
     number,
     { len: number; cum: number[]; total: number; wob: number[] }
   >();
+  // маршруты лодок по id: сервер присылает ломаную один раз за рейс
+  private boatPaths = new Map<number, number[]>();
   private boatProg = new Map<number, number>(); // интерполированный прогресс лодок
 
   private img: ImageData | null = null;
@@ -104,7 +105,11 @@ export class GameClient {
 
   private attacks: AttackPub[] = [];
   private boats: BoatPub[] = [];
-  ships: TradeShipPub[] = []; // трейд-корабли (читает engine/render)
+  // Трейд-суда (читает engine/render) — в типизированных буферах, см. setShips
+  shipCount = 0;
+  shipX = new Float32Array(0);
+  shipY = new Float32Array(0);
+  shipOwner = new Int16Array(0);
   trucks: TruckPub[] = []; // грузовики заводов на дорогах
   roadLines: number[][] = []; // дороги от сервера: ломаные [x,y,...] в клетках
   private moneyPops: { x: number; y: number; amount: number; t0: number }[] = []; // всплывашки заработка
@@ -163,7 +168,7 @@ export class GameClient {
     this.buildings = [];
     this.buildingsSig = '';
     this.moneyPops = [];
-    this.ships = [];
+    this.shipCount = 0;
     this.missiles = [];
     this.fortField = new Int16Array(this.cells);
     this.buildNeutralColors();
@@ -347,8 +352,24 @@ export class GameClient {
     }
   }
 
-  setShips(ships: TradeShipPub[]) {
-    this.ships = ships ?? [];
+  // Приходит плоский массив целых по 3 числа на судно: [x·10, y·10, владелец].
+  // Держим в типизированных буферах: судов бывают сотни, и на каждый кадр это
+  // экономит и обход, и аллокации. Буферы переиспользуются между тиками.
+  setShips(flat: number[]) {
+    const n = flat ? (flat.length / 3) | 0 : 0;
+    if (this.shipX.length < n) {
+      const cap = Math.max(128, n * 2);
+      this.shipX = new Float32Array(cap);
+      this.shipY = new Float32Array(cap);
+      this.shipOwner = new Int16Array(cap);
+    }
+    for (let i = 0; i < n; i++) {
+      const k = i * 3;
+      this.shipX[i] = flat[k] / 10;
+      this.shipY[i] = flat[k + 1] / 10;
+      this.shipOwner[i] = flat[k + 2];
+    }
+    this.shipCount = n;
   }
 
   setTrucks(trucks: TruckPub[]) {
@@ -497,10 +518,17 @@ export class GameClient {
   }
 
   setBoats(boats: BoatPub[]) {
+    // Маршрут лодки сервер присылает ОДИН раз (дальше пустой массив), поэтому храним
+    // его по id и подставляем обратно: остальной код рисует след как раньше.
+    for (const b of boats) {
+      if (b.path && b.path.length) this.boatPaths.set(b.id, b.path);
+      else b.path = this.boatPaths.get(b.id) ?? [];
+    }
     this.boats = boats;
     // чистим кэш у исчезнувших лодок
     if (this.boatCum.size > boats.length) {
       const ids = new Set(boats.map((b) => b.id));
+      for (const id of this.boatPaths.keys()) if (!ids.has(id)) this.boatPaths.delete(id);
       for (const id of this.boatCum.keys())
         if (!ids.has(id)) {
           this.boatCum.delete(id);

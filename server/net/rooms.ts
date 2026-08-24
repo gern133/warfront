@@ -84,6 +84,8 @@ export function sendInit(ws: WebSocket, st: CState, room: Room) {
     terrainRle: rleEncode(room.game.terrain),
     ownersRle: rleEncode(room.game.owners),
     players: room.game.playersPub(),
+    // статику отдаём принудительно: новому клиенту нужны имена всех игроков
+    playersMeta: room.game.playersMetaPub(true),
     ...(room.phase === 'spawn'
       ? { spawnSeconds: Math.ceil((room.spawnTicks * TICK_MS) / 1000) }
       : {}),

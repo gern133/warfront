@@ -1,4 +1,5 @@
 import {
+  BUILDING_TYPES,
   PlayerPub,
   AttackPub,
   BoatPub,
@@ -141,6 +142,8 @@ import {
 export type { Player } from './types';
 export { DIFFICULTY, WEAK_COUNT, STRONG_COUNT } from './constants';
 
+const EMPTY_PATH: number[] = []; // «маршрут не изменился, бери из кэша»
+
 export class Game {
   readonly mapType: MapType;
   readonly w: number;
@@ -237,6 +240,7 @@ export class Game {
   tickNo = 0;
   landCount = 0;
   winnerId: number | null = null;
+  private playersMetaSig = ''; // подпись статики игроков (см. playersMetaPub)
   private nextId = 1;
   private nextBoatId = 1;
 
@@ -1251,6 +1255,7 @@ export class Game {
       totalLen: cum[cum.length - 1] || 1,
       traveled: 0,
       returning: false,
+      pathSent: false,
       landCell,
       x: sx + 0.5, // старт лодки — от нашего берега
       y: sy + 0.5,
@@ -2672,13 +2677,18 @@ export class Game {
     else this.tradeEarnings.push({ x, y, amount: s.payout, owner: s.owner });
   }
 
-  tradeShipsPub(): TradeShipPub[] {
-    return this.tradeShips.map((s) => ({
-      id: s.id,
-      owner: s.owner,
-      x: s.x,
-      y: s.y,
-    }));
+  // Трейд-суда шлём ПЛОСКИМ массивом целых по 3 числа на судно: [x·10, y·10, владелец].
+  // Раньше это был массив объектов с НЕОКРУГЛЁННЫМИ координатами:
+  //   {"id":4,"owner":282,"x":1270.1624249124886,"y":546.0668355342536}
+  // — 66 байт на судно, из которых 26 приходились на цифровой шум после запятой.
+  // При 400 судах это 26 КБ за тик, четверть всего кадра состояния. id клиенту не
+  // нужен: суда он только рисует точками.
+  tradeShipsPub(): number[] {
+    const out: number[] = [];
+    for (const s of this.tradeShips) {
+      out.push(Math.round(s.x * 10), Math.round(s.y * 10), s.owner);
+    }
+    return out;
   }
 
   // --- Ракетные шахты и ядерные удары ---
@@ -4240,44 +4250,70 @@ export class Game {
     this.launchAttackOwner(p.id, target, send);
   }
 
-  playersPub(): PlayerPub[] {
+  // Статика игроков (имя, бот/страна) — отдаётся ТОЛЬКО когда набор игроков
+  // изменился. Раньше имена и флаги уходили каждый тик для всех 293 игроков и
+  // составляли почти половину кадра состояния, хотя не меняются никогда.
+  playersMetaPub(force = false): { id: number; name: string; bot: boolean; strong: boolean }[] | null {
+    let sig = '';
+    for (const p of this.players.values()) sig += p.id + ':' + p.name + (p.bot ? 'b' : '') + (p.strong ? 's' : '') + ';';
+    if (!force && sig === this.playersMetaSig) return null; // ничего не изменилось
+    this.playersMetaSig = sig;
     return [...this.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
-      troops: Math.floor(p.troops),
-      maxTroops: p.maxTroops,
-      cells: p.cells,
-      alive: p.alive,
       bot: p.bot,
       strong: p.strong,
-      money: Math.floor(p.money),
     }));
   }
 
-  buildingsPub(): BuildingPub[] {
-    return this.buildings.map((b) => ({
-      id: b.id,
-      owner: b.owner,
-      cell: b.cell,
-      type: b.type,
-      progress: Math.max(
+  // Динамика игроков — плоский массив целых по 6 чисел на игрока:
+  // [id, войска, потолок, клетки, деньги, жив?]. Имя и флаги клиент берёт из меты.
+  playersPub(): number[] {
+    const out: number[] = [];
+    for (const p of this.players.values()) {
+      out.push(
+        p.id,
+        Math.floor(p.troops),
+        Math.floor(p.maxTroops),
+        p.cells,
+        Math.floor(p.money),
+        p.alive ? 1 : 0,
+      );
+    }
+    return out;
+  }
+
+  // Здания шлём ПЛОСКИМ массивом целых по 10 чисел на здание:
+  // [id, владелец, клетка, тип, уровень, заряд, прогресс·100, прогресс апгрейда·100,
+  //  фитиль·10, очередь апгрейдов].
+  // Раньше это был массив объектов со строковым типом и дробными прогрессами — около
+  // 120 байт на здание, то есть 24 КБ за тик при 200 постройках (треть кадра).
+  buildingsPub(): number[] {
+    const out: number[] = [];
+    for (const b of this.buildings) {
+      const progress = Math.max(
         0,
-        Math.min(1, 1 - (b.readyTick - this.tickNo) / (b.type === 'port' ? PORT_BUILD_TICKS : HQ_BUILD_TICKS))
-      ),
-      level: b.level,
-      fuse: b.fuseTick > 0 ? Math.max(0, (b.fuseTick - this.tickNo) / 10) : 0,
-      upProgress:
-        b.upEnd > b.upStart
-          ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
-          : 0,
-      upQueue: b.upQueue,
-      ammo:
-        b.type === 'silo'
-          ? b.stock
-          : b.type === 'sam'
-            ? Math.max(0, b.level - b.reloads.length)
-            : 0,
-    }));
+        Math.min(1, 1 - (b.readyTick - this.tickNo) / (b.type === 'port' ? PORT_BUILD_TICKS : HQ_BUILD_TICKS)),
+      );
+      const up = b.upEnd > b.upStart
+        ? Math.max(0, Math.min(1, (this.tickNo - b.upStart) / (b.upEnd - b.upStart)))
+        : 0;
+      const ammo =
+        b.type === 'silo' ? b.stock : b.type === 'sam' ? Math.max(0, b.level - b.reloads.length) : 0;
+      out.push(
+        b.id,
+        b.owner,
+        b.cell,
+        BUILDING_TYPES.indexOf(b.type),
+        b.level,
+        ammo,
+        Math.round(progress * 100),
+        Math.round(up * 100),
+        b.fuseTick > 0 ? Math.round(Math.max(0, (b.fuseTick - this.tickNo) / 10) * 10) : 0,
+        b.upQueue,
+      );
+    }
+    return out;
   }
 
   attacksPub(): AttackPub[] {
@@ -4287,20 +4323,29 @@ export class Game {
   }
 
   boatsPub(): BoatPub[] {
-    return this.boats.map((b) => ({
+    const out = this.boats.map((b) => ({
       id: b.id,
       player: b.player,
       target: b.target,
       troops: Math.floor(b.troops),
       x: +b.x.toFixed(1),
       y: +b.y.toFixed(1),
-      // полный маршрут — клиент считает позицию по той же геометрии, что сервер
-      path: b.path,
+      // Маршрут — только в первый раз: он не меняется за рейс, а клиент его кэширует
+      // по id лодки. Пустой массив = «используй кэш».
+      path: b.pathSent ? EMPTY_PATH : b.path,
       // доля пройденного пути по дистанции
       prog: Math.max(0, Math.min(1, b.traveled / b.totalLen)),
       // сколько секунд осталось идти: отозванный возвращается к началу маршрута
       eta: Math.max(0, (b.returning ? b.traveled : b.totalLen - b.traveled) / BOAT_SPEED / 10),
       returning: b.returning,
     }));
+    for (const b of this.boats) b.pathSent = true;
+    return out;
+  }
+
+  /** Заново отправить маршруты всех лодок: нужно, когда в игру входит новый клиент —
+   *  иначе он не увидит следов десантов, отправленных до его подключения. */
+  resendBoatPaths() {
+    for (const b of this.boats) b.pathSent = false;
   }
 }

@@ -1,5 +1,5 @@
 import { NUKES, DRONE_BLAST_R } from '../../../shared/protocol';
-import { DRONE_DOT_SIZE_MAX } from '../constants';
+import { DRONE_DOT_SIZE_MAX, SHIP_DOT_RADIUS_MAX } from '../constants';
 import { playerColorCSS } from '../../../shared/color';
 import type { GameClient } from '../GameClient';
 
@@ -121,24 +121,68 @@ export function drawDrones(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: n
   }
 }
 
-// Трейд-корабли: кружки без следа (для производительности)
+// ─── Трейд-суда ─────────────────────────────────────────────────────────────
+// Судов бывают СОТНИ (в замере 400 при 43 портах). Раньше на каждое каждый кадр
+// делалось: beginPath + arc + fill + stroke и две установки стиля, причём fillStyle
+// собирался строкой — то есть ~1800 вызовов и 400 аллокаций на кадр при 60 кадрах/с.
+//
+// Теперь так же, как у дронов: кружок с обводкой отрисован заранее в offscreen-канвас
+// (для каждого владельца и радиуса), и в кадре остаётся ОДИН drawImage на судно.
+// На сильном отдалении — точки, сгруппированные по владельцу.
+const shipSpriteCache = new Map<string, HTMLCanvasElement>();
+
+function shipSprite(owner: number, rad: number, dpr: number): HTMLCanvasElement {
+  const key = `${owner}|${rad}|${dpr}`;
+  let cv = shipSpriteCache.get(key);
+  if (cv) return cv;
+  const box = Math.ceil(rad * 2 + 4);
+  cv = document.createElement('canvas');
+  cv.width = Math.ceil(box * dpr);
+  cv.height = Math.ceil(box * dpr);
+  const c = cv.getContext('2d')!;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.beginPath();
+  c.arc(box / 2, box / 2, rad, 0, Math.PI * 2);
+  c.fillStyle = playerColorCSS(owner);
+  c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.7)';
+  c.lineWidth = 1.5;
+  c.stroke();
+  shipSpriteCache.set(key, cv);
+  return cv;
+}
+
 export function drawShips(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {
-  if (!gc.ships.length) return;
+  const n = gc.shipCount;
+  if (!n) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const rad = Math.max(2.5, Math.min(6, gc.zoom * 0.9));
-  ctx.lineWidth = 1.5;
-  for (const s of gc.ships) {
-    const sx = gc.panX + s.x * gc.zoom;
-    const sy = gc.panY + s.y * gc.zoom;
-    if (sx < -20 || sy < -20 || sx > vw + 20 || sy > vh + 20) continue;
-    ctx.beginPath();
-    ctx.arc(sx, sy, rad, 0, Math.PI * 2);
-    ctx.fillStyle = playerColorCSS(s.owner);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-    ctx.stroke();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const z = gc.zoom, px = gc.panX, py = gc.panY;
+  const sx0 = gc.shipX, sy0 = gc.shipY, sow = gc.shipOwner;
+  const rad = Math.round(Math.max(2.5, Math.min(6, z * 0.9)) * 2) / 2; // шаг 0.5 — меньше вариантов в кэше
+  if (rad <= SHIP_DOT_RADIUS_MAX) {
+    // ОТДАЛЁННАЯ КАРТА: обводка на 2–3 пикселях не видна. Точки, сгруппированные по
+    // владельцу, чтобы fillStyle ставился раз на группу.
+    const d = Math.max(2, Math.round(rad * 2));
+    const owners: number[] = [];
+    for (let i = 0; i < n; i++) if (!owners.includes(sow[i])) owners.push(sow[i]);
+    for (const owner of owners) {
+      ctx.fillStyle = playerColorCSS(owner);
+      for (let i = 0; i < n; i++) {
+        if (sow[i] !== owner) continue;
+        const x = px + sx0[i] * z, y = py + sy0[i] * z;
+        if (x < -20 || y < -20 || x > vw + 20 || y > vh + 20) continue;
+        ctx.fillRect(x - d / 2, y - d / 2, d, d);
+      }
+    }
+    return;
+  }
+  const box = Math.ceil(rad * 2 + 4);
+  const half = box / 2;
+  for (let i = 0; i < n; i++) {
+    const x = px + sx0[i] * z, y = py + sy0[i] * z;
+    if (x < -20 || y < -20 || x > vw + 20 || y > vh + 20) continue;
+    ctx.drawImage(shipSprite(sow[i], rad, dpr), x - half, y - half, box, box);
   }
 }
 
