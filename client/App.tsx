@@ -58,6 +58,9 @@ export default function App() {
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
   const [nukeKind, setNukeKind] = useState<string | null>(null); // выбранная ракета для наведения
+  // «Залипающий» режим бомбардировки: выбран с Shift, поэтому после пуска НЕ
+  // сбрасывается — можно бить по цели за целью, не нажимая 8/9 перед каждым сбросом.
+  const [nukeSticky, setNukeSticky] = useState(false);
   const [fleetMode, setFleetMode] = useState(false); // выбран инструмент «Боевой флот»
   const [droneMode, setDroneMode] = useState(false); // выбран инструмент «Рой дронов»
   const [shownMoney, setShownMoney] = useState(0);
@@ -103,6 +106,8 @@ export default function App() {
   buildModeRef.current = buildMode;
   const nukeKindRef = useRef<string | null>(null);
   nukeKindRef.current = nukeKind;
+  const nukeStickyRef = useRef(false);
+  nukeStickyRef.current = nukeSticky;
   const fleetModeRef = useRef(false);
   fleetModeRef.current = fleetMode;
   const droneModeRef = useRef(false);
@@ -153,7 +158,9 @@ export default function App() {
         // режим наведения ракеты — клик = пуск выбранного типа в цель
         if (nukeKindRef.current) {
           sendMsg({ type: 'nuke', cell, kind: nukeKindRef.current });
-          setNukeKind(null);
+          // обычный режим — один пуск и выход; залипающий (выбран с Shift) остаётся
+          // включённым, чтобы сбрасывать подряд без повторного нажатия 8/9
+          if (!nukeStickyRef.current) setNukeKind(null);
           return;
         }
         // режим флота — клик = выпустить боевой корабль из ближайшего порта в зону
@@ -413,6 +420,7 @@ export default function App() {
       if (e.key === 'Escape') {
         if (nukeKindRef.current) {
           setNukeKind(null);
+          setNukeSticky(false);
           return;
         }
         if (buildModeRef.current) {
@@ -445,10 +453,13 @@ export default function App() {
         const idx = e.key === '0' ? 9 : +e.key - 1;
         const nk = TOOLS[idx]?.nuke;
         if (nk) {
-          // ☢️/💥 — режим наведения выбранной ракеты
+          // ☢️/💥 — режим наведения. С Shift режим ЗАЛИПАЕТ: после пуска остаётся
+          // включённым, и можно сбрасывать подряд, не нажимая 8/9 каждый раз.
           if (nukeAffordRef.current[nk]) {
             setBuildMode(null);
-            setNukeKind((k) => (k === nk ? null : nk));
+            const sticky = e.shiftKey;
+            setNukeKind((k) => (k === nk && nukeStickyRef.current === sticky ? null : nk));
+            setNukeSticky(sticky);
           }
           return;
         }
@@ -931,7 +942,10 @@ export default function App() {
           )}
           {nukeKind && (
             <div className="build-hint nuke-hint">
-              🎯 Цель для «{NUKES[nukeKind].name}» — вылетит из ближайшей шахты ({fmtK(NUKES[nukeKind].cost)}). Esc — отмена
+              🎯 Цель для «{NUKES[nukeKind].name}» — вылетит из ближайшей шахты ({fmtK(NUKES[nukeKind].cost)}).{' '}
+              {nukeSticky
+                ? 'Непрерывный сброс: бей по цели за целью. Esc — выйти'
+                : 'Shift+' + (nukeKind === 'basic' ? '8' : '9') + ' — непрерывный сброс. Esc — отмена'}
             </div>
           )}
           {fleetMode && (
@@ -1052,16 +1066,19 @@ export default function App() {
                     disabled={!usable}
                     title={
                       active
-                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (nk ? ' — нужна заряженная шахта' : ' — не хватает денег')}`
+                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (nk ? ' — нужна заряженная шахта' : ' — не хватает денег')}${nk ? ' · Shift — непрерывный сброс' : ''}`
                         : `${t.name} — скоро`
                     }
-                    onClick={() => {
+                    onClick={(e) => {
                       if (!usable) return;
                       if (nk) {
                         setBuildMode(null);
                         setFleetMode(false);
                         setDroneMode(false);
-                        setNukeKind((k) => (k === nk ? null : nk));
+                        // Shift — залипающий режим: после пуска остаётся включённым
+                        const sticky = e.shiftKey;
+                        setNukeKind((k) => (k === nk && nukeSticky === sticky ? null : nk));
+                        setNukeSticky(sticky);
                       } else if (t.drone) {
                         setBuildMode(null);
                         setNukeKind(null);

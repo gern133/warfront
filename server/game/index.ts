@@ -96,8 +96,7 @@ import {
   DEFEND_BOOST_TICKS,
   ATTACK_NOTICE_GAP,
   ROUTE_BUDGET,
-  LANDING_CLICK_W,
-  LANDING_SEARCH_SLACK,
+  BOAT_SEED_TRIES,
   BOT_TRIGGER,
   BOT_RESERVE,
   BOT_GUARD,
@@ -230,9 +229,6 @@ export class Game {
   private fineDisc: Int32Array = new Int32Array(0); // «поколение» открытия клетки
   private fineClosed: Int32Array = new Int32Array(0);
   private fineG: Int32Array = new Int32Array(0); // стоимость пути до клетки
-  // ДЛИНА пути в шагах (без штрафа за прибрежность): по ней сравниваются варианты
-  // высадки, иначе штраф ×3 искажает выбор в пользу берега рядом с нашим
-  private fineSteps: Int32Array = new Int32Array(0);
   private heapCell: Int32Array = new Int32Array(0);
   private heapKey: Int32Array = new Int32Array(0);
   private fineGen = 0;
@@ -377,7 +373,6 @@ export class Game {
       this.fineDisc = new Int32Array(N);
       this.fineClosed = new Int32Array(N);
       this.fineG = new Int32Array(N);
-      this.fineSteps = new Int32Array(N);
       this.heapCell = new Int32Array(N + 1);
       this.heapKey = new Int32Array(N + 1);
     }
@@ -632,30 +627,6 @@ export class Game {
     return -1;
   }
 
-  // Клетка суши ИМЕННО целевого материка рядом с водной клеткой (конец маршрута
-  // десанта). Раньше брался nearestLandCell в радиусе ck*2 — любая суша, включая
-  // свою и третьих лиц, из-за чего десант мог «высадиться» не на том берегу.
-  private nearestLandCellOfIsland(waterCell: number, land: number, owner = -2): number {
-    const w = this.w;
-    const x = waterCell % w;
-    const y = (waterCell / w) | 0;
-    for (let r = 1; r <= 4; r++) {
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= this.h) continue;
-        const stepX = Math.abs(dy) === r ? 1 : 2 * r;
-        for (let dx = -r; dx <= r; dx += stepX) {
-          const nx = x + dx;
-          if (nx < 0 || nx >= w) continue;
-          const c = ny * w + nx;
-          if (!this.terrain[c] || this.landId[c] !== land) continue;
-          if (owner !== -2 && this.owners[c] !== owner) continue;
-          return c;
-        }
-      }
-    }
-    return -1;
-  }
 
   // ближайшая клетка суши, принадлежащая игроку owner (для точки посадки десанта —
   // чтобы десант выходил именно с нашего берега, даже если вражеский ближе)
@@ -684,29 +655,23 @@ export class Game {
   // материку с этим landId (десант к берегу); targetLand < 0 — сама точка (cx,cy)
   // (боевой корабль идёт в морскую зону). Путь держится открытой воды, проходит
   // проливы, по суше НЕ идёт. null — цель морем недостижима.
-  private waterPathFine(
-    seeds: number[],
-    targetLand: number,
-    cx: number,
-    cy: number,
-    landOwner = -2,
-  ): number[] | null {
+  // Точный A* по воде из набора клеток-засева в ТОЧКУ (cx,cy). Раньше у него был
+  // второй режим — «дойти до берега такого-то материка и выбрать лучший вариант
+  // высадки», но выбор высадки теперь делается заранее и по прямой (см.
+  // nearestLandingByAir), поэтому режим убран вместе со своей оценкой.
+  private waterPathFine(seeds: number[], cx: number, cy: number): number[] | null {
     const w = this.w, h = this.h, N = w * h;
     const gx = cx, gy = cy; // эвристика тянет к точке цели
-    const R2 = 25; // окно «дошли вплотную к цели» (5 клеток)
-    const pointMode = targetLand < 0; // цель — точка в море, а не берег материка
     if (this.finePrev.length !== N) {
       this.finePrev = new Int32Array(N);
       this.fineDisc = new Int32Array(N);
       this.fineClosed = new Int32Array(N);
       this.fineG = new Int32Array(N);
-      this.fineSteps = new Int32Array(N);
       this.heapCell = new Int32Array(N + 1);
       this.heapKey = new Int32Array(N + 1);
     }
     const gen = ++this.fineGen;
     const prev = this.finePrev, disc = this.fineDisc, closed = this.fineClosed, g = this.fineG;
-    const steps = this.fineSteps;
     const hc = this.heapCell, hk = this.heapKey;
     let hn = 0;
     const cheb = (c: number) => {
@@ -741,31 +706,10 @@ export class Game {
     // засев: все переданные водные клетки у берега игрока
     for (const c of seeds) {
       if (c < 0 || c >= N || this.terrain[c] || disc[c] === gen) continue;
-      disc[c] = gen; g[c] = 0; steps[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c);
+      disc[c] = gen; g[c] = 0; prev[c] = -1; hc[++hn] = c; hk[hn] = cheb(c);
     }
     if (hn === 0) return null;
-    // Годится ли клетка суши как берег высадки: тот же материк и, если задан
-    // landOwner, — именно его земля.
-    //
-    // Фильтр по владельцу обязателен, когда цель на НАШЕМ ЖЕ материке (общая
-    // сухопутная граница): без него «берегом цели» оказывался и наш собственный
-    // берег — он на том же материке, да ещё и с нулевой стоимостью рейса (это
-    // засев). Десант «высаживался» на свою землю в двух клетках от старта, то есть
-    // выплывал и сразу возвращался. Замер: 50% запусков по соседу с общей
-    // границей. Снег (Антарктида, арктические острова) — тоже суша, поэтому
-    // проверяем terrain > 0, а не === 1.
-    const okLand = (lc: number) =>
-      this.terrain[lc] > 0 &&
-      this.landId[lc] === targetLand &&
-      (landOwner === -2 || this.owners[lc] === landOwner);
-    const touchesTarget = (x: number, y: number) =>
-      (x > 0 && okLand(y * w + x - 1)) ||
-      (x < w - 1 && okLand(y * w + x + 1)) ||
-      (y > 0 && okLand((y - 1) * w + x)) ||
-      (y < h - 1 && okLand((y + 1) * w + x));
     let endCell = -1, bestCell = -1, bestD = Infinity, explored = 0;
-    let bestScore = Infinity; // лучшая оценка варианта высадки (см. ниже)
-    let foundAt = -1; // на каком шаге нашли первый вариант
     // страховка от «недостижимого» берега: если исследовали слишком много воды и
     // так и не коснулись цели — считаем недостижимым (обычному маршруту хватает тысяч)
     const EXPLORE_CAP = 300_000;
@@ -779,36 +723,9 @@ export class Game {
       const x = c % w, y = (c / w) | 0;
       const gc = g[c];
       const ex = x - gx, ey = y - gy, ed = ex * ex + ey * ey;
-      if (pointMode) {
-        // цель — морская точка: ближайшую всегда помним, финиш вплотную
-        if (ed < bestD) { bestD = ed; bestCell = c; }
-        if (ed <= 4) { endCell = c; break; }
-      } else if (touchesTarget(x, y)) {
-        // Вода у берега цели — кандидат на высадку. Оценка варианта:
-        //   score = стоимость рейса (g) + LANDING_CLICK_W · удалённость от клика.
-        // Раньше выбирался просто БЛИЖАЙШИЙ к клику берег. При клике внутрь
-        // территории (а так обычно и целятся) ближайший к клику берег часто на
-        // противоположной от нас стороне материка — десант шёл вокруг, и старт
-        // получался с дальней точки. Замер на случайной карте: 28% запусков с
-        // рейсом ≥1.5× длиннее необходимого, худший — 934 клетки вместо 174.
-        // Длина рейса в ШАГАХ, а не в стоимости g: g содержит штраф ×3 за
-        // прибрежные клетки, из-за которого «дорогой» дальний рейс проигрывал
-        // высадке у самого нашего берега — при общей сухопутной границе десант
-        // высаживался в двух клетках от старта вместо места клика.
-        const score = steps[c] + LANDING_CLICK_W * Math.sqrt(ed);
-        if (score < bestScore) { bestScore = score; bestCell = c; }
-        if (foundAt < 0) foundAt = explored;
-        // ДОШЛИ до места клика (вода у берега цели в пяти клетках от него) —
-        // дальше искать нечего, это и есть желаемая высадка. Эвристика поиска
-        // тянет фронт к клику, поэтому такой финиш и дёшев, и предсказуем.
-        if (ed <= R2) { endCell = c; break; }
-        // Страховка на случай, когда до клика морем не добраться вовсе: тогда
-        // берём лучший из найденных вариантов, изучив ограниченный запас. Предел
-        // должен быть БОЛЬШИМ: первый вариант часто находится у нашего же берега,
-        // и маленький запас (пробовал 1200) обрывал поиск задолго до клика — из-за
-        // этого вес близости к клику вообще ни на что не влиял.
-        if (explored > foundAt + LANDING_SEARCH_SLACK) break;
-      }
+      // ближайшую к цели клетку всегда помним, финиш — вплотную
+      if (ed < bestD) { bestD = ed; bestCell = c; }
+      if (ed <= 4) { endCell = c; break; }
       for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++) {
           if (!dx && !dy) continue;
@@ -819,7 +736,6 @@ export class Game {
           // не срезаем угол суши по диагонали
           if (dx && dy && (this.terrain[y * w + nx] || this.terrain[ny * w + x])) continue;
           disc[nc] = gen; g[nc] = gc + 1 + (this.isCoastalCell(nx, ny) ? COAST : 0); prev[nc] = c;
-          steps[nc] = steps[c] + 1;
           hc[++hn] = nc; hk[hn] = g[nc] + cheb(nc); siftUp(hn);
         }
     }
@@ -1185,6 +1101,51 @@ export class Game {
 
 
 
+  // Берег высадки: клетка суши ЖЕРТВЫ, ближайшая к точке клика ПО ПРЯМОЙ, у которой
+  // есть выход в воду, достижимую от нашего берега. Растущее окно: как только нашли
+  // кандидата на расстоянии d, дальше окна радиуса > d смысла не имеют, поэтому
+  // расширяемся только пока это может дать что-то ближе.
+  // Возвращает клетку суши и клетку воды рядом с ней, куда причаливать.
+  private nearestLandingByAir(
+    targetCell: number,
+    victim: number,
+    comps: Set<number>,
+    maxR = 150,
+  ): { land: number; water: number } | null {
+    const w = this.w;
+    const h = this.h;
+    const tx = targetCell % w;
+    const ty = (targetCell / w) | 0;
+    let best: { land: number; water: number } | null = null;
+    let bestD2 = Infinity;
+    for (let r = 0; r <= maxR; r++) {
+      if (bestD2 <= r * r) break; // ближе уже не найти
+      for (let dy = -r; dy <= r; dy++) {
+        const y = ty + dy;
+        if (y < 0 || y >= h) continue;
+        const stepX = Math.abs(dy) === r ? 1 : 2 * r; // только кромка кольца
+        for (let dx = -r; dx <= r; dx += stepX) {
+          const x = tx + dx;
+          if (x < 0 || x >= w) continue;
+          const d2 = dx * dx + dy * dy; // расстояние ПО ПРЯМОЙ
+          if (d2 >= bestD2) continue;
+          const c = y * w + x;
+          if (!this.terrain[c] || this.owners[c] !== victim) continue;
+          // выход в достижимую нами воду
+          let wc = -1;
+          if (x > 0 && this.ocean[c - 1] && comps.has(this.waterId[c - 1])) wc = c - 1;
+          else if (x < w - 1 && this.ocean[c + 1] && comps.has(this.waterId[c + 1])) wc = c + 1;
+          else if (y > 0 && this.ocean[c - w] && comps.has(this.waterId[c - w])) wc = c - w;
+          else if (y < h - 1 && this.ocean[c + w] && comps.has(this.waterId[c + w])) wc = c + w;
+          if (wc < 0) continue;
+          bestD2 = d2;
+          best = { land: c, water: wc };
+        }
+      }
+    }
+    return best;
+  }
+
   // Вода, примыкающая к нашему берегу: и засев морского маршрута, и множество
   // достижимых нами водных бассейнов. Один проход по своим клеткам вместо двух.
   private ownShoreWater(playerId: number): { seeds: number[]; comps: Set<number> } {
@@ -1220,24 +1181,33 @@ export class Game {
     // наш выход к морю: вода у своего берега + бассейны, куда мы вообще можем плыть
     const own = this.ownShoreWater(playerId);
     if (own.seeds.length === 0) return false; // нет выхода к морю
-    // Клетка высадки и точка отправки выбираются ОДНИМ поиском: засеваем все свои
-    // выходы к морю с нулевой ценой, и A* сам находит вариант высадки с лучшей
-    // оценкой «короткий рейс + рядом с кликом» (см. waterPathFine), а началом пути
-    // оказывается тот наш берег, с которого этот рейс и идёт — то есть ближайший
-    // к цели по воде. Это логика closestShoreByWater из OpenFront.
-    const lx0 = targetCell % this.w;
-    const ly0 = (targetCell / this.w) | 0;
-    const targetLand = this.landId[targetCell];
-    // Высаживаемся на берег ТОГО, по кому кликнули (владелец кликнутой клетки;
-    // 0 — нейтраль). Иначе на своём же материке «берегом цели» оказывается наш
-    // собственный берег, и лодка возвращается, не доплыв до врага.
+    // ВЫСАДКА: берег жертвы, ближайший к точке клика ПО ПРЯМОЙ. Высаживаемся именно
+    // на берег того, по кому кликнули (0 — нейтраль): иначе на своём же материке
+    // «берегом цели» оказывается наш собственный берег и лодка возвращается, не
+    // доплыв до врага.
     const victim = this.owners[targetCell];
-    const fine = this.waterPathFine(own.seeds, targetLand, lx0, ly0, victim);
+    const pick = this.nearestLandingByAir(targetCell, victim, own.comps);
+    if (!pick) return false; // морем к этой точке не подойти
+    const landCell = pick.land;
+    const wx = pick.water % this.w;
+    const wy = (pick.water / this.w) | 0;
+    // ОТПРАВКА: наш выход к морю, ближайший к точке высадки ПО ПРЯМОЙ. Берём только
+    // выходы в тот же водный бассейн, иначе путь заведомо не найдётся. Если от
+    // ближайшего берега пути всё-таки нет (редкий случай: узкая щель, через которую
+    // нельзя протиснуться), пробуем следующие по близости, и лишь в самом конце —
+    // все сразу, чтобы десант не отменялся молча.
+    const comp = this.waterId[pick.water];
+    const ranked = own.seeds
+      .filter((c) => this.waterId[c] === comp)
+      .map((c) => ({ c, d2: ((c % this.w) - wx) ** 2 + (((c / this.w) | 0) - wy) ** 2 }))
+      .sort((a, b) => a.d2 - b.d2);
+    if (ranked.length === 0) return false;
+    let fine: number[] | null = null;
+    for (let i = 0; i < Math.min(ranked.length, BOAT_SEED_TRIES) && !fine; i++) {
+      fine = this.waterPathFine([ranked[i].c], wx, wy);
+    }
+    if (!fine) fine = this.waterPathFine(own.seeds.filter((c) => this.waterId[c] === comp), wx, wy);
     if (!fine) return false;
-    // фактическая клетка высадки — берег цели у конца найденного маршрута
-    const arr = fine[fine.length - 1];
-    const landCell = this.nearestLandCellOfIsland(arr, targetLand, victim);
-    if (landCell < 0) return false;
     const lx = landCell % this.w;
     const ly = (landCell / this.w) | 0;
     // отправка десанта на чужую территорию — уже объявление войны: жертва
@@ -1313,7 +1283,7 @@ export class Game {
         if (!this.terrain[c]) seeds.push(c);
       }
     if (!seeds.length) return null;
-    const fine = this.waterPathFine(seeds, -1, wx, wy);
+    const fine = this.waterPathFine(seeds, wx, wy);
     if (!fine) return null;
     // спрямление с проверкой воды на каждом отрезке (см. launchBoat)
     const path: number[] = [fromX + 0.5, fromY + 0.5];
