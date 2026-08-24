@@ -14,7 +14,9 @@ interface Props {
 export function LobbyScreen({ lobby, copied, onCopyLink, onSetSettings, onStart, onLeave }: Props) {
   const s = lobby.settings;
   const multiplayer = lobby.players.length > 1;
-  const canEdit = lobby.host && !multiplayer; // песочные настройки — только в одиночку
+  // Песочные настройки (бесконечные деньги/армия) доступны хосту и в онлайне: они
+  // действуют на ВСЕХ людей в комнате одинаково, так что нечестного преимущества нет.
+  const canEdit = lobby.host;
   return (
     <div className="overlay">
       <div className="menu">
@@ -81,7 +83,11 @@ export function LobbyScreen({ lobby, copied, onCopyLink, onSetSettings, onStart,
             </label>
           </div>
           {multiplayer && (
-            <span className="setting-note">Доступно только в одиночной игре</span>
+            <span className="setting-note">
+              {lobby.host
+                ? 'Действует на всех игроков комнаты'
+                : 'Настройки задаёт хост комнаты'}
+            </span>
           )}
         </div>
 

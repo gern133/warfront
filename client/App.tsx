@@ -27,9 +27,9 @@ import {
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
 import { Phase, MenuView, LobbyInfo } from './types';
-import { TOOLS, INCOMING_VISIBLE } from './constants/ui';
+import { TOOLS, INCOMING_VISIBLE, ATTACK_FLASH_MS, ATTACK_BANNER_MS } from './constants/ui';
 import { ICON_URLS } from './engine/icons';
-import { fmtK } from './lib/format';
+import { fmtK, fmtEta, fmtTroops } from './lib/format';
 import { MenuScreen } from './screens/MenuScreen';
 import { LobbyScreen } from './screens/LobbyScreen';
 import { DeadScreen, WinnerModal } from './screens/EndScreens';
@@ -51,6 +51,9 @@ export default function App() {
   const [attacks, setAttacks] = useState<AttackPub[]>([]);
   // список входящих десантов: видно максимум 3, остальные — в раскрываемом списке
   const [incomingOpen, setIncomingOpen] = useState(false);
+  // «вас захватывают»: красная рамка на пару секунд + кликабельный баннер сверху
+  const [underAttack, setUnderAttack] = useState<{ name: string; x?: number; y?: number } | null>(null);
+  const [attackFlash, setAttackFlash] = useState(false);
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
@@ -323,7 +326,17 @@ export default function App() {
               ? `${msg.name} расторг союз с вами`
               : msg.kind === 'trade'
                 ? `${msg.name} уничтожил ваш торговый корабль`
-                : `${msg.name} отклонил ваш союз`;
+                : msg.kind === 'attacked'
+                  ? `${msg.name} захватывает вашу территорию`
+                  : `${msg.name} отклонил ваш союз`;
+        if (msg.kind === 'attacked') {
+          // красная рамка вспыхивает на пару секунд, баннер сверху живёт дольше —
+          // по нему можно кликнуть и перенестись к месту прорыва
+          setUnderAttack({ name: msg.name, x: msg.x, y: msg.y });
+          setAttackFlash(true);
+          setTimeout(() => setAttackFlash(false), ATTACK_FLASH_MS);
+          setTimeout(() => setUnderAttack(null), ATTACK_BANNER_MS);
+        }
         setNotices((n) => [...n, { id, ok, text, x: msg.x, y: msg.y }].slice(-30)); // история — до 30
         setLiveNotices((l) => [...l, id]);
         setTimeout(() => setLiveNotices((l) => l.filter((x) => x !== id)), 5000);
@@ -525,6 +538,12 @@ export default function App() {
     .reduce((s, b) => s + b.level, 0);
   const nextFactoryCost = factoryCost(myFactoryLevels);
   const mySilos = buildings.filter((b) => b.owner === gc.selfId && b.type === 'silo').length;
+  // Суммарный уровень шахт: уровень задаёт размер залпа, поэтому в бейдже показываем
+  // его, а не число построек — иначе апгрейд не давал +1, как у порта раньше.
+  // Само число шахт (mySilos) нужно отдельно: рой дронов требует хотя бы одну шахту.
+  const mySiloLevels = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'silo')
+    .reduce((n, b) => n + b.level, 0);
   const mySams = buildings.filter((b) => b.owner === gc.selfId && b.type === 'sam').length;
   // суммарный уровень ПВО → цена следующей покупки (в общем)
   const mySamLevels = buildings
@@ -555,7 +574,12 @@ export default function App() {
   const cheapestPortUpg = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'port')
     .reduce((min, b) => Math.min(min, portUpgradeCost(b.level + 1)), Infinity);
-  const nextPortCost = portCost(myPorts); // цена нового порта растёт с их числом
+  // цена нового порта — по СУММЕ УРОВНЕЙ портов (как у заводов и ПВО), а не по их
+  // числу: иначе апгрейды порта не удорожали следующий порт вовсе
+  const myPortLevels = buildings
+    .filter((b) => b.owner === gc.selfId && b.type === 'port')
+    .reduce((n, b) => n + b.level, 0);
+  const nextPortCost = portCost(myPortLevels);
   canBuildPortRef.current = shownMoney >= Math.min(nextPortCost, cheapestPortUpg);
   // город (клавиша 1): можно, если хватает на новый ИЛИ на апгрейд своего
   canBuildCityRef.current = shownMoney >= Math.min(nextCityCost, cheapestCityUpg);
@@ -797,6 +821,23 @@ export default function App() {
         </div>
       )}
 
+      {/* Красная рамка по краям экрана: мгновенный сигнал «тебя захватывают», как в
+          OpenFront. Живёт пару секунд и не перехватывает клики. */}
+      {attackFlash && <div className="attack-flash" />}
+      {/* Баннер сверху: кто и где — по клику камера переносится к месту прорыва */}
+      {underAttack && (
+        <button
+          className="attack-banner"
+          onClick={() => {
+            if (underAttack.x !== undefined) gc.focusOn(underAttack.x, underAttack.y!);
+            setUnderAttack(null);
+          }}
+          title="Показать место захвата"
+        >
+          ⚠ {underAttack.name} захватывает вашу территорию
+          {underAttack.x !== undefined && <span className="attack-banner-go">⌖ показать</span>}
+        </button>
+      )}
       {phase === 'playing' && self && (
         <div className="hud-stack">
           {incoming.length > 0 && (
@@ -813,8 +854,10 @@ export default function App() {
                 >
                   <span className="inc-dot" style={{ background: playerColorCSS(b.player) }} />
                   <span className="inc-text">
-                    🚢 <b>{b.troops.toLocaleString('ru')}</b> плывёт от {nameOf(b.player)}
+                    🚢 <b>{fmtTroops(b.troops)}</b> от {nameOf(b.player)}
                   </span>
+                  {/* до высадки — по таймеру, а не «на глаз» по положению кружка */}
+                  <span className="inc-eta">{fmtEta(b.eta)}</span>
                   <span className="inc-focus">⌖</span>
                 </button>
               ))}
@@ -828,9 +871,11 @@ export default function App() {
                     {incomingOpen
                       ? '▲ свернуть'
                       : `▼ ещё ${incoming.length - INCOMING_VISIBLE} · всего ${incoming.length
-                        } десантов, ${incoming
-                          .reduce((s, b) => s + b.troops, 0)
-                          .toLocaleString('ru')} войск`}
+                        } десантов, ${fmtTroops(
+                          incoming.reduce((s, b) => s + b.troops, 0)
+                        )} войск · ближайший через ${fmtEta(
+                          Math.min(...incoming.map((b) => b.eta))
+                        )}`}
                   </span>
                 </button>
               )}
@@ -840,7 +885,9 @@ export default function App() {
             <div className="myboats">
               {myBoats.map((b) => (
                 <span key={b.id} className="myboat">
-                  🚢 {b.troops.toLocaleString('ru')} → {nameOf(b.target) === '?' ? 'берег' : nameOf(b.target)}
+                  🚢 {fmtTroops(b.troops)}{' '}
+                  {b.returning ? '↩ домой' : `→ ${nameOf(b.target) === '?' ? 'берег' : nameOf(b.target)}`}
+                  <span className="myboat-eta">{fmtEta(b.eta)}</span>
                   <button
                     className="myboat-recall"
                     title="Отозвать десант"
@@ -950,8 +997,14 @@ export default function App() {
                             : t.bt === 'sam'
                               ? nextSamCost
                               : nextHqCost;
-                // для города/завода/ПВО показываем СУММАРНЫЙ уровень (общий уровень —
-                // от него зависят цена и эффект), для остального — количество
+                // Для города/завода/ПОРТА/ПВО показываем СУММАРНЫЙ уровень: именно от
+                // него зависят и цена следующей постройки, и эффект. Порт был
+                // исключением — показывал количество, поэтому апгрейд не увеличивал
+                // счётчик, а цена следующего порта росла как будто без причины.
+                // У ШАХТЫ показываем суммарный уровень (уровень = размер залпа), хотя
+                // цена у неё плоская — 1 млн и за постройку, и за апгрейд. У ШТАБА и в
+                // слоте роя дронов — количество: у штаба от него зависит цена, а рою
+                // важно, есть ли вообще шахта, с которой он вылетит.
                 const count = nk
                   ? nukeAmmo
                   : t.drone
@@ -959,13 +1012,13 @@ export default function App() {
                     : t.fleet
                     ? myWarshipCount
                     : t.bt === 'port'
-                      ? myPorts
+                      ? myPortLevels
                       : t.bt === 'city'
                         ? myCityLevels
                         : t.bt === 'factory'
                           ? myFactoryLevels
                           : t.bt === 'silo'
-                            ? mySilos
+                            ? mySiloLevels
                             : t.bt === 'sam'
                               ? mySamLevels
                               : t.bt === 'hq'

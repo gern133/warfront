@@ -94,6 +94,7 @@ import {
   WAVE_SPEED,
   DEFEND_BOOST,
   DEFEND_BOOST_TICKS,
+  ATTACK_NOTICE_GAP,
   ROUTE_BUDGET,
   LANDING_CLICK_W,
   LANDING_SEARCH_SLACK,
@@ -186,7 +187,7 @@ export class Game {
   relChanged = new Set<number>();
   // события для ленты: расторжение союза / уничтожение торгового корабля —
   // кому, от кого и (для trade) куда фокусировать камеру; чистится в index
-  relNotices: { to: number; kind: 'break' | 'trade'; name: string; x?: number; y?: number }[] = [];
+  relNotices: { to: number; kind: 'break' | 'trade' | 'attacked'; name: string; x?: number; y?: number }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
@@ -1905,6 +1906,11 @@ export class Game {
         b.troops = 0;
         continue;
       }
+      // Мир с целью десанта — разворачиваем лодку домой: войска вернутся игроку,
+      // вместо того чтобы высаживаться на территорию союзника.
+      if (!b.returning && b.target > 0 && this.relation(b.player, b.target) === 'allied') {
+        b.returning = true;
+      }
       b.traveled += b.returning ? -BOAT_SPEED : BOAT_SPEED;
       if (b.returning && b.traveled <= 0) {
         // вернулась домой — войска возвращаются игроку
@@ -1995,6 +2001,14 @@ export class Game {
   }
 
   // суммарный уровень всех заводов игрока — от него растёт цена следующей покупки
+  // Сумма уровней всех портов игрока. Цена нового порта считается по ней, а не по
+  // числу портов: у заводов и ПВО так и было, а порт был исключением — грейды в
+  // цену не входили, и апгрейд до 15-го уровня не удорожал следующий порт вовсе.
+  private portLevels(playerId: number): number {
+    let n = 0;
+    for (const b of this.buildings) if (b.owner === playerId && b.type === 'port') n += b.level;
+    return n;
+  }
   private factoryLevels(playerId: number): number {
     let n = 0;
     for (const b of this.buildings) if (b.owner === playerId && b.type === 'factory') n += b.level;
@@ -2098,8 +2112,7 @@ export class Game {
       // порт нельзя ставить впритык к любому другому строению
       if (this.buildingNear(shore, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
-      const ports = this.buildings.filter((b) => b.owner === playerId && b.type === 'port').length;
-      const cost = portCost(ports); // цена растёт с числом уже построенных портов
+      const cost = portCost(this.portLevels(playerId)); // по сумме уровней, как у заводов и ПВО
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       this.buildings.push({
@@ -2456,6 +2469,27 @@ export class Game {
     this.setRel(this.hostiles, a, b, false); // союз снимает вражду
     this.setRel(this.allies, a, b, true);
     this.relChanged.add(a).add(b);
+    this.recallAttacks(a, b);
+  }
+
+  // Союз останавливает уже идущие атаки между сторонами: войска с фронта
+  // отзываются и возвращаются владельцу, а не продолжают захват.
+  private recallAttacks(a: number, b: number) {
+    this.attacks = this.attacks.filter((atk) => {
+      const between =
+        (atk.player === a && atk.target === b) ||
+        (atk.player === b && atk.target === a);
+
+      if (!between) return true;
+
+      const owner = this.players.get(atk.player);
+
+      if (owner?.alive) {
+        owner.troops = Math.min(owner.maxTroops, owner.troops + atk.troops);
+      }
+
+      return false;
+    });
   }
 
   breakAlliance(a: number, cell: number) {
@@ -2892,6 +2926,10 @@ export class Game {
       if (d.done) { dead = true; continue; } // сбит ракетой ПВО (в stepBullets)
       const tp = this.players.get(d.target);
       if (!tp?.alive || tp.cells <= 0) { d.done = true; dead = true; continue; }
+      // Заключили союз с целью — рой немедленно исчезает, а не продолжает летать и
+      // бомбить союзника (как отзываются наземные атаки и десанты, см. §8 в
+      // docs/balance-openfront.md). Деньги за запуск не возвращаются: рой уже вылетел.
+      if (this.relation(d.owner, d.target) === 'allied') { d.done = true; dead = true; continue; }
       // Каждый дрон летит к СВОЕЙ точке (разбросаны по территории) и сбрасывает
       // бомбу ПРИ ПРИЛЁТЕ, после чего берёт новую дальнюю точку → рой разлетается,
       // а не бьёт кучей в одно место.
@@ -3396,6 +3434,13 @@ export class Game {
       this.refund(a, attacker); // цель уничтожена — вернуть остаток
       return;
     }
+    // Заключили мир, пока наступление шло: войска отзываются и возвращаются в
+    // баланс, а не продолжают захватывать союзника. Так же сделано в OpenFront —
+    // AttackExecution при появлении союза вызывает retreat().
+    if (a.target > 0 && this.relation(a.player, a.target) === 'allied') {
+      this.refund(a, attacker);
+      return;
+    }
     if (a.frontier.size === 0) {
       if (a.rescanned) {
         this.refund(a, attacker); // контакта с целью больше нет
@@ -3495,6 +3540,17 @@ export class Game {
           a.troops -= cellCost;
           if (enemy) {
             enemy.troops = Math.max(0, enemy.troops - density);
+            // Уведомление «вас захватывают» — только на НАЧАЛО натиска (когда клетки
+            // не терялись дольше ATTACK_NOTICE_GAP), иначе оно летело бы каждый тик.
+            if (this.tickNo - enemy.hurtTick > ATTACK_NOTICE_GAP) {
+              this.relNotices.push({
+                to: enemy.id,
+                kind: 'attacked',
+                name: this.playerName(a.player),
+                x: c % this.w,
+                y: (c / this.w) | 0,
+              });
+            }
             enemy.hurtTick = this.tickNo; // защищающийся под атакой — включаем оборонный буст роста
           }
           // расход квоты (темп): горы тормозят, зона штаба тормозит втрое —
@@ -3796,7 +3852,7 @@ export class Game {
       const spendable = p.money - chest;
       const newCost = (t: BuildingType) =>
         t === 'city' ? cityCost(countType('city'))
-        : t === 'port' ? portCost(countType('port'))
+        : t === 'port' ? portCost(this.portLevels(p.id))
         : t === 'factory' ? factoryCost(this.factoryLevels(p.id))
         : t === 'sam' ? samCost(this.samLevels(p.id))
         : t === 'silo' ? SILO_COST
@@ -3919,7 +3975,7 @@ export class Game {
         for (let act = 0; act < 6 && econ > 0; act++) {
           let did = false;
           if (coastal && newB < 4 && countType('port') < (want.port ?? 0)) {
-            const cost = portCost(countType('port'));
+            const cost = portCost(this.portLevels(p.id));
             if (econ >= cost && spend('port')) { econ -= cost; newB++; did = true; }
           }
           if (!did) {
@@ -4264,6 +4320,9 @@ export class Game {
       path: b.path,
       // доля пройденного пути по дистанции
       prog: Math.max(0, Math.min(1, b.traveled / b.totalLen)),
+      // сколько секунд осталось идти: отозванный возвращается к началу маршрута
+      eta: Math.max(0, (b.returning ? b.traveled : b.totalLen - b.traveled) / BOAT_SPEED / 10),
+      returning: b.returning,
     }));
   }
 }

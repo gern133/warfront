@@ -62,7 +62,7 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       st.room = target;
       target.clients.add(ws);
       // песочные настройки доступны только в одиночку — как стало >1 игрока, сбрасываем
-      if (target.clients.size > 1) { target.infMoney = false; target.infArmy = false; }
+
       if (target.phase === 'lobby') broadcastLobby(target);
       else enterGame(ws, st, target);
       break;

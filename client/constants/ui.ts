@@ -32,3 +32,8 @@ export const TOOLS: { icon: string; svg?: string; bt: BuildingType | null; name:
 // Сколько входящих десантов показывать в HUD списком. Остальные скрываются под
 // строку «ещё N»: при массированной высадке десяток строк занимал пол-экрана.
 export const INCOMING_VISIBLE = 3;
+
+// «Вас захватывают»: сколько держится красная рамка по краям экрана и сколько —
+// кликабельный баннер сверху (клик переносит камеру к месту прорыва).
+export const ATTACK_FLASH_MS = 2500;
+export const ATTACK_BANNER_MS = 12000;

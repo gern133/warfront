@@ -1837,3 +1837,57 @@ button {
   cursor: pointer;
 }
 .incoming-row.inc-more:hover { opacity: 1; }
+
+/* таймеры прибытия десанта */
+.inc-eta,
+.myboat-eta {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+/* «Вас захватывают»: рамка по краям экрана (внутренняя тень, как в OpenFront) */
+.attack-flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none; /* не мешает играть */
+  z-index: 60;
+  box-shadow: inset 0 0 0 3px rgba(225, 36, 26, 0.9), inset 0 0 90px 20px rgba(225, 36, 26, 0.45);
+  animation: attack-pulse 0.9s ease-out infinite;
+}
+@keyframes attack-pulse {
+  0% { opacity: 0.35; }
+  50% { opacity: 1; }
+  100% { opacity: 0.35; }
+}
+
+/* Баннер сверху по центру — кликабельный, ведёт к месту прорыва */
+.attack-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 61;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 1px solid rgba(225, 36, 26, 0.85);
+  border-radius: 8px;
+  background: rgba(40, 8, 6, 0.92);
+  color: #ffd9d5;
+  font: 600 14px/1 'IBM Plex Sans', system-ui, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.attack-banner:hover { background: rgba(60, 12, 9, 0.96); }
+.attack-banner-go {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(225, 36, 26, 0.25);
+  font-size: 12px;
+}

@@ -1544,7 +1544,37 @@ export class GameClient {
         ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
       }
       ctx.globalAlpha = 1;
-    } else if (this.buildMode && this.hoverCell >= 0) {
+    } else if (this.buildMode === 'silo' && this.hoverCell >= 0) {
+      // Предпросмотр ракетной шахты. Своей ветки у неё не было вовсе, и она
+      // проваливалась в общий else ниже — под курсором рисовался ЩИТ штаба с его
+      // зелёным куполом. Зоны покрытия у шахты нет: показываем саму постройку и,
+      // если кликаем по своей шахте, будущий уровень залпа.
+      const near = this.nearbyOwnType(this.hoverCell, 'silo');
+      const cellFor = near ? near.cell : this.hoverCell;
+      const ok = near ? true : this.canBuildHqAt(this.hoverCell);
+      const sx = this.panX + (cellFor % this.w + 0.5) * this.zoom;
+      const sy = this.panY + ((cellFor / this.w | 0) + 0.5) * this.zoom;
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = ok ? 'rgba(42,15,15,0.9)' : 'rgba(120,120,120,0.4)';
+      ctx.strokeStyle = ok ? '#ff8a5c' : '#8a8a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.globalAlpha = ok ? 1 : 0.5;
+      this.drawIcon(ctx, 'silo', sx, sy, r * 1.6);
+      if (near) {
+        const fs = Math.max(10, r * 0.9);
+        ctx.font = `800 ${fs}px 'IBM Plex Mono', monospace`;
+        ctx.lineWidth = Math.max(2, fs / 5);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = '#ffd27a';
+        ctx.strokeText('→' + (near.level + 1), sx + r, sy - r);
+        ctx.fillText('→' + (near.level + 1), sx + r, sy - r);
+      }
+      ctx.globalAlpha = 1;
+    } else if (this.buildMode === 'hq' && this.hoverCell >= 0) {
       // предпросмотр штаба: клик в купол своего штаба = апгрейд, иначе новый
       const near = this.hqCovering(this.hoverCell);
       const cellFor = near ? near.cell : this.hoverCell;

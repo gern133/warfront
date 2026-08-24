@@ -143,7 +143,9 @@ export function enterGame(ws: WebSocket, st: CState, room: Room) {
 export function beginRound(room: Room) {
   room.phase = 'spawn';
   room.spawnTicks = (SPAWN_WAIT_S * 1000) / TICK_MS;
-  if (room.clients.size > 1) { room.infMoney = false; room.infArmy = false; } // только для одиночной
+  // Бесконечные деньги/армия работают и в онлайне: настройка комнаты применяется ко
+  // ВСЕМ людям сразу (в игре она проверяется как `!p.bot`), поэтому преимущества ни у
+  // кого нет. Раньше сбрасывалась, если в комнате больше одного игрока.
   room.game.infMoney = room.infMoney; // применяем настройки лобби к игре
   room.game.infArmy = room.infArmy;
   room.game.addBots(room.difficulty);
