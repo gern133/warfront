@@ -12,7 +12,16 @@ export function playerColorRGB(id: number): [number, number, number] {
   return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
 }
 
+// Строка цвета кэшируется: рендер вызывает это на КАЖДЫЙ объект каждый кадр (дроны,
+// суда, корабли), а сборка шаблонной строки — это аллокация. При роях в сотни дронов
+// экономия заметная.
+const cssCache = new Map<number, string>();
 export function playerColorCSS(id: number): string {
-  const [r, g, b] = playerColorRGB(id);
-  return `rgb(${r},${g},${b})`;
+  let c = cssCache.get(id);
+  if (c === undefined) {
+    const [r, g, b] = playerColorRGB(id);
+    c = `rgb(${r},${g},${b})`;
+    cssCache.set(id, c);
+  }
+  return c;
 }

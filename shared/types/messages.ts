@@ -9,7 +9,6 @@ import {
   TradeShipPub,
   TruckPub,
   WarshipPub,
-  DronePub,
 } from './dto';
 
 export type ClientMsg =
@@ -70,7 +69,9 @@ export type ServerMsg =
       trucks: TruckPub[]; // грузовики заводов на дорогах
       roads?: number[][]; // дороги (ломаные [x,y,...]) — шлём реже (меняются редко)
       warships: WarshipPub[]; // боевые корабли
-      drones: DronePub[]; // дроны роя «Мопед» в полёте
+      // Дроны — плоский массив целых по 4 числа на дрон: [x·10, y·10, курс·100, владелец].
+      // Так на рой в сотни дронов уходит в разы меньше трафика, чем массивом объектов.
+      drones: number[];
       droneBlasts: number[]; // взрывы дронов за тик: [x,y,...] (для вспышек)
       shots: number[]; // выстрелы кораблей за тик: [sx,sy,tx,ty,hit,...] (для трассеров)
       missiles: MissilePub[]; // ракеты в полёте

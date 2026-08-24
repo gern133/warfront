@@ -7,7 +7,6 @@ import {
   TradeShipPub,
   TruckPub,
   WarshipPub,
-  DronePub,
   TradeEarn,
   MissilePub,
   NUKES,
@@ -47,7 +46,8 @@ export class GameClient {
   selfId = -1;
   fps = 0;
 
-  onCellClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
+  // shift — зажат ли Shift в момент клика (непрерывный сброс бомб)
+  onCellClick: ((cell: number, screenX: number, screenY: number, shift: boolean) => void) | null = null;
   onCellRightClick: ((cell: number, screenX: number, screenY: number) => void) | null = null;
   onBuild: ((cell: number) => void) | null = null;
   onFleetMove: ((cell: number) => void) | null = null; // приказ выделенным кораблям
@@ -60,7 +60,14 @@ export class GameClient {
   active = false; // рисуем карту только в игре (в меню/лобби — не жжём кадры впустую)
   fleetMode = false; // выбран инструмент «Флот» — клик выпускает боевой корабль
   droneMode = false; // выбран инструмент «Рой дронов» — клик наводит рой на страну
-  drones: DronePub[] = []; // дроны роя «Мопед» в полёте (читает engine/render)
+  // Дроны роя «Мопед» в полёте (читает engine/render). Держим в типизированных
+  // буферах, а не массивом объектов: рой бывает в сотни дронов, и на каждый кадр это
+  // экономит и обход, и аллокации. Буферы переиспользуются между тиками.
+  droneCount = 0;
+  droneX = new Float32Array(0);
+  droneY = new Float32Array(0);
+  droneA = new Float32Array(0);
+  droneOwner = new Int16Array(0);
   droneFlashes: { x: number; y: number; t0: number }[] = []; // вспышки взрывов дронов
   warships: WarshipPub[] = []; // боевые корабли (читает engine/render)
   selectedWarships = new Set<number>(); // выделенные свои корабли (RTS-выделение)
@@ -437,8 +444,24 @@ export class GameClient {
     this.missiles = next;
   }
 
-  setDrones(drones: DronePub[]) {
-    this.drones = drones ?? [];
+  // Приходит плоский массив целых по 4 числа на дрон: [x·10, y·10, курс·100, владелец]
+  setDrones(flat: number[]) {
+    const n = flat ? (flat.length / 4) | 0 : 0;
+    if (this.droneX.length < n) {
+      const cap = Math.max(64, n * 2); // с запасом, чтобы не пересоздавать каждый тик
+      this.droneX = new Float32Array(cap);
+      this.droneY = new Float32Array(cap);
+      this.droneA = new Float32Array(cap);
+      this.droneOwner = new Int16Array(cap);
+    }
+    for (let i = 0; i < n; i++) {
+      const k = i * 4;
+      this.droneX[i] = flat[k] / 10;
+      this.droneY[i] = flat[k + 1] / 10;
+      this.droneA[i] = flat[k + 2] / 100;
+      this.droneOwner[i] = flat[k + 3];
+    }
+    this.droneCount = n;
   }
 
   // вспышки взрывов дронов за тик: [x,y,...] в клетках
@@ -1832,7 +1855,12 @@ export class GameClient {
       this.anim = null; // пользователь взял управление — стоп автозум
       down = { x: e.clientX, y: e.clientY };
       panning = false;
-      selecting = e.shiftKey; // Shift — выделение своих кораблей рамкой
+      // Shift — выделение своих кораблей рамкой. Но НЕ когда взведён режим наведения
+      // (бомба, рой, флот) или постройка: там Shift+клик означает «сбросить и не
+      // выходить из режима», и рамка выделения его перехватывала — до обработчика
+      // клика он вообще не доходил.
+      selecting =
+        e.shiftKey && !this.nukeKind && !this.buildMode && !this.fleetMode && !this.droneMode;
       if (selecting) this.selBox = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
       canvas.setPointerCapture(e.pointerId);
     };
@@ -1917,7 +1945,7 @@ export class GameClient {
             } else {
               // клик по суше/территории (или без выделения) — сбрасываем флот и обычное действие (атака)
               if (this.selectedWarships.size) this.selectedWarships.clear();
-              this.onCellClick?.(cell, e.clientX, e.clientY);
+              this.onCellClick?.(cell, e.clientX, e.clientY, e.shiftKey);
             }
           }
         }

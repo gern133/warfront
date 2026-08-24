@@ -2956,8 +2956,16 @@ export class Game {
     if (dead) this.drones = this.drones.filter((d) => !d.done);
   }
 
-  dronesPub(): { x: number; y: number; a: number; owner: number }[] {
-    return this.drones.map((d) => ({ x: +d.x.toFixed(1), y: +d.y.toFixed(1), a: +d.a.toFixed(2), owner: d.owner }));
+  // Дроны шлём ПЛОСКИМ массивом целых по 4 числа на дрон: [x·10, y·10, курс·100, владелец].
+  // Раньше это был массив объектов, и на рой в 392 дрона уходило 14.9 КБ за тик —
+  // ключи "x"/"y"/"a"/"owner" повторялись в JSON 392 раза. Целые вместо дробей
+  // убирают из строки ещё и точки с десятичными знаками.
+  dronesPub(): number[] {
+    const out: number[] = [];
+    for (const d of this.drones) {
+      out.push(Math.round(d.x * 10), Math.round(d.y * 10), Math.round(d.a * 100), d.owner);
+    }
+    return out;
   }
 
   private stepMissiles() {

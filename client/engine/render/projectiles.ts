@@ -1,9 +1,70 @@
 import { NUKES, DRONE_BLAST_R } from '../../../shared/protocol';
+import { DRONE_DOT_SIZE_MAX } from '../constants';
 import { playerColorCSS } from '../../../shared/color';
 import type { GameClient } from '../GameClient';
 
-// Рой дронов «Мопед»: пиксельный самолётик (нос + крылья + хвост), повёрнутый по
-// курсу, плюс вспышки взрывов бомб (кольцо радиуса DRONE_BLAST_R).
+// ─── Рой дронов «Мопед» ──────────────────────────────────────────────────────
+// Рисуется спрайтами из кэша, а не построением путей. Раньше на КАЖДЫЙ дрон каждый
+// кадр приходилось: save/restore, translate+rotate, сборка строки цвета и ТРИ пути
+// (фюзеляж, крылья, хвост) с fill+stroke — то есть шесть вызовов рисования. При рое
+// в 392 дрона это 2352 вызова на кадр (замер), а кадров 60 в секунду.
+//
+// Теперь самолётик отрисовывается один раз в offscreen-канвас для каждого сочетания
+// «цвет владельца × размер × поворот», и в кадре остаётся один drawImage на дрон:
+// без матричных операций, без смены состояния контекста и без аллокаций.
+const SPRITE_ANGLES = 24; // шагов поворота в кэше (15° — на глаз незаметно)
+const spriteCache = new Map<string, HTMLCanvasElement[]>();
+
+function droneSprites(owner: number, size: number, dpr: number): HTMLCanvasElement[] {
+  const key = `${owner}|${size}|${dpr}`;
+  let frames = spriteCache.get(key);
+  if (frames) return frames;
+  frames = [];
+  const s = size;
+  const box = Math.ceil(s * 2.2) + 2; // самолётик вписан с запасом на поворот
+  const half = box / 2;
+  for (let i = 0; i < SPRITE_ANGLES; i++) {
+    const cv = document.createElement('canvas');
+    cv.width = Math.ceil(box * dpr);
+    cv.height = Math.ceil(box * dpr);
+    const c = cv.getContext('2d')!;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.translate(half, half);
+    c.rotate((i / SPRITE_ANGLES) * Math.PI * 2);
+    c.fillStyle = playerColorCSS(owner);
+    c.strokeStyle = 'rgba(0,0,0,0.7)';
+    c.lineWidth = 1;
+    c.beginPath(); // фюзеляж (нос вперёд)
+    c.moveTo(s, 0);
+    c.lineTo(-s * 0.4, s * 0.28);
+    c.lineTo(-s * 0.4, -s * 0.28);
+    c.closePath();
+    c.fill();
+    c.stroke();
+    c.beginPath(); // крылья
+    c.moveTo(-s * 0.05, s * 0.85);
+    c.lineTo(-s * 0.05, -s * 0.85);
+    c.lineTo(-s * 0.3, -s * 0.7);
+    c.lineTo(-s * 0.3, s * 0.7);
+    c.closePath();
+    c.fill();
+    c.stroke();
+    c.beginPath(); // хвост
+    c.moveTo(-s * 0.55, s * 0.35);
+    c.lineTo(-s * 0.55, -s * 0.35);
+    c.lineTo(-s * 0.8, -s * 0.3);
+    c.lineTo(-s * 0.8, s * 0.3);
+    c.closePath();
+    c.fill();
+    c.stroke();
+    frames.push(cv);
+  }
+  spriteCache.set(key, frames);
+  return frames;
+}
+
+const TAU = Math.PI * 2;
+
 export function drawDrones(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: number) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const z = gc.zoom, px = gc.panX, py = gc.panY;
@@ -14,52 +75,49 @@ export function drawDrones(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: n
     const p = (now - f.t0) / 450;
     const cx = px + f.x * z, cy = py + f.y * z;
     ctx.beginPath();
-    ctx.arc(cx, cy, DRONE_BLAST_R * z * (0.3 + p * 0.7), 0, Math.PI * 2);
+    ctx.arc(cx, cy, DRONE_BLAST_R * z * (0.3 + p * 0.7), 0, TAU);
     ctx.strokeStyle = `rgba(255,${(120 + p * 100) | 0},40,${(1 - p) * 0.85})`;
     ctx.lineWidth = Math.max(1.5, z * 0.6);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(cx, cy, DRONE_BLAST_R * z * 0.25 * (1 - p), 0, Math.PI * 2);
+    ctx.arc(cx, cy, DRONE_BLAST_R * z * 0.25 * (1 - p), 0, TAU);
     ctx.fillStyle = `rgba(255,200,90,${(1 - p) * 0.7})`;
     ctx.fill();
   }
-  if (!gc.drones.length) return;
+  const n = gc.droneCount;
+  if (!n) return;
+  const dx = gc.droneX, dy = gc.droneY, da = gc.droneA, dow = gc.droneOwner;
   const vw = window.innerWidth, vh = window.innerHeight;
-  const s = Math.max(4, Math.min(11, z * 1.6)); // размер модельки
-  for (const d of gc.drones) {
-    const cx = px + d.x * z, cy = py + d.y * z;
+  const size = Math.round(Math.max(4, Math.min(11, z * 1.6))); // размер модельки
+  if (size <= DRONE_DOT_SIZE_MAX) {
+    // ОТДАЛЁННАЯ КАРТА: на 4–5 пикселях детали самолётика всё равно не видно, а
+    // платить за них приходится полностью. Рисуем точками и группируем по
+    // владельцу, чтобы fillStyle ставился один раз на группу, а не на дрон.
+    const d = Math.max(2, size - 1);
+    const owners: number[] = [];
+    for (let i = 0; i < n; i++) if (!owners.includes(dow[i])) owners.push(dow[i]);
+    for (const owner of owners) {
+      ctx.fillStyle = playerColorCSS(owner);
+      for (let i = 0; i < n; i++) {
+        if (dow[i] !== owner) continue;
+        const cx = px + dx[i] * z, cy = py + dy[i] * z;
+        if (cx < -20 || cy < -20 || cx > vw + 20 || cy > vh + 20) continue;
+        ctx.fillRect(cx - d / 2, cy - d / 2, d, d);
+      }
+    }
+    return;
+  }
+  // БЛИЗКО: спрайт из кэша — один drawImage на дрон, без смены состояния
+  const box = Math.ceil(size * 2.2) + 2;
+  const half = box / 2;
+  for (let i = 0; i < n; i++) {
+    const cx = px + dx[i] * z, cy = py + dy[i] * z;
     if (cx < -20 || cy < -20 || cx > vw + 20 || cy > vh + 20) continue;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(d.a); // нос по курсу (модель смотрит в +X)
-    ctx.fillStyle = playerColorCSS(d.owner);
-    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-    ctx.lineWidth = 1;
-    // фюзеляж (нос вперёд) + крылья + хвостовое оперение — как маленький самолёт
-    ctx.beginPath();
-    ctx.moveTo(s, 0); // нос
-    ctx.lineTo(-s * 0.4, s * 0.28);
-    ctx.lineTo(-s * 0.4, -s * 0.28);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath(); // крылья (поперёк)
-    ctx.moveTo(-s * 0.05, s * 0.85);
-    ctx.lineTo(-s * 0.05, -s * 0.85);
-    ctx.lineTo(-s * 0.3, -s * 0.7);
-    ctx.lineTo(-s * 0.3, s * 0.7);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath(); // хвост
-    ctx.moveTo(-s * 0.55, s * 0.35);
-    ctx.lineTo(-s * 0.55, -s * 0.35);
-    ctx.lineTo(-s * 0.8, -s * 0.3);
-    ctx.lineTo(-s * 0.8, s * 0.3);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
+    const frames = droneSprites(dow[i], size, dpr);
+    // курс → индекс кадра поворота
+    let k = Math.round((da[i] / TAU) * SPRITE_ANGLES) % SPRITE_ANGLES;
+    if (k < 0) k += SPRITE_ANGLES;
+    ctx.drawImage(frames[k], cx - half, cy - half, box, box);
   }
 }
 

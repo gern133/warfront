@@ -150,7 +150,7 @@ export default function App() {
   useEffect(() => {
     const detach = gc.attach(canvasRef.current!);
     const detachMini = gc.attachMinimap(miniRef.current!);
-    gc.onCellClick = (cell, sx, sy) => {
+    gc.onCellClick = (cell, sx, sy, shift) => {
       setInvadeMenu(null);
       if (phaseRef.current === 'spawn') {
         sendMsg({ type: 'spawn', cell });
@@ -158,9 +158,11 @@ export default function App() {
         // режим наведения ракеты — клик = пуск выбранного типа в цель
         if (nukeKindRef.current) {
           sendMsg({ type: 'nuke', cell, kind: nukeKindRef.current });
-          // обычный режим — один пуск и выход; залипающий (выбран с Shift) остаётся
-          // включённым, чтобы сбрасывать подряд без повторного нажатия 8/9
-          if (!nukeStickyRef.current) setNukeKind(null);
+          // Режим наведения остаётся включённым, если он «залипающий» (бомба выбрана
+          // с Shift) ИЛИ если Shift зажат на самом клике. То есть работают оба
+          // способа: Shift+8 один раз — и дальше просто клики; либо выбрать бомбу
+          // как обычно и бить Shift+кликами. Без Shift — один пуск и выход.
+          if (!nukeStickyRef.current && !shift) setNukeKind(null);
           return;
         }
         // режим флота — клик = выпустить боевой корабль из ближайшего порта в зону
@@ -945,7 +947,7 @@ export default function App() {
               🎯 Цель для «{NUKES[nukeKind].name}» — вылетит из ближайшей шахты ({fmtK(NUKES[nukeKind].cost)}).{' '}
               {nukeSticky
                 ? 'Непрерывный сброс: бей по цели за целью. Esc — выйти'
-                : 'Shift+' + (nukeKind === 'basic' ? '8' : '9') + ' — непрерывный сброс. Esc — отмена'}
+                : 'Держи Shift при клике — сбрасывать подряд. Esc — отмена'}
             </div>
           )}
           {fleetMode && (
