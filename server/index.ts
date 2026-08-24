@@ -74,6 +74,7 @@ wss.on('connection', (ws) => {
 let intervalNo = 0;
 setInterval(() => {
   intervalNo++;
+  const FULL_RESYNC_TICKS = 100; // полная посылка зданий раз в 10 с (страховка)
   const sendPlayers = intervalNo % 5 === 0; // полный список игроков — раз в 500мс
   for (const room of rooms.values()) {
     if (room.phase === 'lobby') continue;
@@ -100,10 +101,29 @@ setInterval(() => {
     }
     game.deaths.length = 0;
 
+    // Дельты клеток — самая большая часть кадра (в замере 84%). Кодируем как
+    // RLE-серии подряд идущих клеток одного владельца, а начало серии — разностью от
+    // предыдущей: [Δначало, длина, владелец, ...]. Захваты идут длинными рядами
+    // (индексы клеток построчные), поэтому это сжимает в ~21 раз: 31 КБ → 1.5 КБ.
     const changes: number[] = [];
-    for (const [c, o] of game.changed) changes.push(c, o);
+    if (game.changed.size) {
+      const sorted = [...game.changed.entries()].sort((a, b) => a[0] - b[0]);
+      let prev = 0;
+      for (let i = 0; i < sorted.length; ) {
+        const start = sorted[i][0];
+        const owner = sorted[i][1];
+        let len = 1;
+        while (i + len < sorted.length && sorted[i + len][0] === start + len && sorted[i + len][1] === owner) len++;
+        changes.push(start - prev, len, owner);
+        prev = start;
+        i += len;
+      }
+    }
     game.changed.clear();
 
+    // раз в 10 секунд — полная посылка зданий: если клиент что-то пропустил, он
+    // выровняется, и накопление ошибок исключено
+    const bd = game.buildingsDelta(intervalNo % FULL_RESYNC_TICKS === 0);
     const update = JSON.stringify({
       type: 'update',
       changes,
@@ -115,10 +135,14 @@ setInterval(() => {
       playersMeta: sendPlayers ? game.playersMetaPub() : undefined,
       attacks: game.attacksPub(),
       boats: game.boatsPub(),
-      buildings: game.buildingsPub(),
+      // Здания — дельтой: только изменившиеся записи и id исчезнувших. Раз в
+      // FULL_RESYNC_TICKS отдаём всё целиком — страховка от рассинхронизации.
+      buildings: bd.flat,
+      buildingsGone: bd.gone.length ? bd.gone : undefined,
+      buildingsFull: bd.full || undefined,
       ships: game.tradeShipsPub(),
       trucks: game.trucksPub(),
-      roads: sendPlayers ? game.roadsPub() : undefined, // дороги — раз в 500мс
+      roads: sendPlayers ? game.roadsPubIfChanged() ?? undefined : undefined, // только при изменении сети
       warships: game.warshipsPub(),
       drones: game.dronesPub(),
       droneBlasts: game.droneBlasts,

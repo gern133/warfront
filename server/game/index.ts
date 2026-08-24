@@ -189,7 +189,7 @@ export class Game {
   relChanged = new Set<number>();
   // события для ленты: расторжение союза / уничтожение торгового корабля —
   // кому, от кого и (для trade) куда фокусировать камеру; чистится в index
-  relNotices: { to: number; kind: 'break' | 'trade' | 'attacked'; name: string; x?: number; y?: number }[] = [];
+  relNotices: { to: number; kind: 'break' | 'trade' | 'attacked' | 'drones'; name: string; x?: number; y?: number }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
@@ -240,6 +240,11 @@ export class Game {
   tickNo = 0;
   landCount = 0;
   winnerId: number | null = null;
+  // когда последний раз уведомляли игрока о конкретном нападающем (ключ: жертва*4096+нападающий)
+  private attackNoticeAt = new Map<number, number>();
+  private buildingResyncPending = false; // вошёл новый клиент — отдать здания целиком
+  private buildingSnap = new Map<number, string>(); // последняя отправленная строка здания
+  private roadsSig = ''; // подпись дорожной сети (см. roadsPubIfChanged)
   private playersMetaSig = ''; // подпись статики игроков (см. playersMetaPub)
   private nextId = 1;
   private nextBoatId = 1;
@@ -1857,6 +1862,18 @@ export class Game {
 
   // Дороги для отрисовки: рёбра дорожных сетей всех игроков (проложены по суше),
   // прорежены для компактности. Кэшируются по версии сети.
+  // Дороги — только когда сеть изменилась. Она перестраивается лишь при постройке
+  // или захвате заводов/городов/портов, а уходила каждые 500 мс по 5 КБ.
+  // null = «не изменились, используй прежние».
+  roadsPubIfChanged(): number[][] | null {
+    const roads = this.roadsPub();
+    let sig = '';
+    for (const r of roads) sig += r.length + ':' + r[0] + ',' + r[r.length - 1] + ';';
+    if (sig === this.roadsSig) return null;
+    this.roadsSig = sig;
+    return roads;
+  }
+
   roadsPub(): number[][] {
     if (this.roadsCache && this.roadsCache.ver === this.roadVer) return this.roadsCache.data;
     const out: number[][] = [];
@@ -2828,6 +2845,10 @@ export class Game {
     if (p.money < DRONE_COST) return 'Недостаточно денег';
     p.money -= DRONE_COST;
     this.markHostile(playerId, target); // запуск роя = объявление войны цели
+    // Цель должна узнать о налёте: рой прилетает молча, а снимает по 5% армии за
+    // каждый взрыв. Координат не передаём — дроны летят, и клиент сам находит
+    // ближайший к камере в момент клика.
+    this.relNotices.push({ to: target, kind: 'drones', name: this.playerName(playerId) });
     const tcells = this.playerCells(target);
     // размер роя ∝ территории цели: минимум DRONE_COUNT, +1 дрон за DRONE_CELLS_PER
     // клеток, но не больше DRONE_COUNT_MAX (мелкую страну — базовый рой, континент —
@@ -2943,6 +2964,9 @@ export class Game {
       if (!d.doomed) {
         for (const b of this.buildings) {
           if (b.type !== 'sam' || b.owner === d.owner || this.tickNo < b.readyTick) continue;
+          // ПВО СОЮЗНИКА по нашим дронам не стреляет: проверялся только владелец
+          // установки, поэтому союзник исправно сбивал рой, летящий через него.
+          if (this.relation(b.owner, d.owner) === 'allied') continue;
           if (b.reloads.length >= b.level) continue; // нет свободных зарядов
           const sx = (b.cell % w) + 0.5, sy = ((b.cell / w) | 0) + 0.5;
           if ((sx - d.x) ** 2 + (sy - d.y) ** 2 <= samR2) {
@@ -3530,7 +3554,12 @@ export class Game {
             enemy.troops = Math.max(0, enemy.troops - density);
             // Уведомление «вас захватывают» — только на НАЧАЛО натиска (когда клетки
             // не терялись дольше ATTACK_NOTICE_GAP), иначе оно летело бы каждый тик.
-            if (this.tickNo - enemy.hurtTick > ATTACK_NOTICE_GAP) {
+            // Пауза считается на ПАРУ «кого бьют ← кто бьёт», а не на защитника
+            // целиком: иначе, пока тебя щиплют боты, hurtTick всегда свежий и
+            // уведомление о новом (в т.ч. живом) нападающем не приходит вовсе.
+            const pairKey = enemy.id * 4096 + a.player;
+            if (this.tickNo - (this.attackNoticeAt.get(pairKey) ?? -1e9) > ATTACK_NOTICE_GAP) {
+              this.attackNoticeAt.set(pairKey, this.tickNo);
               this.relNotices.push({
                 to: enemy.id,
                 kind: 'attacked',
@@ -4253,11 +4282,19 @@ export class Game {
   // Статика игроков (имя, бот/страна) — отдаётся ТОЛЬКО когда набор игроков
   // изменился. Раньше имена и флаги уходили каждый тик для всех 293 игроков и
   // составляли почти половину кадра состояния, хотя не меняются никогда.
-  playersMetaPub(force = false): { id: number; name: string; bot: boolean; strong: boolean }[] | null {
+  playersMetaPub(): { id: number; name: string; bot: boolean; strong: boolean }[] | null {
     let sig = '';
     for (const p of this.players.values()) sig += p.id + ':' + p.name + (p.bot ? 'b' : '') + (p.strong ? 's' : '') + ';';
-    if (!force && sig === this.playersMetaSig) return null; // ничего не изменилось
+    if (sig === this.playersMetaSig) return null; // ничего не изменилось
     this.playersMetaSig = sig;
+    return this.playersMetaAll();
+  }
+
+  /** Вся статика игроков, БЕЗ обновления подписи — для init одного клиента.
+   *  Если трогать подпись здесь, получается так: игрок вошёл, набор изменился, но
+   *  подпись уже «свежая» — и широковещательный апдейт решает, что рассылать нечего.
+   *  Остальные клиенты в итоге не узнают имя новичка и показывают пустоту. */
+  playersMetaAll(): { id: number; name: string; bot: boolean; strong: boolean }[] {
     return [...this.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
@@ -4281,6 +4318,39 @@ export class Game {
       );
     }
     return out;
+  }
+
+  // Дельта зданий: только изменившиеся записи (тем же плоским форматом) плюс id
+  // исчезнувших. Здания почти не меняются между тиками — обычно в дельте пусто.
+  // force = отдать всё (нужно новому клиенту).
+  buildingsDelta(force = false): { flat: number[]; gone: number[]; full: boolean } {
+    const flat = this.buildingsPub();
+    if (this.buildingResyncPending) {
+      force = true; // вошёл новый клиент — ему нужна полная картина, а не дельта
+      this.buildingResyncPending = false;
+    }
+    if (force) {
+      this.buildingSnap.clear();
+      for (let i = 0; i < flat.length; i += 10) {
+        this.buildingSnap.set(flat[i], flat.slice(i, i + 10).join(','));
+      }
+      return { flat, gone: [], full: true };
+    }
+    const out: number[] = [];
+    const seen = new Set<number>();
+    for (let i = 0; i < flat.length; i += 10) {
+      const id = flat[i];
+      seen.add(id);
+      const row = flat.slice(i, i + 10).join(',');
+      if (this.buildingSnap.get(id) !== row) {
+        this.buildingSnap.set(id, row);
+        for (let k = 0; k < 10; k++) out.push(flat[i + k]);
+      }
+    }
+    const gone: number[] = [];
+    for (const id of this.buildingSnap.keys()) if (!seen.has(id)) gone.push(id);
+    for (const id of gone) this.buildingSnap.delete(id);
+    return { flat: out, gone, full: false };
   }
 
   // Здания шлём ПЛОСКИМ массивом целых по 10 чисел на здание:
@@ -4343,9 +4413,11 @@ export class Game {
     return out;
   }
 
-  /** Заново отправить маршруты всех лодок: нужно, когда в игру входит новый клиент —
-   *  иначе он не увидит следов десантов, отправленных до его подключения. */
+  /** Заново отправить маршруты всех лодок и полную картину зданий: нужно, когда в
+   *  игру входит новый клиент — иначе он не увидит ни следов уже плывущих десантов,
+   *  ни зданий, построенных до его подключения (здания идут дельтой). */
   resendBoatPaths() {
     for (const b of this.boats) b.pathSent = false;
+    this.buildingResyncPending = true;
   }
 }

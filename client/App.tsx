@@ -55,10 +55,16 @@ export default function App() {
   const playersMeta = useRef(new Map<number, { id: number; name: string; bot: boolean; strong: boolean }>());
   // Здания приходят плоским массивом по 10 чисел — собираем обратно в объекты, чтобы
   // весь интерфейс и рендер работали как раньше.
-  const buildBuildings = (flat: number[]): BuildingPub[] => {
-    const list: BuildingPub[] = [];
+  // Здания приходят ДЕЛЬТОЙ: только изменившиеся записи плоским массивом по 10 чисел
+  // плюс id исчезнувших. Держим полное состояние в Map и пересобираем массив только
+  // когда что-то реально поменялось — иначе отдаём прежний, чтобы не гонять React.
+  const buildingsMap = useRef(new Map<number, BuildingPub>());
+  const buildingsArr = useRef<BuildingPub[]>([]);
+  const applyBuildings = (flat: number[], gone?: number[], full?: boolean): BuildingPub[] => {
+    if (full) buildingsMap.current.clear();
+    let changed = full === true;
     for (let i = 0; i + 9 < flat.length; i += 10) {
-      list.push({
+      buildingsMap.current.set(flat[i], {
         id: flat[i],
         owner: flat[i + 1],
         cell: flat[i + 2],
@@ -70,8 +76,13 @@ export default function App() {
         fuse: flat[i + 8] / 10,
         upQueue: flat[i + 9],
       });
+      changed = true;
     }
-    return list;
+    if (gone) {
+      for (const id of gone) if (buildingsMap.current.delete(id)) changed = true;
+    }
+    if (changed) buildingsArr.current = [...buildingsMap.current.values()];
+    return buildingsArr.current;
   };
   const buildPlayers = (
     flat: number[],
@@ -102,7 +113,9 @@ export default function App() {
   // список входящих десантов: видно максимум 3, остальные — в раскрываемом списке
   const [incomingOpen, setIncomingOpen] = useState(false);
   // «вас захватывают»: красная рамка на пару секунд + кликабельный баннер сверху
-  const [underAttack, setUnderAttack] = useState<{ name: string; x?: number; y?: number } | null>(null);
+  const [underAttack, setUnderAttack] = useState<
+    { name: string; x?: number; y?: number; drones?: boolean } | null
+  >(null);
   const [attackFlash, setAttackFlash] = useState(false);
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
@@ -312,7 +325,7 @@ export default function App() {
         // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
         const upAttacks = msg.attacks ?? [];
         const upBoats = msg.boats ?? [];
-        const upBuildings = buildBuildings(msg.buildings ?? []);
+        const upBuildings = applyBuildings(msg.buildings ?? [], msg.buildingsGone, msg.buildingsFull);
         gc.applyUpdate(msg.changes);
         // отложенный автозум к спавну — когда клетки уже пришли
         if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
@@ -388,7 +401,17 @@ export default function App() {
                 ? `${msg.name} уничтожил ваш торговый корабль`
                 : msg.kind === 'attacked'
                   ? `${msg.name} захватывает вашу территорию`
-                  : `${msg.name} отклонил ваш союз`;
+                  : msg.kind === 'drones'
+                    ? `${msg.name} поднял рой дронов на вас`
+                    : `${msg.name} отклонил ваш союз`;
+        if (msg.kind === 'drones') {
+          // Налёт роя: баннер без координат — по клику камера прыгает к ближайшему
+          // к центру вида дрону (они летят, статичная точка бессмысленна).
+          setUnderAttack({ name: msg.name, drones: true });
+          setAttackFlash(true);
+          setTimeout(() => setAttackFlash(false), ATTACK_FLASH_MS);
+          setTimeout(() => setUnderAttack(null), ATTACK_BANNER_MS);
+        }
         if (msg.kind === 'attacked') {
           // красная рамка вспыхивает на пару секунд, баннер сверху живёт дольше —
           // по нему можно кликнуть и перенестись к месту прорыва
@@ -583,7 +606,8 @@ export default function App() {
   const committed = attacks
     .filter((a) => a.player === gc.selfId)
     .reduce((s, a) => s + a.troops, 0);
-  const nameOf = (id: number) => players.find((p) => p.id === id)?.name ?? '?';
+  // Имя игрока: если статика (playersMeta) ещё не дошла, показываем «?», а не пустоту
+  const nameOf = (id: number) => players.find((p) => p.id === id)?.name || '?';
   // мои десанты (куда плыву) и вражеские (кто плывёт ко мне)
   const myBoats = boats.filter((b) => b.player === gc.selfId);
   const incoming = boats.filter((b) => b.target === gc.selfId);
@@ -893,13 +917,18 @@ export default function App() {
         <button
           className="attack-banner"
           onClick={() => {
-            if (underAttack.x !== undefined) gc.focusOn(underAttack.x, underAttack.y!);
+            if (underAttack.drones) gc.focusNearestDrone();
+            else if (underAttack.x !== undefined) gc.focusOn(underAttack.x, underAttack.y!);
             setUnderAttack(null);
           }}
-          title="Показать место захвата"
+          title={underAttack.drones ? 'Показать ближайший дрон' : 'Показать место захвата'}
         >
-          ⚠ {underAttack.name} захватывает вашу территорию
-          {underAttack.x !== undefined && <span className="attack-banner-go">⌖ показать</span>}
+          {underAttack.drones
+            ? `🛩️ ${underAttack.name} поднял рой дронов на вас`
+            : `⚠ ${underAttack.name} захватывает вашу территорию`}
+          {(underAttack.drones || underAttack.x !== undefined) && (
+            <span className="attack-banner-go">⌖ показать</span>
+          )}
         </button>
       )}
       {phase === 'playing' && self && (
