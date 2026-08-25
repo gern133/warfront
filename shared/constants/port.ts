@@ -1,3 +1,4 @@
+import { dpow } from '../fixmath';
 // Торговый порт и экономика трейда
 export const PORT_BUILD_COST = 50000; // цена первого порта (база)
 // Цена постройки НОВОГО порта — «в общем» по СУММЕ УРОВНЕЙ всех своих портов, как у
@@ -19,7 +20,7 @@ export function portUpgradeCost(toLevel: number): number {
 }
 export function tradeValue(level: number): number {
   // +3% за уровень (и до 30, и после — так растёт «прайс доставки»)
-  return TRADE_BASE_VALUE * Math.pow(1.03, level - 1);
+  return TRADE_BASE_VALUE * dpow(1.03, level - 1);
 }
 export function shipsForLevel(level: number): number {
   return Math.min(level, PORT_MAX_SHIP_LEVEL);

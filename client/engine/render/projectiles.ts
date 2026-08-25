@@ -161,19 +161,34 @@ export function drawShips(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
   const sx0 = gc.shipX, sy0 = gc.shipY, sow = gc.shipOwner;
   const rad = Math.round(Math.max(2.5, Math.min(6, z * 0.9)) * 2) / 2; // шаг 0.5 — меньше вариантов в кэше
   if (rad <= SHIP_DOT_RADIUS_MAX) {
-    // ОТДАЛЁННАЯ КАРТА: обводка на 2–3 пикселях не видна. Точки, сгруппированные по
-    // владельцу, чтобы fillStyle ставился раз на группу.
-    const d = Math.max(2, Math.round(rad * 2));
+    // ОТДАЛЁННАЯ КАРТА: обводка на 2–3 пикселях не видна, рисуем точки. Кружками, а не
+    // квадратами — так они не выбиваются из остальной картинки.
+    //
+    // Способ выбран замером (409 судов, 18 владельцев — столько их в партии на 293
+    // страны), мс на кадр, программный рендер / с GPU:
+    //   квадраты fillRect            0.123 / 0.072
+    //   кружки одним путём на владельца  0.371 / 0.071  ← это
+    //   кружки arc+fill на каждое    0.538 / 0.370
+    //   кружки спрайтом drawImage    0.722 / 0.751
+    // То есть все кружки одного владельца собираются в ОДИН путь и заливаются одним
+    // fill: на GPU это ровно цена квадратов. Спрайты (как у дронов, где их выручают
+    // повороты и размер) здесь наоборот худший вариант — на точках в 2–5 пикселей
+    // накладные расходы drawImage перевешивают всё.
+    const r = Math.max(1, Math.round(rad * 2) / 2);
     const owners: number[] = [];
     for (let i = 0; i < n; i++) if (!owners.includes(sow[i])) owners.push(sow[i]);
     for (const owner of owners) {
       ctx.fillStyle = playerColorCSS(owner);
+      ctx.beginPath();
       for (let i = 0; i < n; i++) {
         if (sow[i] !== owner) continue;
         const x = px + sx0[i] * z, y = py + sy0[i] * z;
         if (x < -20 || y < -20 || x > vw + 20 || y > vh + 20) continue;
-        ctx.fillRect(x - d / 2, y - d / 2, d, d);
+        // moveTo в точку начала дуги (угол 0) — иначе подпути соединились бы линией
+        ctx.moveTo(x + r, y);
+        ctx.arc(x, y, r, 0, TAU);
       }
+      ctx.fill();
     }
     return;
   }

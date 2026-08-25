@@ -1,4 +1,5 @@
 import { SAM_RANGE } from './sam';
+import { dpow } from '../fixmath';
 
 // --- Завод (клавиша 2) ---
 // Добывает золото на суше и ускоряет пополнение армии в своём радиусе. Радиус —
@@ -21,7 +22,7 @@ export function factoryCost(ownedLevels: number): number {
 // окупается примерно за 2 минуты, а рост дохода опережает линейный, чтобы апгрейд
 // за 1 млн имел смысл.
 export function factoryIncome(level: number): number {
-  return Math.round(50 * Math.pow(level, 1.5));
+  return Math.round(50 * dpow(level, 1.5));
 }
 
 // ускорение регена: базово +10%, +3% за каждые 10 уровней; действует на первые

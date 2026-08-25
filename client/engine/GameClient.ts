@@ -287,20 +287,34 @@ export class GameClient {
     this.repaintAll();
   }
 
+  // Дельты клеток приходят RLE-сериями: [Δначало, длина, владелец, ...], где Δначало —
+  // разность от начала предыдущей серии. Захваты идут длинными подряд-рядами, поэтому
+  // такой формат в ~21 раз компактнее списка пар «клетка, владелец».
   applyUpdate(changes: number[]) {
     if (!changes.length || !this.cells) return;
-    for (let i = 0; i < changes.length; i += 2) {
-      this.owners[changes[i]] = changes[i + 1];
+    let prev = 0;
+    for (let i = 0; i + 2 < changes.length + 1; i += 3) {
+      const start = prev + changes[i];
+      const len = changes[i + 1];
+      const owner = changes[i + 2];
+      for (let k = 0; k < len; k++) this.owners[start + k] = owner;
+      prev = start;
     }
     // перекрашиваем изменённые клетки и соседей (у них могла поменяться граница)
-    for (let i = 0; i < changes.length; i += 2) {
-      const c = changes[i];
-      this.paint(c);
-      const x = c % this.w;
-      if (x > 0) this.paint(c - 1);
-      if (x < this.w - 1) this.paint(c + 1);
-      if (c >= this.w) this.paint(c - this.w);
-      if (c < this.cells - this.w) this.paint(c + this.w);
+    prev = 0;
+    for (let i = 0; i + 2 < changes.length + 1; i += 3) {
+      const start = prev + changes[i];
+      const len = changes[i + 1];
+      for (let k = 0; k < len; k++) {
+        const c = start + k;
+        this.paint(c);
+        const x = c % this.w;
+        if (x > 0) this.paint(c - 1);
+        if (x < this.w - 1) this.paint(c + 1);
+        if (c >= this.w) this.paint(c - this.w);
+        if (c < this.cells - this.w) this.paint(c + this.w);
+      }
+      prev = start;
     }
     this.dirty = true;
   }
@@ -466,6 +480,25 @@ export class GameClient {
   }
 
   // Приходит плоский массив целых по 4 числа на дрон: [x·10, y·10, курс·100, владелец]
+  /** Перенести камеру к дрону, ближайшему к центру текущего вида. Координат в
+   *  уведомлении нет — дроны летят, поэтому ближайший ищется в момент клика. */
+  focusNearestDrone(): boolean {
+    const n = this.droneCount;
+    if (!n) return false;
+    // центр экрана в клетках карты
+    const cx = (window.innerWidth / 2 - this.panX) / this.zoom;
+    const cy = (window.innerHeight / 2 - this.panY) / this.zoom;
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < n; i++) {
+      const d = (this.droneX[i] - cx) ** 2 + (this.droneY[i] - cy) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return false;
+    this.focusOn(this.droneX[best], this.droneY[best]);
+    return true;
+  }
+
   setDrones(flat: number[]) {
     const n = flat ? (flat.length / 4) | 0 : 0;
     if (this.droneX.length < n) {

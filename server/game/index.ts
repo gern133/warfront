@@ -60,9 +60,17 @@ import {
   TERRAIN_TIER,
   TERRAIN_TIERS,
 } from '../../shared/protocol';
-import { earthTerrain, canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../map/earthmap';
+// Чистая математика карты — из shared, чтобы симуляция импортировалась и в браузер.
+import { canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../../shared/map/mapmath';
 import { buildWaterFields, buildCoarseWater, losWater, smoothWaterPath } from '../../shared/map/water';
-import { Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
+import { Rng } from '../../shared/rng';
+import { rleEncode, rleDecode } from '../../shared/rle';
+// Симуляцию считает и клиент, поэтому вся математика — детерминированная
+// (см. shared/fixmath.ts): Math.pow/sin/cos/atan2/hypot между движками расходятся.
+import { sq, dhypot, dsin, dcos, datan2, wrapAngle } from '../../shared/fixmath';
+import type { Intent, IntentResult } from '../../shared/types/intent';
+
+import { GameSnapshot, Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
 import {
   TRADE_SPEED,
   BOAT_SPEED,
@@ -142,6 +150,15 @@ import {
 export type { Player } from './types';
 export { DIFFICULTY, WEAK_COUNT, STRONG_COUNT } from './constants';
 
+// Карта Земли собирается из данных Natural Earth, а их чтение работает только в
+// Node. Поэтому симуляция не импортирует загрузчик, а получает его извне: сервер
+// подставляет провайдер при старте, а клиент (он считает симуляцию сам в модели
+// lockstep) передаёт уже готовую карту в конструктор и провайдер не использует.
+let earthTerrainProvider: (() => Uint8Array) | null = null;
+export function setEarthTerrainProvider(fn: () => Uint8Array) {
+  earthTerrainProvider = fn;
+}
+
 const EMPTY_PATH: number[] = []; // «маршрут не изменился, бери из кэша»
 
 export class Game {
@@ -189,9 +206,14 @@ export class Game {
   relChanged = new Set<number>();
   // события для ленты: расторжение союза / уничтожение торгового корабля —
   // кому, от кого и (для trade) куда фокусировать камеру; чистится в index
-  relNotices: { to: number; kind: 'break' | 'trade' | 'attacked'; name: string; x?: number; y?: number }[] = [];
+  relNotices: { to: number; kind: 'break' | 'trade' | 'attacked' | 'drones' | 'accept' | 'reject'; name: string; x?: number; y?: number }[] = [];
+  // Исходящие предложения союза человеку: симуляции они не меняют (пока не приняты),
+  // поэтому это ВЫХОД для сетевого слоя, а не состояние. Он их вычитывает и рассылает.
+  proposalsOut: { from: number; to: number }[] = [];
   // кэш морских маршрутов между клетками портов (порты статичны)
   private routeCache = new Map<number, { path: number[]; cum: number[]; totalLen: number } | null>();
+  // Маршруты, посчитанные до восстановления из снимка (см. waterRoute).
+  private preheatedRoutes = new Set<number>();
   // поле укреплений: id владельца штаба, покрывающего клетку (0 = нет).
   // пересобирается только при изменении зданий — в бою это O(1) чтение
   fortField: Int16Array;
@@ -240,16 +262,38 @@ export class Game {
   tickNo = 0;
   landCount = 0;
   winnerId: number | null = null;
+  // когда последний раз уведомляли игрока о конкретном нападающем (ключ: жертва*4096+нападающий)
+  private attackNoticeAt = new Map<number, number>();
+  private buildingResyncPending = false; // вошёл новый клиент — отдать здания целиком
+  private buildingSnap = new Map<number, string>(); // последняя отправленная строка здания
+  private roadsSig = ''; // подпись дорожной сети (см. roadsPubIfChanged)
   private playersMetaSig = ''; // подпись статики игроков (см. playersMetaPub)
   private nextId = 1;
   private nextBoatId = 1;
 
-  constructor(mapType: MapType = 'random') {
+  // Сеяный генератор: вся случайность симуляции идёт через него, поэтому одинаковый
+  // seed даёт одинаковую партию. Нужно и для воспроизводимых замеров, и как основа
+  // для модели lockstep (симуляцию считает каждый клиент у себя).
+  readonly seed: number;
+  private rng: Rng;
+
+  // Сам seed берётся случайно — это ВХОД симуляции, а не её часть. Дальше внутри
+  // игры Math.random() не используется вовсе.
+  // terrain — готовая карта. Её передаёт КЛИЕНТ: он получает карту от сервера в
+  // init и не должен уметь её генерировать (для Земли это чтение файлов).
+  constructor(
+    mapType: MapType = 'random',
+    seed = (Date.now() ^ (Math.random() * 0xffffffff)) >>> 0,
+    terrain?: Uint8Array,
+  ) {
+    this.seed = seed >>> 0;
+    this.rng = new Rng(this.seed);
     this.mapType = mapType;
     this.w = mapType === 'earth' ? EARTH_W : RANDOM_W;
     this.h = mapType === 'earth' ? EARTH_H : RANDOM_H;
     this.cells = this.w * this.h;
     this.terrain = new Uint8Array(this.cells);
+    this.presetTerrain = terrain ?? null;
     this.owners = new Int16Array(this.cells);
     this.landId = new Int16Array(this.cells);
     this.fortField = new Int16Array(this.cells);
@@ -780,7 +824,7 @@ export class Game {
   addBots(difficulty: Difficulty) {
     this.difficulty = difficulty;
     const cfg = DIFFICULTY[difficulty];
-    for (const name of weakNames(WEAK_COUNT)) {
+    for (const name of weakNames(WEAK_COUNT, this.rng)) {
       this.addPlayer(name, {
         bot: true,
         passive: true,
@@ -788,14 +832,31 @@ export class Game {
         maxMul: WEAK_MAX,
       });
     }
-    for (const name of pickShuffled(STRONG_NAMES, STRONG_COUNT)) {
+    for (const name of pickShuffled(STRONG_NAMES, STRONG_COUNT, this.rng)) {
       this.addPlayer(name, { bot: true, strong: true, growthMul: cfg.strongMul });
     }
   }
 
+  private presetTerrain: Uint8Array | null = null;
+
   private genTerrain() {
+    // Генерация карты крутит СВОЙ генератор, производный от seed, а не общий
+    // симуляционный. Иначе получается расхождение: сервер тратит на карту N
+    // случайных чисел, а клиент (он получает карту готовой и не генерирует) — ноль,
+    // и дальше потоки случайности у них разъезжаются. Проверено: до этой правки
+    // клиентская симуляция расходилась с нулевого хода на случайной карте, а на
+    // карте Земли (её данные не случайны) совпадала.
+    const mapRng = new Rng((this.seed ^ 0x5f356495) >>> 0);
+    // карта передана готовой (клиентская симуляция) — генерировать нечего
+    if (this.presetTerrain) {
+      this.terrain = this.presetTerrain.slice();
+      this.landCount = 0;
+      for (let c = 0; c < this.cells; c++) if (this.terrain[c]) this.landCount++;
+      return;
+    }
     if (this.mapType === 'earth') {
-      this.terrain = earthTerrain();
+      if (!earthTerrainProvider) throw new Error('нет провайдера карты Земли: вызовите setEarthTerrainProvider');
+      this.terrain = earthTerrainProvider();
       this.landCount = 0;
       for (let c = 0; c < this.cells; c++) if (this.terrain[c]) this.landCount++;
       return;
@@ -806,8 +867,8 @@ export class Game {
     const frontier: number[] = [];
     const margin = 0.1;
     for (let s = 0; s < 14; s++) {
-      const x = Math.floor(this.w * (margin + Math.random() * (1 - 2 * margin)));
-      const y = Math.floor(this.h * (margin + Math.random() * (1 - 2 * margin)));
+      const x = Math.floor(this.w * (margin + mapRng.float() * (1 - 2 * margin)));
+      const y = Math.floor(this.h * (margin + mapRng.float() * (1 - 2 * margin)));
       const c = y * this.w + x;
       if (!this.terrain[c]) {
         this.terrain[c] = 1;
@@ -816,7 +877,7 @@ export class Game {
       }
     }
     while (this.landCount < target && frontier.length) {
-      const idx = (Math.random() * frontier.length) | 0;
+      const idx = mapRng.int(frontier.length);
       const c = frontier[idx];
       const free: number[] = [];
       this.forNeighbors(c, (n) => {
@@ -827,14 +888,14 @@ export class Game {
         frontier.pop();
         continue;
       }
-      const n = free[(Math.random() * free.length) | 0];
+      const n = free[mapRng.int(free.length)];
       this.terrain[n] = 1;
       this.landCount++;
       frontier.push(n);
     }
     // типы местности: плавные градиенты через многослойный шум
-    const ox = Math.random() * 500;
-    const oy = Math.random() * 500;
+    const ox = mapRng.float() * 500;
+    const oy = mapRng.float() * 500;
     for (let c = 0; c < this.cells; c++) {
       if (!this.terrain[c]) continue;
       const x = c % this.w;
@@ -885,8 +946,38 @@ export class Game {
       maxMul?: number;
     } = {}
   ): Player {
+    return this.createPlayer(this.nextId++, name, opts);
+  }
+
+  /** Добавить игрока с ЗАРАНЕЕ ИЗВЕСТНЫМ id — для применения команды `join` при
+   *  воспроизведении партии: id входит в команду, иначе повтор не совпал бы. */
+  /** Забронировать id для входящего игрока. Сам игрок появится, когда применится
+   *  команда `join` — то есть на следующем тике. Но id нужен серверу СРАЗУ: он уходит
+   *  клиенту в `init` как `selfId`, и он же входит в команду, чтобы у всех — и у
+   *  сервера, и у локальных симуляций — игрок получил один и тот же номер. */
+  reserveId(): number {
+    return this.nextId++;
+  }
+
+  addPlayerWithId(id: number, name: string): Player {
+    if (this.players.has(id)) return this.players.get(id)!;
+    if (id >= this.nextId) this.nextId = id + 1;
+    return this.createPlayer(id, name, {});
+  }
+
+  private createPlayer(
+    id: number,
+    name: string,
+    opts: {
+      bot?: boolean;
+      strong?: boolean;
+      passive?: boolean;
+      growthMul?: number;
+      maxMul?: number;
+    },
+  ): Player {
     const p: Player = {
-      id: this.nextId++,
+      id,
       name,
       troops: SPAWN_TROOPS,
       maxTroops: SPAWN_TROOPS,
@@ -899,7 +990,7 @@ export class Game {
       growthMul: opts.growthMul ?? 1,
       maxMul: opts.maxMul ?? 1,
       money: START_MONEY,
-      thinkAt: this.tickNo + 20 + ((Math.random() * 30) | 0),
+      thinkAt: this.tickNo + 20 + (this.rng.int(30)),
       spawnTick: this.tickNo,
       hurtTick: -1000,
     };
@@ -946,6 +1037,18 @@ export class Game {
   }
 
   // Игрок кликнул точку старта. true = успех
+  /** Можно ли игроку высадиться в эту клетку. Только чтение — нужна серверу, чтобы
+   *  ответить на клик СРАЗУ: сама высадка идёт командой и применяется на тике, а в
+   *  фазе выбора мир не тикает, и до старта раунда результат иначе неизвестен. */
+  canSpawnAt(playerId: number, cell: number): boolean {
+    const p = this.players.get(playerId);
+    // Игрока может ещё не быть: вход — тоже команда, и в фазе высадки мир не тикает,
+    // так что `join` применится только на первом тике раунда. Порядок в очереди
+    // сохраняется (join раньше spawn), поэтому проверяем пока только саму клетку.
+    if (p && (!p.alive || p.spawned)) return false;
+    return this.canPlace(cell, 5, true);
+  }
+
   trySpawn(playerId: number, cell: number): boolean {
     const p = this.players.get(playerId);
     if (!p?.alive || p.spawned) return false;
@@ -963,7 +1066,7 @@ export class Game {
   // Случайный спавн: для ботов и для людей, не успевших выбрать за таймер
   spawnRandom(p: Player) {
     for (let attempt = 0; attempt < 6000; attempt++) {
-      const c = (Math.random() * this.cells) | 0;
+      const c = this.rng.int(this.cells);
       // сначала ищем чистое место, потом теснее, в крайнем случае — по ботам
       const clearance = attempt < 2000 ? 7 : 4;
       const allowBots = attempt >= 4000;
@@ -1203,7 +1306,7 @@ export class Game {
     const comp = this.waterId[pick.water];
     const ranked = own.seeds
       .filter((c) => this.waterId[c] === comp)
-      .map((c) => ({ c, d2: ((c % this.w) - wx) ** 2 + (((c / this.w) | 0) - wy) ** 2 }))
+      .map((c) => ({ c, d2: sq((c % this.w) - wx) + sq(((c / this.w) | 0) - wy) }))
       .sort((a, b) => a.d2 - b.d2);
     if (ranked.length === 0) return false;
     let fine: number[] | null = null;
@@ -1242,7 +1345,7 @@ export class Game {
     // накопленная длина маршрута
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2) {
-      cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+      cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
     }
     p.troops -= troops;
     this.boats.push({
@@ -1298,7 +1401,7 @@ export class Game {
     path.push(wx + 0.5, wy + 0.5);
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2)
-      cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+      cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
     return { path, cum, totalLen: cum[cum.length - 1] || 1 };
   }
 
@@ -1395,7 +1498,7 @@ export class Game {
         const port = this.nearestOwnPort(s.owner, s.x, s.y);
         if (port < 0) return false;
         const px = port % w, py = (port / w) | 0;
-        return (px - s.x) ** 2 + (py - s.y) ** 2 <= 26 * 26;
+        return sq(px - s.x) + sq(py - s.y) <= 26 * 26;
       };
       // стоим в порту на ремонте — плавно восполняем hp, потом обратно в зону
       if (s.healTicks > 0) {
@@ -1437,9 +1540,9 @@ export class Game {
       }
       if (!s.moving && !s.repairing) {
         // патруль по кругу вокруг центра зоны; держимся воды
-        s.patrolAng += WARSHIP_PATROL_SPD;
-        let tx = s.patrolX + Math.cos(s.patrolAng) * WARSHIP_PATROL_R;
-        let ty = s.patrolY + Math.sin(s.patrolAng) * WARSHIP_PATROL_R;
+        s.patrolAng = wrapAngle(s.patrolAng + WARSHIP_PATROL_SPD);
+        let tx = s.patrolX + dcos(s.patrolAng) * WARSHIP_PATROL_R;
+        let ty = s.patrolY + dsin(s.patrolAng) * WARSHIP_PATROL_R;
         const cx = Math.round(tx), cy = Math.round(ty);
         if (cx < 0 || cy < 0 || cx >= w || cy >= h || this.terrain[cy * w + cx]) {
           const [nwx, nwy] = this.nearestWaterFine(
@@ -1450,7 +1553,7 @@ export class Game {
           tx = nwx + 0.5; ty = nwy + 0.5;
         }
         const dx = tx - s.x, dy = ty - s.y;
-        const dist = Math.hypot(dx, dy) || 1;
+        const dist = dhypot(dx, dy) || 1;
         const step = Math.min(WARSHIP_SPEED, dist);
         s.x += (dx / dist) * step;
         s.y += (dy / dist) * step;
@@ -1468,18 +1571,18 @@ export class Game {
       const key = (k: string, id: number) => k.charCodeAt(0) * 1e7 + id;
       for (const ts of this.tradeShips) {
         if (ts.owner === s.owner || this.relation(s.owner, ts.owner) !== 'hostile') continue;
-        const d = (ts.x - s.x) ** 2 + (ts.y - s.y) ** 2;
+        const d = sq(ts.x - s.x) + sq(ts.y - s.y);
         if (d <= R2 && !busy.has(key('t', ts.id))) cands.push({ d, kind: 'trade', id: ts.id });
       }
       for (const bt of this.boats) {
         if (bt.player === s.owner || this.relation(s.owner, bt.player) !== 'hostile') continue;
-        const d = (bt.x - s.x) ** 2 + (bt.y - s.y) ** 2;
+        const d = sq(bt.x - s.x) + sq(bt.y - s.y);
         if (d <= R2 && !busy.has(key('b', bt.id))) cands.push({ d, kind: 'boat', id: bt.id });
       }
       for (const w2 of this.warships) {
         if (w2 === s || w2.owner === s.owner || this.relation(s.owner, w2.owner) !== 'hostile') continue;
         if (w2.healTicks > 0) continue; // корабль на починке в порту — не атакуем
-        const d = (w2.x - s.x) ** 2 + (w2.y - s.y) ** 2;
+        const d = sq(w2.x - s.x) + sq(w2.y - s.y);
         if (d <= R2 && !busy.has(key('w', w2.id))) cands.push({ d, kind: 'war', id: w2.id });
       }
       cands.sort((a, b) => a.d - b.d);
@@ -1524,7 +1627,7 @@ export class Game {
               : this.tradeShips.find((s) => s.id === b.targetId && !s.done);
       if (!tgt) { b.dmg = 0; continue; } // цель исчезла — пуля гаснет (промах)
       const dx = tgt.x - b.x, dy = tgt.y - b.y;
-      const dist = Math.hypot(dx, dy) || 1;
+      const dist = dhypot(dx, dy) || 1;
       if (dist <= BULLET_SPEED + 1.5) {
         // попадание
         if (b.targetKind === 'war') {
@@ -1795,7 +1898,7 @@ export class Game {
         const c = tour.cells[i];
         const px = (c % this.w) + 0.5, py = ((c / this.w) | 0) + 0.5;
         path.push(px, py);
-        if (i > 0) cum.push(cum[cum.length - 1] + Math.hypot(px - path[(i - 1) * 2], py - path[(i - 1) * 2 + 1]));
+        if (i > 0) cum.push(cum[cum.length - 1] + dhypot(px - path[(i - 1) * 2], py - path[(i - 1) * 2 + 1]));
       }
       const payDist = tour.pay.map((p2) => cum[p2.at]);
       const payCell = tour.pay.map((p2) => p2.cell);
@@ -1857,6 +1960,18 @@ export class Game {
 
   // Дороги для отрисовки: рёбра дорожных сетей всех игроков (проложены по суше),
   // прорежены для компактности. Кэшируются по версии сети.
+  // Дороги — только когда сеть изменилась. Она перестраивается лишь при постройке
+  // или захвате заводов/городов/портов, а уходила каждые 500 мс по 5 КБ.
+  // null = «не изменились, используй прежние».
+  roadsPubIfChanged(): number[][] | null {
+    const roads = this.roadsPub();
+    let sig = '';
+    for (const r of roads) sig += r.length + ':' + r[0] + ',' + r[r.length - 1] + ';';
+    if (sig === this.roadsSig) return null;
+    this.roadsSig = sig;
+    return roads;
+  }
+
   roadsPub(): number[][] {
     if (this.roadsCache && this.roadsCache.ver === this.roadVer) return this.roadsCache.data;
     const out: number[][] = [];
@@ -2041,7 +2156,7 @@ export class Game {
       (b) =>
         b.type === type &&
         b.owner === playerId &&
-        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+        sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy) <= r2
     );
   }
 
@@ -2052,7 +2167,7 @@ export class Game {
     let best: Building | undefined, bestD = Infinity;
     for (const b of this.buildings) {
       if (b.type !== 'hq' || b.owner !== playerId) continue;
-      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      const d = sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy);
       if (d <= r2 && d < bestD) { bestD = d; best = b; }
     }
     return best;
@@ -2067,7 +2182,7 @@ export class Game {
     return this.buildings.some(
       (b) =>
         types.includes(b.type) &&
-        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+        sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy) <= r2
     );
   }
 
@@ -2522,13 +2637,19 @@ export class Game {
     const key = fromCell * this.cells + toCell;
     const cached = this.routeCache.get(key);
     if (cached !== undefined) return cached;
+    // Маршрут, уже посчитанный сервером до нашего снимка: бюджет за него заплачен
+    // там, поэтому здесь считаем вне бюджета — иначе клиент с пустым кэшем упрётся
+    // в лимит на тех же тиках, где сервер его не трогал, и симуляции разойдутся.
+    const preheated = this.preheatedRoutes.delete(key);
     // Новый маршрут — это точный поиск по воде, самая дорогая операция в тике.
     // Готовые лежат в кэше (порты статичны), но когда портов много, в один тик
     // может прилететь десяток первых запросов сразу — отсюда пики по 57 мс.
     // Считаем не больше ROUTE_BUDGET новых маршрутов за тик, остальные подождут
     // следующего: судно просто не отправится этим тиком.
-    if (this.routeBudget <= 0) return null;
-    this.routeBudget--;
+    if (!preheated) {
+      if (this.routeBudget <= 0) return null;
+      this.routeBudget--;
+    }
     const sx = fromCell % this.w;
     const sy = (fromCell / this.w) | 0;
     const lx = toCell % this.w;
@@ -2557,7 +2678,7 @@ export class Game {
         path.push(lx + 0.5, ly + 0.5); // и до самого порта-получателя
         const cum: number[] = [0];
         for (let i = 2; i < path.length; i += 2) {
-          cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+          cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
         }
         result = { path, cum, totalLen: cum[cum.length - 1] || 1 };
       }
@@ -2577,7 +2698,7 @@ export class Game {
         this.relation(from.owner, b.owner) !== 'hostile'
     );
     if (!cands.length) return null;
-    return cands[(Math.random() * cands.length) | 0];
+    return cands[this.rng.int(cands.length)];
   }
 
   // выпуск торговых кораблей из портов (по одному раз в PORT_SHIP_INTERVAL,
@@ -2726,7 +2847,7 @@ export class Game {
       if (b.reloads.length >= b.level) continue; // все заряды на перезарядке
       const bx = b.cell % this.w;
       const by = (b.cell / this.w) | 0;
-      const d = (bx + 0.5 - cx) ** 2 + (by + 0.5 - cy) ** 2;
+      const d = sq(bx + 0.5 - cx) + sq(by + 0.5 - cy);
       if (d <= r2 && d < bestD) {
         bestD = d;
         sam = b;
@@ -2740,8 +2861,8 @@ export class Game {
     // (та же формула дуги, что в рендере: arc = min(dist*0.4, 140))
     const kx = m.sx + (m.tx - m.sx) * m.killProg;
     const ky = m.sy + (m.ty - m.sy) * m.killProg;
-    const gdist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
-    const lift = Math.min(gdist * 0.4, 140) * Math.sin(Math.PI * m.killProg);
+    const gdist = dhypot(m.tx - m.sx, m.ty - m.sy);
+    const lift = Math.min(gdist * 0.4, 140) * dsin(Math.PI * m.killProg);
     this.missiles.push({
       id: this.nextMissileId++,
       owner: sam.owner,
@@ -2778,7 +2899,7 @@ export class Game {
     for (const b of this.buildings) {
       if (b.type !== 'silo' || b.owner !== playerId) continue;
       if (this.tickNo < b.readyTick || b.stock <= 0) continue;
-      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      const d = sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy);
       if (d < bestD) {
         bestD = d;
         silo = b;
@@ -2792,7 +2913,7 @@ export class Game {
     if (silo.reloadTick <= this.tickNo) silo.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
     const sx = (silo.cell % this.w) + 0.5;
     const sy = ((silo.cell / this.w) | 0) + 0.5;
-    const dist = Math.hypot(cx + 0.5 - sx, cy + 0.5 - sy);
+    const dist = dhypot(cx + 0.5 - sx, cy + 0.5 - sy);
     const nuke: Missile = {
       id: this.nextMissileId++,
       owner: playerId,
@@ -2828,6 +2949,10 @@ export class Game {
     if (p.money < DRONE_COST) return 'Недостаточно денег';
     p.money -= DRONE_COST;
     this.markHostile(playerId, target); // запуск роя = объявление войны цели
+    // Цель должна узнать о налёте: рой прилетает молча, а снимает по 5% армии за
+    // каждый взрыв. Координат не передаём — дроны летят, и клиент сам находит
+    // ближайший к камере в момент клика.
+    this.relNotices.push({ to: target, kind: 'drones', name: this.playerName(playerId) });
     const tcells = this.playerCells(target);
     // размер роя ∝ территории цели: минимум DRONE_COUNT, +1 дрон за DRONE_CELLS_PER
     // клеток, но не больше DRONE_COUNT_MAX (мелкую страну — базовый рой, континент —
@@ -2839,7 +2964,7 @@ export class Game {
     for (let i = 0; i < count; i++) {
       const silo = silos[i % silos.length];
       const sx = (silo.cell % this.w) + 0.5, sy = ((silo.cell / this.w) | 0) + 0.5;
-      const wc = tcells.length ? tcells[(Math.random() * tcells.length) | 0] : cell;
+      const wc = tcells.length ? tcells[this.rng.int(tcells.length)] : cell;
       this.drones.push({
         id: this.nextDroneId++,
         owner: playerId,
@@ -2849,7 +2974,7 @@ export class Game {
         wx: (wc % this.w) + 0.5,
         wy: ((wc / this.w) | 0) + 0.5,
         a: 0,
-        fireAt: this.tickNo + ((Math.random() * DRONE_FIRE_COOLDOWN) | 0),
+        fireAt: this.tickNo + (this.rng.int(DRONE_FIRE_COOLDOWN)),
         bombs: DRONE_BOMBS,
         doomed: false,
         done: false,
@@ -2894,11 +3019,11 @@ export class Game {
       if (!tc.length) return -1;
       let fallback = -1;
       for (let k = 0; k < 16; k++) {
-        const c = tc[(Math.random() * tc.length) | 0];
+        const c = tc[this.rng.int(tc.length)];
         if (this.owners[c] !== target) continue;
         fallback = c;
         const cx = c % w, cy = (c / w) | 0;
-        if ((cx - fx) ** 2 + (cy - fy) ** 2 >= SPREAD * SPREAD) return c; // достаточно далеко
+        if (sq(cx - fx) + sq(cy - fy) >= SPREAD * SPREAD) return c; // достаточно далеко
       }
       return fallback; // не нашли дальней — берём хоть какую-то занятую
     };
@@ -2914,9 +3039,9 @@ export class Game {
       // бомбу ПРИ ПРИЛЁТЕ, после чего берёт новую дальнюю точку → рой разлетается,
       // а не бьёт кучей в одно место.
       const dx = d.wx - d.x, dy = d.wy - d.y;
-      const dist = Math.hypot(dx, dy);
+      const dist = dhypot(dx, dy);
       if (dist >= 2) {
-        d.a = Math.atan2(dy, dx);
+        d.a = datan2(dy, dx);
         d.x += (dx / dist) * DRONE_SPEED;
         d.y += (dy / dist) * DRONE_SPEED;
       } else {
@@ -2934,8 +3059,8 @@ export class Game {
         } else {
           // ждём перезарядку — медленно кружим над точкой (чтобы не зависать пикселем)
           d.a += 0.25;
-          d.x += Math.cos(d.a) * 0.35;
-          d.y += Math.sin(d.a) * 0.35;
+          d.x += dcos(d.a) * 0.35;
+          d.y += dsin(d.a) * 0.35;
         }
       }
       // ПВО цели пускает по дрону самонаводящуюся ракету (тратит заряд). Дрон не
@@ -2943,9 +3068,12 @@ export class Game {
       if (!d.doomed) {
         for (const b of this.buildings) {
           if (b.type !== 'sam' || b.owner === d.owner || this.tickNo < b.readyTick) continue;
+          // ПВО СОЮЗНИКА по нашим дронам не стреляет: проверялся только владелец
+          // установки, поэтому союзник исправно сбивал рой, летящий через него.
+          if (this.relation(b.owner, d.owner) === 'allied') continue;
           if (b.reloads.length >= b.level) continue; // нет свободных зарядов
           const sx = (b.cell % w) + 0.5, sy = ((b.cell / w) | 0) + 0.5;
-          if ((sx - d.x) ** 2 + (sy - d.y) ** 2 <= samR2) {
+          if (sq(sx - d.x) + sq(sy - d.y) <= samR2) {
             b.reloads.push(this.tickNo + SAM_RELOAD_TICKS);
             d.doomed = true;
             this.bullets.push({
@@ -3146,9 +3274,9 @@ export class Game {
     // ядерный взрыв топит любые суда в радиусе — боевые, торговые и десант
     const bx = cx + 0.5, by = cy + 0.5;
     let sunkWar = false, sunkTrade = false, sunkBoat = false;
-    for (const s of this.warships) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.hp = 0; sunkWar = true; }
-    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
-    for (const b of this.boats) if ((b.x - bx) ** 2 + (b.y - by) ** 2 <= R2) { b.troops = 0; sunkBoat = true; }
+    for (const s of this.warships) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.hp = 0; sunkWar = true; }
+    for (const s of this.tradeShips) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
+    for (const b of this.boats) if (sq(b.x - bx) + sq(b.y - by) <= R2) { b.troops = 0; sunkBoat = true; }
     if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
     if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);
     if (sunkBoat) this.boats = this.boats.filter((b) => b.troops >= 1);
@@ -3214,7 +3342,100 @@ export class Game {
     }
   }
 
-  tick() {
+  // ── Команды игроков («интенты») ────────────────────────────────────────────
+  // Всё внешнее воздействие на симуляцию проходит через очередь и применяется на
+  // ГРАНИЦЕ ХОДА, в порядке поступления. Это даёт две вещи: партия полностью
+  // определяется парой (seed, журнал команд), и появляется тот самый поток ходов,
+  // который в модели OpenFront рассылается вместо состояния мира.
+  private pending: Intent[] = [];
+  /** Журнал по ходам: turnLog[n] — команды, применённые на ходу n. */
+  readonly turnLog: Intent[][] = [];
+
+  /** Поставить команду в очередь текущего хода. */
+  enqueue(i: Intent) {
+    this.pending.push(i);
+  }
+
+  /** Применить одну команду. Возвращает текст ошибки для отправителя или null. */
+  private applyIntent(i: Intent): string | null {
+    switch (i.t) {
+      case 'join':
+        this.addPlayerWithId(i.id, i.name);
+        return null;
+      case 'leave':
+        this.removePlayer(i.id);
+        return null;
+      case 'spawn':
+        return this.trySpawn(i.id, i.cell) ? null : 'Здесь нельзя высадиться';
+      case 'spawnRandom': {
+        const p = this.players.get(i.id);
+        if (p) this.spawnRandom(p);
+        return null;
+      }
+      case 'respawn':
+        return this.trySpawn(i.id, i.cell) ? null : 'Здесь нельзя высадиться';
+      case 'attack':
+        this.launchAttackCell(i.id, i.cell, i.ratio);
+        return null;
+      case 'invade':
+        return this.launchInvasion(i.id, i.cell, i.ratio) ? null : 'Нет морского пути к этой цели';
+      case 'recall':
+        this.recallBoat(i.id, i.boatId);
+        return null;
+      case 'build':
+        return this.build(i.id, i.bt as BuildingType, i.cell);
+      case 'upgrade':
+        return this.upgrade(i.id, i.cell);
+      case 'nuke':
+        return this.launchNuke(i.id, i.cell, i.kind);
+      case 'drones':
+        return this.launchDrones(i.id, i.cell);
+      case 'warship':
+        return this.launchWarship(i.id, i.cell);
+      case 'warshipMove':
+        this.moveWarships(i.id, i.ids, i.cell);
+        return null;
+      case 'propose': {
+        const res = this.proposeAlliance(i.id, i.cell);
+        if (!res) return null;
+        // бот сразу принял/отклонил — уведомление предложившему; человеку —
+        // предложение через исходящий ящик (его разошлёт сетевой слой)
+        if (res.auto) this.relNotices.push({ to: i.id, kind: 'accept', name: res.name });
+        else if (res.refused) this.relNotices.push({ to: i.id, kind: 'reject', name: res.name });
+        else this.proposalsOut.push({ from: i.id, to: res.toId });
+        return null;
+      }
+      case 'allianceResponse':
+        if (i.accept) this.acceptAlliance(i.from, i.id);
+        // ответ предложившему: принял или отклонил
+        this.relNotices.push({
+          to: i.from,
+          kind: i.accept ? 'accept' : 'reject',
+          name: this.playerName(i.id),
+        });
+        return null;
+      case 'breakAlliance':
+        this.breakAlliance(i.id, i.cell);
+        return null;
+      case 'war':
+        this.declareWar(i.id, i.cell);
+        return null;
+      case 'donate':
+        return this.donate(i.id, i.cell, i.kind, i.amount);
+    }
+  }
+
+  tick(): IntentResult[] {
+    // Команды применяются ПЕРЕД шагом мира и записываются в журнал хода: так порядок
+    // не зависит от того, когда пакет пришёл по сети внутри 100-миллисекундного тика.
+    const results: IntentResult[] = [];
+    const turn = this.pending;
+    this.pending = [];
+    this.turnLog[this.tickNo] = turn;
+    for (const i of turn) {
+      const error = this.applyIntent(i);
+      if (error) results.push({ id: i.id, error });
+    }
     this.tickNo++;
     this.routeBudget = ROUTE_BUDGET;
     // здание завершилось на этом тике — пересобрать поле укреплений
@@ -3356,6 +3577,7 @@ export class Game {
         }
       }
     }
+    return results;
   }
 
   // Встречные атаки взаимно уничтожаются 1:1 — граница движется в сторону того,
@@ -3504,7 +3726,7 @@ export class Game {
       for (let tier = 0; tier < TERRAIN_TIERS; tier++) {
         const list = buckets[own * TERRAIN_TIERS + tier];
         while (list.length && quota > 0) {
-          const i = (Math.random() * list.length) | 0;
+          const i = this.rng.int(list.length);
           const c = list[i];
           const t = this.terrain[c];
           // укреплена ли клетка штабом её владельца; сопротивление по уровню:
@@ -3530,7 +3752,12 @@ export class Game {
             enemy.troops = Math.max(0, enemy.troops - density);
             // Уведомление «вас захватывают» — только на НАЧАЛО натиска (когда клетки
             // не терялись дольше ATTACK_NOTICE_GAP), иначе оно летело бы каждый тик.
-            if (this.tickNo - enemy.hurtTick > ATTACK_NOTICE_GAP) {
+            // Пауза считается на ПАРУ «кого бьют ← кто бьёт», а не на защитника
+            // целиком: иначе, пока тебя щиплют боты, hurtTick всегда свежий и
+            // уведомление о новом (в т.ч. живом) нападающем не приходит вовсе.
+            const pairKey = enemy.id * 4096 + a.player;
+            if (this.tickNo - (this.attackNoticeAt.get(pairKey) ?? -1e9) > ATTACK_NOTICE_GAP) {
+              this.attackNoticeAt.set(pairKey, this.tickNo);
               this.relNotices.push({
                 to: enemy.id,
                 kind: 'attacked',
@@ -3576,7 +3803,7 @@ export class Game {
     // ещё не прикрывает его (иначе зря пересчитываем маршрут каждый тик)
     if (threats.length && myWar.length) {
       const t = threats[0];
-      const covered = myWar.some((s) => (s.x - t.x) ** 2 + (s.y - t.y) ** 2 < WARSHIP_RANGE * WARSHIP_RANGE);
+      const covered = myWar.some((s) => sq(s.x - t.x) + sq(s.y - t.y) < WARSHIP_RANGE * WARSHIP_RANGE);
       if (!covered) {
         const cell = (Math.round(t.y) | 0) * this.w + (Math.round(t.x) | 0);
         this.moveWarships(p.id, myWar.map((s) => s.id), cell);
@@ -3597,7 +3824,7 @@ export class Game {
         zone = (Math.round(t.y) | 0) * this.w + (Math.round(t.x) | 0);
       } else {
         // иначе — патруль у своего порта (прикрытие подходов с моря и торговли)
-        const port = ports[(Math.random() * ports.length) | 0].cell;
+        const port = ports[this.rng.int(ports.length)].cell;
         const [wx, wy] = this.nearestWaterFine(port % this.w, (port / this.w) | 0, 14);
         if (!this.terrain[wy * this.w + wx]) zone = wy * this.w + wx;
       }
@@ -3605,14 +3832,14 @@ export class Game {
     }
     // Наступательность: если угроз нет и корабли есть — иногда двигаем их к
     // вражескому берегу/порту (блокада торговли и десантов), а не держим у себя
-    if (!threats.length && myWar.length && Math.random() < 0.4) {
+    if (!threats.length && myWar.length && this.rng.float() < 0.4) {
       // цель: порт враждебного игрока или его прибрежная клетка
       const foePorts = this.buildings.filter(
         (b) => b.type === 'port' && b.owner !== p.id && this.relation(p.id, b.owner) === 'hostile' && this.tickNo >= b.readyTick
       );
       let zoneCell = -1;
       if (foePorts.length) {
-        const fp = foePorts[(Math.random() * foePorts.length) | 0].cell;
+        const fp = foePorts[this.rng.int(foePorts.length)].cell;
         const [wx, wy] = this.nearestWaterFine(fp % this.w, (fp / this.w) | 0, 20);
         if (!this.terrain[wy * this.w + wx]) zoneCell = wy * this.w + wx;
       } else {
@@ -3623,7 +3850,7 @@ export class Game {
       // не гоняем, если уже кто-то рядом с этой зоной
       if (zoneCell >= 0) {
         const zx = zoneCell % this.w, zy = (zoneCell / this.w) | 0;
-        const covered = myWar.some((s) => (s.x - zx) ** 2 + (s.y - zy) ** 2 < (WARSHIP_RANGE * 0.7) ** 2);
+        const covered = myWar.some((s) => sq(s.x - zx) + sq(s.y - zy) < sq(WARSHIP_RANGE * 0.7));
         if (!covered) this.moveWarships(p.id, myWar.map((s) => s.id), zoneCell);
       }
     }
@@ -3637,11 +3864,11 @@ export class Game {
       (x) => x.id !== p.id && x.alive && x.cells > 0 && this.relation(p.id, x.id) !== 'allied'
     );
     if (!foes.length) return;
-    const foe = foes[(Math.random() * foes.length) | 0];
+    const foe = foes[this.rng.int(foes.length)];
     const fcells = this.playerCells(foe.id);
     if (!fcells.length) return;
     for (let tries = 0; tries < 24; tries++) {
-      const c = fcells[(Math.random() * fcells.length) | 0];
+      const c = fcells[this.rng.int(fcells.length)];
       if (this.owners[c] !== foe.id) continue;
       let coastal = false;
       this.forNeighbors(c, (n) => { if (!this.terrain[n]) coastal = true; });
@@ -3656,13 +3883,13 @@ export class Game {
     if (this.boats.filter((b) => b.player === p.id).length >= 2) return;
     const my = this.playerCells(p.id);
     if (!my.length) return;
-    const home = my[(Math.random() * my.length) | 0];
+    const home = my[this.rng.int(my.length)];
     const hx = home % this.w, hy = (home / this.w) | 0;
     const myLand = this.landId[home];
     let best = -1, bestD = Infinity;
     for (let tries = 0; tries < 60; tries++) {
-      const rx = hx + ((Math.random() * 220) | 0) - 110;
-      const ry = hy + ((Math.random() * 220) | 0) - 110;
+      const rx = hx + (this.rng.int(220)) - 110;
+      const ry = hy + (this.rng.int(220)) - 110;
       if (rx < 0 || ry < 0 || rx >= this.w || ry >= this.h) continue;
       const c = ry * this.w + rx;
       if (!this.terrain[c] || this.owners[c] !== 0) continue; // нужна свободная суша
@@ -3670,7 +3897,7 @@ export class Game {
       let coastal = false;
       this.forNeighbors(c, (n) => { if (!this.terrain[n]) coastal = true; });
       if (!coastal) continue;
-      const d = (rx - hx) ** 2 + (ry - hy) ** 2;
+      const d = sq(rx - hx) + sq(ry - hy);
       if (d < bestD) { bestD = d; best = c; }
     }
     if (best >= 0) this.launchInvasion(p.id, best, 0.35);
@@ -3712,7 +3939,7 @@ export class Game {
     const EX: BuildingType[] = ['hq', 'city', 'port', 'silo', 'sam', 'factory'];
     let best = -1;
     let bestD = -1;
-    for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
+    for (let i = this.rng.int(step); i < cells.length; i += step) {
       const c = cells[i];
       if (this.owners[c] !== playerId) continue;
       if (!this.canBuildAt(playerId, c)) continue;
@@ -3723,7 +3950,7 @@ export class Game {
       for (const b of own) {
         const bx = b.cell % w;
         const by = (b.cell / w) | 0;
-        const d = (bx - cx) ** 2 + (by - cy) ** 2;
+        const d = sq(bx - cx) + sq(by - cy);
         if (d < dmin) dmin = d;
       }
       if (dmin > bestD) {
@@ -3741,7 +3968,7 @@ export class Game {
     const counts = new Map<number, number>();
     let enemyFrom = -1; // своя клетка на границе с врагом
     let enemyTo = -1; // соседняя вражеская клетка (для наведения ядерки)
-    for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
+    for (let i = this.rng.int(step); i < cells.length; i += step) {
       const c = cells[i];
       if (this.owners[c] !== p.id) continue; // протухшая запись
       this.forNeighbors(c, (n) => {
@@ -3759,7 +3986,7 @@ export class Game {
     // Пассивный «корм»: думает редко, не нападает на игроков — только вяло
     // расширяется в свободную нейтраль, пока она есть рядом, потом замирает
     if (p.passive) {
-      p.thinkAt = this.tickNo + 45 + ((Math.random() * 70) | 0);
+      p.thinkAt = this.tickNo + 45 + (this.rng.int(70));
       if (p.troops < p.maxTroops * 0.5 || p.troops < 120) return;
       if (!counts.has(0)) return; // нейтрали рядом нет — сидим
       this.launchAttackOwner(p.id, 0, Math.floor(p.troops * 0.5));
@@ -3794,7 +4021,7 @@ export class Game {
         let c = -1;
         if (t === 'port') {
           // порт ставится только на свой океанский берег, farthest-point тут не годится
-          for (let i = (Math.random() * step) | 0; i < cells.length; i += step) {
+          for (let i = this.rng.int(step); i < cells.length; i += step) {
             if (this.canBuildPort(p.id, cells[i]) && !this.buildingNear(cells[i], PORT_RADIUS, EX)) {
               c = cells[i];
               break;
@@ -4034,11 +4261,11 @@ export class Game {
       const strikeReserve = missing ? Math.max(goal, droneReserve) : droneReserve;
       if (
         enemyTo >= 0 &&
-        Math.random() < 0.15 &&
+        this.rng.float() < 0.15 &&
         p.money >= NUKES.basic.cost + strikeReserve &&
         this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
       ) {
-        const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.35 ? 'hydro' : 'basic';
+        const kind = p.money >= NUKES.hydro.cost && this.rng.float() < 0.35 ? 'hydro' : 'basic';
         const fx = enemyFrom % this.w, fy = (enemyFrom / this.w) | 0;
         const prio: Record<string, number> = { silo: 5, sam: 4, factory: 3, hq: 2, city: 1 };
         let targetCell = -1, bestScore = -Infinity;
@@ -4047,7 +4274,7 @@ export class Game {
           if (!pr || b.owner === p.id || b.owner <= 0) continue;
           if (this.relation(p.id, b.owner) === 'allied') continue;
           const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
-          const d2 = (bx - fx) ** 2 + (by - fy) ** 2;
+          const d2 = sq(bx - fx) + sq(by - fy);
           if (d2 > 500 * 500) continue; // слишком далеко — не бьём через полмира
           const score = pr * 1e7 - d2; // приоритет типа, при равенстве — ближе
           if (score > bestScore) { bestScore = score; targetCell = b.cell; }
@@ -4056,7 +4283,7 @@ export class Game {
           // стратегических целей нет — бьём вглубь территории врага (как раньше)
           const R = NUKES[kind].radius;
           const ex = enemyTo % this.w, ey = (enemyTo / this.w) | 0;
-          const dx = ex - fx, dy = ey - fy, len = Math.hypot(dx, dy) || 1;
+          const dx = ex - fx, dy = ey - fy, len = dhypot(dx, dy) || 1;
           const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
           const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
           targetCell = ty * this.w + tx;
@@ -4072,16 +4299,16 @@ export class Game {
       if (enemyTo >= 0 && hasSilo) {
         const chance = atWar ? BOT_DRONE_CHANCE_WAR : BOT_DRONE_CHANCE_IDLE;
         for (let wave = 0; wave < BOT_DRONE_WAVES; wave++) {
-          if (p.money < DRONE_COST || Math.random() >= chance) break;
+          if (p.money < DRONE_COST || this.rng.float() >= chance) break;
           if (this.launchDrones(p.id, enemyTo) !== null) break; // не вышло — не пытаемся снова
         }
       }
       // Флот: строит боевые корабли, прикрывает берег/торговлю, перехватывает
       // вражеские десанты; изредка сам высаживает десант на чужой берег/остров.
-      if (Math.random() < 0.35) this.botFleet(p);
-      if (Math.random() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
+      if (this.rng.float() < 0.35) this.botFleet(p);
+      if (this.rng.float() < 0.08 && p.troops > p.maxTroops * 0.5) this.botSeaInvade(p);
       // активно занимаем пустые острова, пока есть свободные войска
-      if (Math.random() < 0.2 && p.troops > p.maxTroops * 0.35) this.botColonize(p);
+      if (this.rng.float() < 0.2 && p.troops > p.maxTroops * 0.35) this.botColonize(p);
 
       // СОЮЗЫ МЕЖДУ БОТАМИ. Раньше бот заключал союз только в коалиции против
       // оторвавшегося лидера, поэтому обычной дипломатии между странами не было
@@ -4089,7 +4316,7 @@ export class Game {
       // которой мы ещё нейтральны и которая сопоставима по силе, иногда становится
       // союзником — это и даёт мирные границы, и открывает торговлю (партнёр по
       // трейду обязан быть НЕ враждебным).
-      if (Math.random() < 0.2) {
+      if (this.rng.float() < 0.2) {
         for (const k of counts.keys()) {
           if (k <= 0 || k === p.id) continue;
           if (this.relation(p.id, k) !== 'neutral') continue;
@@ -4114,7 +4341,7 @@ export class Game {
         if (leader > 0 && leader !== p.id && this.powerOf(leader) > this.powerOf(p.id) * 1.3) {
           // 1) союзы коалиции — с другими НЕ-лидерами-ботами (чтобы не грызться,
           //    а давить лидера вместе)
-          if (Math.random() < 0.25 * coalition) {
+          if (this.rng.float() < 0.25 * coalition) {
             for (const k of counts.keys()) {
               if (k <= 0 || k === leader) continue;
               const other = this.players.get(k);
@@ -4126,7 +4353,7 @@ export class Game {
           }
           // 2) бомбим инфраструктуру лидера ядеркой (даже не граничя с ним)
           if (
-            Math.random() < 0.08 + 0.4 * coalition &&
+            this.rng.float() < 0.08 + 0.4 * coalition &&
             p.money >= NUKES.basic.cost + strikeReserve &&
             this.buildings.some((b) => b.owner === p.id && b.type === 'silo' && this.tickNo >= b.readyTick && b.stock > 0)
           ) {
@@ -4139,11 +4366,11 @@ export class Game {
               const pr = prio[b.type];
               if (!pr) continue;
               const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
-              const score = pr * 1e7 - ((bx - fx0) ** 2 + (by - fy0) ** 2);
+              const score = pr * 1e7 - (sq(bx - fx0) + sq(by - fy0));
               if (score > bs) { bs = score; tc = b.cell; }
             }
             if (tc >= 0) {
-              const kind = p.money >= NUKES.hydro.cost && Math.random() < 0.5 ? 'hydro' : 'basic';
+              const kind = p.money >= NUKES.hydro.cost && this.rng.float() < 0.5 ? 'hydro' : 'basic';
               this.launchNuke(p.id, tc, kind);
             }
           }
@@ -4153,7 +4380,7 @@ export class Game {
 
     // Страны: агрессия зависит от сложности
     const aggro = DIFFICULTY[this.difficulty].aggro;
-    p.thinkAt = this.tickNo + Math.round(18 / aggro) + ((Math.random() * 30) | 0);
+    p.thinkAt = this.tickNo + Math.round(18 / aggro) + (this.rng.int(30));
     // Порог начала наступления (их triggerRatio)
     const trigger = BOT_TRIGGER / Math.max(1, aggro);
     if (p.troops < p.maxTroops * trigger || p.troops < 150) return;
@@ -4182,7 +4409,7 @@ export class Game {
     if (send < 150) return;
     // Предательство: если бот заметно сильнее граничащего союзника и его самого
     // не давит более сильный враг — иногда рвёт союз и бьёт в спину.
-    if (Math.random() < 0.06 * aggro) {
+    if (this.rng.float() < 0.06 * aggro) {
       const pressured = [...(this.hostiles.get(p.id) ?? [])].some((f) => this.powerOf(f) > this.powerOf(p.id) * 1.1);
       if (!pressured) {
         for (const k of counts.keys()) {
@@ -4219,7 +4446,7 @@ export class Game {
     if (
       leader > 0 && leader !== p.id && counts.has(leader) &&
       this.powerOf(leader) > this.powerOf(p.id) * 1.3 &&
-      Math.random() < 0.5 + 0.5 * coal
+      this.rng.float() < 0.5 + 0.5 * coal
     ) {
       target = leader;
     } else {
@@ -4253,11 +4480,19 @@ export class Game {
   // Статика игроков (имя, бот/страна) — отдаётся ТОЛЬКО когда набор игроков
   // изменился. Раньше имена и флаги уходили каждый тик для всех 293 игроков и
   // составляли почти половину кадра состояния, хотя не меняются никогда.
-  playersMetaPub(force = false): { id: number; name: string; bot: boolean; strong: boolean }[] | null {
+  playersMetaPub(): { id: number; name: string; bot: boolean; strong: boolean }[] | null {
     let sig = '';
     for (const p of this.players.values()) sig += p.id + ':' + p.name + (p.bot ? 'b' : '') + (p.strong ? 's' : '') + ';';
-    if (!force && sig === this.playersMetaSig) return null; // ничего не изменилось
+    if (sig === this.playersMetaSig) return null; // ничего не изменилось
     this.playersMetaSig = sig;
+    return this.playersMetaAll();
+  }
+
+  /** Вся статика игроков, БЕЗ обновления подписи — для init одного клиента.
+   *  Если трогать подпись здесь, получается так: игрок вошёл, набор изменился, но
+   *  подпись уже «свежая» — и широковещательный апдейт решает, что рассылать нечего.
+   *  Остальные клиенты в итоге не узнают имя новичка и показывают пустоту. */
+  playersMetaAll(): { id: number; name: string; bot: boolean; strong: boolean }[] {
     return [...this.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
@@ -4281,6 +4516,39 @@ export class Game {
       );
     }
     return out;
+  }
+
+  // Дельта зданий: только изменившиеся записи (тем же плоским форматом) плюс id
+  // исчезнувших. Здания почти не меняются между тиками — обычно в дельте пусто.
+  // force = отдать всё (нужно новому клиенту).
+  buildingsDelta(force = false): { flat: number[]; gone: number[]; full: boolean } {
+    const flat = this.buildingsPub();
+    if (this.buildingResyncPending) {
+      force = true; // вошёл новый клиент — ему нужна полная картина, а не дельта
+      this.buildingResyncPending = false;
+    }
+    if (force) {
+      this.buildingSnap.clear();
+      for (let i = 0; i < flat.length; i += 10) {
+        this.buildingSnap.set(flat[i], flat.slice(i, i + 10).join(','));
+      }
+      return { flat, gone: [], full: true };
+    }
+    const out: number[] = [];
+    const seen = new Set<number>();
+    for (let i = 0; i < flat.length; i += 10) {
+      const id = flat[i];
+      seen.add(id);
+      const row = flat.slice(i, i + 10).join(',');
+      if (this.buildingSnap.get(id) !== row) {
+        this.buildingSnap.set(id, row);
+        for (let k = 0; k < 10; k++) out.push(flat[i + k]);
+      }
+    }
+    const gone: number[] = [];
+    for (const id of this.buildingSnap.keys()) if (!seen.has(id)) gone.push(id);
+    for (const id of gone) this.buildingSnap.delete(id);
+    return { flat: out, gone, full: false };
   }
 
   // Здания шлём ПЛОСКИМ массивом целых по 10 чисел на здание:
@@ -4343,9 +4611,193 @@ export class Game {
     return out;
   }
 
-  /** Заново отправить маршруты всех лодок: нужно, когда в игру входит новый клиент —
-   *  иначе он не увидит следов десантов, отправленных до его подключения. */
+  // ── Снимок состояния ───────────────────────────────────────────────────────
+  // Нужен для двух вещей, обе — про клиентскую симуляцию:
+  //   1. ПОЗДНЕЕ ПОДКЛЮЧЕНИЕ. Догонять партию с нулевого хода нельзя: при 2.3 мс на
+  //      тик десять тысяч ходов — это 23 секунды счёта. Клиент поднимается из снимка.
+  //   2. РАСХОЖДЕНИЕ. Если хеши разошлись, клиент не продолжает врать картинкой, а
+  //      просит снимок и продолжает с него: сервер считает симуляцию всегда и
+  //      остаётся авторитетом.
+  //
+  // В снимок входит ВСЁ, от чего зависит дальнейший ход событий, включая состояние
+  // генератора случайности и счётчики id — без них симуляции разъедутся сразу же.
+  // Производное (поле укреплений, связность воды, кэш маршрутов, список клеток по
+  // владельцу) не пишем, а пересобираем при восстановлении.
+  snapshot(): GameSnapshot {
+    const setToArr = (m: Map<number, Set<number>>) =>
+      [...m.entries()].map(([k, v]) => [k, [...v]] as [number, number[]]);
+    // cellsOf — разностями внутри каждого игрока (см. GameSnapshot.cellsOfEnc)
+    const cellsEnc: number[] = [];
+    for (const [id, arr] of this.cellsOf) {
+      cellsEnc.push(id, arr.length);
+      let prev = 0;
+      for (let i = 0; i < arr.length; i++) {
+        cellsEnc.push(arr[i] - prev);
+        prev = arr[i];
+      }
+    }
+    return {
+      tickNo: this.tickNo,
+      rngState: this.rng.state(),
+      landCount: this.landCount,
+      winnerId: this.winnerId,
+      difficulty: this.difficulty,
+      ids: {
+        player: this.nextId,
+        boat: this.nextBoatId,
+        building: this.nextBuildingId,
+        ship: this.nextShipId,
+        warship: this.nextWarshipId,
+        drone: this.nextDroneId,
+        truck: this.nextTruckId,
+        bullet: this.nextBulletId,
+        missile: this.nextMissileId,
+      },
+      ownersRle: rleEncode(this.owners),
+      cellsOfEnc: cellsEnc,
+      routeKeys: [...this.routeCache.keys()],
+      roadEdgeKeys: [...this.roadEdges.entries()].map(([o, m]) => {
+        const flat: number[] = [];
+        for (const [k, path] of m) flat.push(k, path[0] ?? -1);
+        return [o, flat] as [number, number[]];
+      }),
+      attackNoticeAt: [...this.attackNoticeAt.entries()],
+      players: [...this.players.values()].map((p) => ({ ...p })),
+      // frontier — это Set, в JSON его нет: пишем массивом
+      attacks: this.attacks.map((a) => ({ ...a, frontier: [...a.frontier] })),
+      boats: this.boats.map((b) => ({ ...b })),
+      buildings: this.buildings.map((b) => ({ ...b })),
+      tradeShips: this.tradeShips.map((x) => ({ ...x })),
+      warships: this.warships.map((x) => ({ ...x })),
+      drones: this.drones.map((x) => ({ ...x })),
+      trucks: this.trucks.map((x) => ({ ...x })),
+      bullets: this.bullets.map((x) => ({ ...x })),
+      missiles: this.missiles.map((x) => ({ ...x })),
+      allies: setToArr(this.allies),
+      hostiles: setToArr(this.hostiles),
+    };
+  }
+
+  /** Восстановить состояние из снимка. Карта (terrain) не входит в снимок — она у
+   *  клиента уже есть из init и за партию не меняется. */
+  restore(s: GameSnapshot) {
+    this.tickNo = s.tickNo;
+    this.rng.setState(s.rngState);
+    this.landCount = s.landCount;
+    this.winnerId = s.winnerId;
+    this.difficulty = s.difficulty;
+    this.nextId = s.ids.player;
+    this.nextBoatId = s.ids.boat;
+    this.nextBuildingId = s.ids.building;
+    this.nextShipId = s.ids.ship;
+    this.nextWarshipId = s.ids.warship;
+    this.nextDroneId = s.ids.drone;
+    this.nextTruckId = s.ids.truck;
+    this.nextBulletId = s.ids.bullet;
+    this.nextMissileId = s.ids.missile;
+    rleDecode(s.ownersRle, this.owners);
+    this.players.clear();
+    for (const p of s.players) this.players.set(p.id, { ...p });
+    this.attacks = s.attacks.map((a) => ({ ...a, frontier: new Set(a.frontier) }));
+    this.boats = s.boats.map((b) => ({ ...b }));
+    this.buildings = s.buildings.map((b) => ({ ...b }));
+    this.tradeShips = s.tradeShips.map((x) => ({ ...x }));
+    this.warships = s.warships.map((x) => ({ ...x }));
+    this.drones = s.drones.map((x) => ({ ...x }));
+    this.trucks = s.trucks.map((x) => ({ ...x }));
+    this.bullets = s.bullets.map((x) => ({ ...x }));
+    this.missiles = s.missiles.map((x) => ({ ...x }));
+    this.allies = new Map(s.allies.map(([k, v]) => [k, new Set(v)]));
+    this.hostiles = new Map(s.hostiles.map(([k, v]) => [k, new Set(v)]));
+    this.cellsOf.clear();
+    for (let i = 0; i < s.cellsOfEnc.length; ) {
+      const id = s.cellsOfEnc[i++];
+      const len = s.cellsOfEnc[i++];
+      const arr = new Array<number>(len);
+      let prev = 0;
+      for (let k = 0; k < len; k++) {
+        prev += s.cellsOfEnc[i++];
+        arr[k] = prev;
+      }
+      this.cellsOf.set(id, arr);
+    }
+    // производное — пересобрать
+    this.fortDirty = true; // поле укреплений соберётся на следующем тике
+    // Пути не переносим (выведутся из карты при первом запросе), но помним, за какие
+    // сервер уже заплатил бюджетом: их пересчёт бюджет тратить не должен.
+    this.routeCache.clear();
+    this.preheatedRoutes = new Set(s.routeKeys);
+    // Дороги: ключи из снимка, пути прокладываем заново тем же алгоритмом (он зависит
+    // только от карты, поэтому выходит та же геометрия).
+    this.roadEdges.clear();
+    for (const [owner, keys] of s.roadEdgeKeys) {
+      const m = new Map<number, number[]>();
+      for (let i = 0; i < keys.length; i += 2) {
+        const k = keys[i];
+        const lo = Math.floor(k / this.cells);
+        const hi = k % this.cells;
+        // прокладываем с того же конца, что и сервер, иначе колено встанет иначе
+        const from = keys[i + 1] === hi ? hi : lo;
+        const path = this.orthEdge(from, from === lo ? hi : lo);
+        if (path) m.set(k, path);
+      }
+      this.roadEdges.set(owner, m);
+    }
+    this.roadNet.clear();
+    this.roadsCache = null;
+    this.roadVer++;
+    this.attackNoticeAt = new Map(s.attackNoticeAt);
+    this.changed.clear();
+    this.pending.length = 0;
+    // кэши отправки: после восстановления клиенту нужна полная картина
+    this.buildingSnap.clear();
+    this.playersMetaSig = '';
+    this.roadsSig = '';
+  }
+
+  /** Хеш состояния симуляции. Нужен для двух вещей: проверить, что одинаковый seed
+   *  даёт одинаковую партию, и (в модели lockstep) поймать расхождение симуляций у
+   *  разных клиентов — у OpenFront ровно для этого в каждом ходе едет `hash`.
+   *  FNV-1a по владельцам клеток, игрокам, зданиям и юнитам. */
+  stateHash(): number {
+    let h = 0x811c9dc5;
+    const mix = (v: number) => {
+      h ^= v | 0;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    };
+    mix(this.tickNo);
+    // владельцы клеток — RLE, чтобы не гонять миллион чтений на каждый вызов
+    let run = 1;
+    for (let c = 1; c < this.cells; c++) {
+      if (this.owners[c] === this.owners[c - 1]) { run++; continue; }
+      mix(this.owners[c - 1]);
+      mix(run);
+      run = 1;
+    }
+    mix(run);
+    for (const p of this.players.values()) {
+      mix(p.id);
+      mix(Math.floor(p.troops));
+      mix(Math.floor(p.money));
+      mix(p.cells);
+      mix(p.alive ? 1 : 0);
+    }
+    for (const b of this.buildings) {
+      mix(b.id); mix(b.owner); mix(b.cell); mix(b.level);
+    }
+    for (const a of this.attacks) { mix(a.player); mix(a.target); mix(Math.floor(a.troops)); }
+    for (const b of this.boats) { mix(b.id); mix(Math.floor(b.x)); mix(Math.floor(b.y)); }
+    for (const d of this.drones) { mix(d.id); mix(Math.floor(d.x)); mix(Math.floor(d.y)); }
+    for (const s of this.tradeShips) { mix(s.id); mix(Math.floor(s.x)); mix(Math.floor(s.y)); }
+    mix(this.rng.state());
+    return h >>> 0;
+  }
+
+  /** Заново отправить маршруты всех лодок и полную картину зданий: нужно, когда в
+   *  игру входит новый клиент — иначе он не увидит ни следов уже плывущих десантов,
+   *  ни зданий, построенных до его подключения (здания идут дельтой). */
   resendBoatPaths() {
     for (const b of this.boats) b.pathSent = false;
+    this.buildingResyncPending = true;
   }
 }

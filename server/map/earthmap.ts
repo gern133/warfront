@@ -3,11 +3,25 @@
 // + классификация местности: 1 трава, 2 песок, 3 камень, 4 снег.
 
 import { createRequire } from 'node:module';
+// Чистая математика карты живёт в shared/map/mapmath.ts: она нужна и браузеру
+// (клиентская симуляция), а этот модуль читает файлы и работает только в Node.
+export {
+  EARTH_W,
+  EARTH_H,
+  T_WATER,
+  T_GRASS,
+  T_SAND,
+  T_ROCK,
+  T_SNOW,
+  canalCoarseCells,
+  vnoise,
+  fbm,
+  smoothstep,
+} from '../../shared/map/mapmath';
+import { EARTH_W, EARTH_H, T_WATER, T_GRASS, T_SAND, T_ROCK, T_SNOW, fbm, smoothstep } from '../../shared/map/mapmath';
 
 const require2 = createRequire(import.meta.url);
 
-export const EARTH_W = 1920;
-export const EARTH_H = 900;
 // карта обрезана по широте как классические карты мира: Гренландия у верхнего
 // края, Антарктида полосой у нижнего, без пустых полярных океанов
 const LAT_TOP = 84;
@@ -22,11 +36,6 @@ function latRow(lat: number, h: number): number {
   return Math.floor(((LAT_TOP - lat) / LAT_SPAN) * h);
 }
 
-export const T_WATER = 0;
-export const T_GRASS = 1;
-export const T_SAND = 2;
-export const T_ROCK = 3;
-export const T_SNOW = 4;
 
 type Ring = [number, number][]; // [lon, lat]
 
@@ -105,37 +114,6 @@ const CANALS: { pts: [number, number][]; r: number }[] = [
 // Коридор канала в грубой водной сетке: судоходность узкого канала грубая сетка
 // (блок K×K, проходим только если весь водный) сама не видит — поэтому вдоль
 // каждого канала принудительно помечаем блоки водой. Возвращает индексы блоков.
-export function canalCoarseCells(w: number, h: number, ck: number, cw: number, ch: number): number[] {
-  const set = new Set<number>();
-  const add = (cx: number, cy: number) => {
-    if (cy < 0 || cy >= ch) return;
-    set.add(cy * cw + (((cx % cw) + cw) % cw)); // заворот по долготе
-  };
-  for (const canal of CANALS) {
-    const pts = canal.pts;
-    let px = -999;
-    let py = -999;
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const x0 = ((pts[i][0] + 180) / 360) * w;
-      const y0 = latRow(pts[i][1], h);
-      const x1 = ((pts[i + 1][0] + 180) / 360) * w;
-      const y1 = latRow(pts[i + 1][1], h);
-      const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0)) + 1;
-      for (let s = 0; s <= steps; s++) {
-        const t = s / steps;
-        const cx = Math.floor((x0 + (x1 - x0) * t) / ck);
-        const cy = Math.floor((y0 + (y1 - y0) * t) / ck);
-        // тонкий коридор в 1 блок; при диагональном переходе добавляем ортогональный
-        // мостик, чтобы обход воды (без срезания углов) не разрывался
-        if (px !== -999 && cx !== px && cy !== py) add(cx, py);
-        add(cx, cy);
-        px = cx;
-        py = cy;
-      }
-    }
-  }
-  return [...set];
-}
 
 // прорезаем диск воды (mask=0) с заворотом по долготе
 function carveDisk(mask: Uint8Array, w: number, h: number, cx: number, cy: number, r: number) {
@@ -205,33 +183,10 @@ const DESERTS: Zone[] = [
 const GREENLAND: Zone = [-40, 72, 19, 11, 1.2];
 
 // Детерминированный value-шум для рваных краёв зон местности
-function hash2(ix: number, iy: number): number {
-  const s = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453;
-  return s - Math.floor(s);
-}
 
-export function vnoise(x: number, y: number): number {
-  const ix = Math.floor(x), iy = Math.floor(y);
-  const fx = x - ix, fy = y - iy;
-  const a = hash2(ix, iy), b = hash2(ix + 1, iy);
-  const c = hash2(ix, iy + 1), d = hash2(ix + 1, iy + 1);
-  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
-}
 
 // Многослойный шум — органичные пятна вместо ровных порогов
-export function fbm(x: number, y: number): number {
-  return (
-    vnoise(x, y) * 0.55 +
-    vnoise(x * 2.3 + 37, y * 2.3 + 91) * 0.3 +
-    vnoise(x * 5.1 + 11, y * 5.1 + 7) * 0.15
-  );
-}
 
-export function smoothstep(e0: number, e1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
-  return t * t * (3 - 2 * t);
-}
 
 // Влияние зоны: 1 в центре, плавно гаснет к краям и чуть дальше них
 function zoneScore(zones: Zone[], lon: number, lat: number): number {

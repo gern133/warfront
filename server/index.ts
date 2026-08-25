@@ -6,12 +6,16 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { TICK_MS, PORT, ClientMsg, ServerMsg } from '../shared/protocol';
 import { rleEncode } from '../shared/rle';
 import { earthTerrain } from './map/earthmap';
-import { clients, rooms, send, checkSpawnPhase, leaveRoom, CState } from './net/rooms';
+import { setEarthTerrainProvider } from './game/index';
+import { buildView } from './game/view';
+import type { IntentResult } from '../shared/types/intent';
+import { clients, rooms, send, checkSpawnPhase, fixUnspawned, leaveRoom, CState } from './net/rooms';
 import { handleMessage } from './net/handlers';
 
 // прогреваем кэш карты Земли на старте, чтобы первое лобби не ждало генерацию
 {
   const t0 = Date.now();
+  setEarthTerrainProvider(earthTerrain);
   earthTerrain();
   console.log(`Карта Земли сгенерирована за ${Date.now() - t0} мс`);
 }
@@ -48,10 +52,26 @@ const server = http.createServer((req, res) => {
 });
 
 // --- WebSocket: подключения и маршрутизация сообщений ---
-const wss = new WebSocketServer({ server });
+// Сжатие кадров (permessage-deflate). Данные у нас — длинные массивы целых чисел в
+// JSON, они жмутся в разы. Это главный выигрыш по трафику для клиентов, которым
+// состояние мира всё-таки приходится присылать: у кого не поднялась локальная
+// симуляция, кто только вошёл (init с картой и владельцами) или чьё устройство не
+// успевает считать партию.
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: {
+    threshold: 512, // мелочь (ответы, уведомления) жать дороже, чем отправить как есть
+    // Уровень 1, а не 3: замер на 12 клиентах показал 12% ядра против 17% при разнице
+    // в объёме всего 5% (10.7 против 10.2 МБ). Сжатие идёт для каждого соединения
+    // отдельно, поэтому процессор здесь растёт линейно по числу таких клиентов —
+    // ~0.5% ядра на клиента, и дешёвый уровень важнее пары процентов размера.
+    zlibDeflateOptions: { level: 1, memLevel: 7 },
+    concurrencyLimit: 10,
+  },
+});
 
 wss.on('connection', (ws) => {
-  const st: CState = { playerId: null, name: '', room: null, needResync: false, proposals: new Set() };
+  const st: CState = { playerId: null, name: '', room: null, needResync: false, spawnPicked: false, snapshotAt: 0, proposals: new Set(), localSim: false };
   clients.set(ws, st);
 
   ws.on('message', (raw) => {
@@ -74,22 +94,53 @@ wss.on('connection', (ws) => {
 let intervalNo = 0;
 setInterval(() => {
   intervalNo++;
+  const FULL_RESYNC_TICKS = 100; // полная посылка зданий раз в 10 с (страховка)
   const sendPlayers = intervalNo % 5 === 0; // полный список игроков — раз в 500мс
   for (const room of rooms.values()) {
     if (room.phase === 'lobby') continue;
     // публичная комната без людей заморожена — боты не съедают карту впустую
     if (room.isPublic && room.clients.size === 0) continue;
     const game = room.game;
+    const intentErrors: IntentResult[] = [];
 
     if (room.phase === 'running') {
       // накопитель поддерживает дробную скорость: 0.5 — тик раз в 2 интервала,
       // 1/2/3/10 — целое число тиков за интервал
       room.tickAccum += room.speed;
       while (room.tickAccum >= 1) {
-        game.tick();
+        // Команды применяются внутри tick на границе хода; ошибки возвращаются
+        // отправителям (раньше ответ уходил сразу из обработчика).
+        for (const r of game.tick()) intentErrors.push(r);
         room.tickAccum -= 1;
       }
     } else checkSpawnPhase(room);
+    if (room.spawnFixAt) fixUnspawned(room);
+
+    // ответы на команды (ошибки) — тем, кто их отправил
+    if (intentErrors.length) {
+      for (const r of intentErrors) {
+        for (const ws of room.clients) {
+          const cst = clients.get(ws);
+          if (cst?.playerId !== r.id) continue;
+          if (r.error) send(ws, { type: 'error', message: r.error });
+          break;
+        }
+      }
+      intentErrors.length = 0;
+    }
+    // предложения союза человеку: игра сложила их в исходящий ящик
+    if (game.proposalsOut.length) {
+      for (const pr of game.proposalsOut) {
+        for (const ws of room.clients) {
+          const cst = clients.get(ws);
+          if (cst?.playerId !== pr.to) continue;
+          cst.proposals.add(pr.from);
+          send(ws, { type: 'proposal', from: pr.from, name: game.playerName(pr.from) });
+          break;
+        }
+      }
+      game.proposalsOut.length = 0;
+    }
 
     for (const ws of room.clients) {
       const cst = clients.get(ws);
@@ -100,36 +151,26 @@ setInterval(() => {
     }
     game.deaths.length = 0;
 
-    const changes: number[] = [];
-    for (const [c, o] of game.changed) changes.push(c, o);
-    game.changed.clear();
-
-    const update = JSON.stringify({
-      type: 'update',
-      changes,
-      // Динамика игроков шлётся раз в 500мс (клиент всё равно показывает армии и
-      // золото не чаще), дельты клеток — каждый тик. Статика (имена, флаги) уходит
-      // отдельным полем и только когда набор игроков изменился: раньше имена всех
-      // 293 игроков ехали в каждой такой посылке и составляли почти её половину.
-      players: sendPlayers ? game.playersPub() : [],
-      playersMeta: sendPlayers ? game.playersMetaPub() : undefined,
-      attacks: game.attacksPub(),
-      boats: game.boatsPub(),
-      buildings: game.buildingsPub(),
-      ships: game.tradeShipsPub(),
-      trucks: game.trucksPub(),
-      roads: sendPlayers ? game.roadsPub() : undefined, // дороги — раз в 500мс
-      warships: game.warshipsPub(),
-      drones: game.dronesPub(),
-      droneBlasts: game.droneBlasts,
-      shots: game.bulletsPub(),
-      missiles: game.missilesPub(),
-      earnings: game.tradeEarnings,
+    // Данные для отрисовки собирает общая функция — её же использует воркер на
+    // клиенте в режиме локальной симуляции (см. server/game/view.ts).
+    const view = buildView(game, {
+      sendPlayers,
+      fullBuildings: intervalNo % FULL_RESYNC_TICKS === 0,
+      withHash: intervalNo % 10 === 0,
       speed: room.speed,
       humans: room.clients.size,
+    });
+    const update = JSON.stringify(view satisfies ServerMsg);
+    // Клиентам с локальной симуляцией состояние мира не нужно: им достаточно потока
+    // ходов. Это и есть выигрыш модели lockstep — 0.27 КБ/с против 118 КБ/с.
+    const turnsOnly = JSON.stringify({
+      type: 'update',
+      turn: view.turn,
+      turnNo: view.turnNo,
+      hash: view.hash,
+      speed: view.speed,
+      humans: view.humans,
     } satisfies ServerMsg);
-    game.tradeEarnings = []; // события уже сериализованы в update — сбрасываем
-    game.droneBlasts = []; // взрывы дронов за тик отправлены — очищаем
     for (const ws of room.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       const cst = clients.get(ws);
@@ -145,7 +186,8 @@ setInterval(() => {
         send(ws, { type: 'resync', ownersRle: rleEncode(game.owners) });
         continue;
       }
-      ws.send(update);
+      // клиент, считающий симуляцию сам, получает только поток ходов
+      ws.send(cst?.localSim ? turnsOnly : update);
     }
 
     // отношения изменились — шлём затронутым игрокам их персональные списки

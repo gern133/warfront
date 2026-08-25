@@ -9,7 +9,8 @@
     "dev:client": "vite",
     "build": "vite build",
     "start": "tsx server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:sim": "tsx tools/check-determinism.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",

@@ -27,6 +27,7 @@ import {
 } from '../shared/protocol';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
+import { SimCheck } from './sim/simCheck';
 import { Phase, MenuView, LobbyInfo } from './types';
 import { TOOLS, INCOMING_VISIBLE, ATTACK_FLASH_MS, ATTACK_BANNER_MS } from './constants/ui';
 import { ICON_URLS } from './engine/icons';
@@ -52,13 +53,23 @@ export default function App() {
   // Статика игроков (имя, бот/страна) — приходит только при изменении набора, а
   // динамика каждый раз плоским массивом по 6 чисел. Собираем обратно в объекты,
   // чтобы весь остальной интерфейс работал как раньше.
+  // Клиентская симуляция в режиме сверки (включается ?sim=1). Картинку не даёт —
+  // сверяет свой хеш состояния с серверным, чтобы доказать, что симуляции совпадают.
+  const simCheck = useRef<SimCheck | null>(null);
+  if (simCheck.current === null) simCheck.current = new SimCheck();
   const playersMeta = useRef(new Map<number, { id: number; name: string; bot: boolean; strong: boolean }>());
   // Здания приходят плоским массивом по 10 чисел — собираем обратно в объекты, чтобы
   // весь интерфейс и рендер работали как раньше.
-  const buildBuildings = (flat: number[]): BuildingPub[] => {
-    const list: BuildingPub[] = [];
+  // Здания приходят ДЕЛЬТОЙ: только изменившиеся записи плоским массивом по 10 чисел
+  // плюс id исчезнувших. Держим полное состояние в Map и пересобираем массив только
+  // когда что-то реально поменялось — иначе отдаём прежний, чтобы не гонять React.
+  const buildingsMap = useRef(new Map<number, BuildingPub>());
+  const buildingsArr = useRef<BuildingPub[]>([]);
+  const applyBuildings = (flat: number[], gone?: number[], full?: boolean): BuildingPub[] => {
+    if (full) buildingsMap.current.clear();
+    let changed = full === true;
     for (let i = 0; i + 9 < flat.length; i += 10) {
-      list.push({
+      buildingsMap.current.set(flat[i], {
         id: flat[i],
         owner: flat[i + 1],
         cell: flat[i + 2],
@@ -70,8 +81,13 @@ export default function App() {
         fuse: flat[i + 8] / 10,
         upQueue: flat[i + 9],
       });
+      changed = true;
     }
-    return list;
+    if (gone) {
+      for (const id of gone) if (buildingsMap.current.delete(id)) changed = true;
+    }
+    if (changed) buildingsArr.current = [...buildingsMap.current.values()];
+    return buildingsArr.current;
   };
   const buildPlayers = (
     flat: number[],
@@ -102,7 +118,9 @@ export default function App() {
   // список входящих десантов: видно максимум 3, остальные — в раскрываемом списке
   const [incomingOpen, setIncomingOpen] = useState(false);
   // «вас захватывают»: красная рамка на пару секунд + кликабельный баннер сверху
-  const [underAttack, setUnderAttack] = useState<{ name: string; x?: number; y?: number } | null>(null);
+  const [underAttack, setUnderAttack] = useState<
+    { name: string; x?: number; y?: number; drones?: boolean } | null
+  >(null);
   const [attackFlash, setAttackFlash] = useState(false);
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
@@ -197,6 +215,78 @@ export default function App() {
 
   const sendMsg = (msg: object) => wsRef.current?.send(JSON.stringify(msg));
 
+  // Применение данных для отрисовки. Источник может быть двух видов, и код один:
+  //   • сеть — сервер прислал состояние (обычный режим);
+  //   • воркер — локальная симуляция посчитала его сама (режим lockstep).
+  // троттлинг React-обновлений HUD (canvas берёт данные из gc и остаётся плавным)
+  const hudTickRef = useRef(0);
+  const applyViewRef = useRef<(v: any) => void>(() => {});
+  // Локальная симуляция как ИСТОЧНИК КАРТИНКИ (?sim=2): её данные идут в тот же
+  // applyView, что и сетевые, а серверу сообщаем, что состояние мира можно не слать.
+  if (simCheck.current && !simCheck.current.onView) {
+    simCheck.current.onView = (view) => applyViewRef.current(view);
+    // Считаем ли мы партию сами. Пока считаем — сервер не присылает состояние мира
+    // (это и есть выигрыш lockstep); как только симуляция ждёт снимок или сдалась —
+    // состояние снова нужно, иначе картинке нечем жить.
+    simCheck.current.onLocalSim = (on) => sendMsg({ type: 'localSim', on });
+    // Симуляции нужно состояние: вход в идущую партию или расхождение по хешу.
+    simCheck.current.onNeedSnapshot = () => sendMsg({ type: 'simResync' });
+    // После восстановления из снимка накопленным дельтам владельцев верить нельзя.
+    simCheck.current.onResync = (rle) => gc.resync(rle);
+  }
+  applyViewRef.current = (msg: any) => {
+        // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
+        const upAttacks = msg.attacks ?? [];
+        const upBoats = msg.boats ?? [];
+        const upBuildings = applyBuildings(msg.buildings ?? [], msg.buildingsGone, msg.buildingsFull);
+        gc.applyUpdate(msg.changes ?? []);
+        // ход и (раз в секунду) серверный хеш — в локальную симуляцию на сверку
+        if (msg.turnNo !== undefined) simCheck.current?.turn(msg.turnNo, msg.turn ?? []);
+        if (msg.hash !== undefined && msg.turnNo !== undefined) {
+          simCheck.current?.check(msg.turnNo, msg.hash);
+        }
+        // отложенный автозум к спавну — когда клетки уже пришли
+        if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
+        gc.setAttacks(upAttacks);
+        gc.setBoats(upBoats);
+        gc.setBuildings(upBuildings);
+        gc.setShips(msg.ships ?? []);
+        gc.setTrucks(msg.trucks ?? []);
+        if (msg.roads) gc.setRoads(msg.roads);
+        gc.setWarships(msg.warships ?? []);
+        gc.setDrones(msg.drones ?? []);
+        gc.addDroneBlasts(msg.droneBlasts ?? []);
+        gc.setShots(msg.shots ?? []);
+        gc.setMissiles(msg.missiles ?? []);
+        gc.addEarnings(msg.earnings ?? []);
+        // HUD (панели React) обновляем через раз (~5 Гц) — canvas рисует из gc и
+        // остаётся плавным, а полная перерисовка App реже нагружает главный поток
+        if ((hudTickRef.current++ & 1) === 0) {
+          setAttacks(upAttacks);
+          setBoats(upBoats);
+          setBuildings(upBuildings);
+          setSpeed(msg.speed ?? 1);
+          setHumans(msg.humans ?? 1);
+        }
+        // список игроков сервер шлёт реже (раз в 500мс) — обрабатываем, когда есть
+        const pl = msg.players && msg.players.length ? buildPlayers(msg.players, msg.playersMeta) : null;
+        if (pl && pl.length) {
+          gc.setPlayers(pl);
+          playersRef.current = pl;
+          setPlayers(pl);
+          if (gc.selfId > 0) {
+            const me = pl.find((p) => p.id === gc.selfId);
+            if (me) {
+              liveTroops.current = me.troops;
+              liveMoney.current = me.money ?? 0;
+              const h = troopHistory.current;
+              h.push(me.troops);
+              if (h.length > 120) h.shift();
+            }
+          }
+        }
+  };
+
   useEffect(() => {
     const detach = gc.attach(canvasRef.current!);
     const detachMini = gc.attachMinimap(miniRef.current!);
@@ -290,17 +380,45 @@ export default function App() {
         : `ws://${location.hostname}:${PORT}`);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    ws.binaryType = 'arraybuffer'; // снимок симуляции приходит сжатым бинарным кадром
     ws.onopen = () => setConnected(true);
     ws.onclose = () => setConnected(false);
-    let hudTick = 0; // троттлинг React-обновлений HUD (canvas берёт данные из gc)
     ws.onmessage = (ev) => {
+      // Снимок состояния симуляции (несколько МБ текста) сервер жмёт gzip и шлёт
+      // бинарным кадром — распаковываем и отдаём воркеру.
+      if (ev.data instanceof ArrayBuffer) {
+        void (async () => {
+          try {
+            const ds = new DecompressionStream('gzip');
+            const text = await new Response(
+              new Blob([ev.data as ArrayBuffer]).stream().pipeThrough(ds),
+            ).text();
+            const snapMsg = JSON.parse(text);
+            if (snapMsg.type === 'simSnapshot') {
+              simCheck.current?.restore(snapMsg.turnNo, snapMsg.snap);
+            }
+          } catch (e) {
+            console.error('[sim] не удалось разобрать снимок:', e);
+          }
+        })();
+        return;
+      }
       const msg: ServerMsg = JSON.parse(ev.data);
       if (msg.type === 'lobby') {
         setLobby(msg);
         setPhase('lobby');
       } else if (msg.type === 'init') {
         gc.applyInit(msg.selfId, msg.w, msg.h, msg.terrainRle, msg.ownersRle);
-        const initList = buildPlayers(msg.players, msg.playersMeta);
+        // локальная симуляция получает ту же карту, seed и сложность — дальше её
+        // ведёт только поток ходов (см. client/sim/simCheck.ts)
+        simCheck.current?.init(
+          msg.mapType ?? 'random',
+          msg.seed,
+          msg.difficulty ?? 'normal',
+          gc.terrain,
+          msg.tickNo ?? 0, // партия уже идёт — симуляция поднимется из снимка
+        );
+        const initList = buildPlayers(msg.players ?? [], msg.playersMeta);
         gc.setPlayers(initList);
         setPlayers(initList);
         setRoomCode(msg.code);
@@ -309,57 +427,28 @@ export default function App() {
         setSpectating(false); // вернулись в игру — выходим из наблюдения
         if (msg.selfId > 0) setPhase('spawn');
       } else if (msg.type === 'update') {
-        // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
-        const upAttacks = msg.attacks ?? [];
-        const upBoats = msg.boats ?? [];
-        const upBuildings = buildBuildings(msg.buildings ?? []);
-        gc.applyUpdate(msg.changes);
-        // отложенный автозум к спавну — когда клетки уже пришли
-        if (needFocus.current && gc.focusSelfSmooth()) needFocus.current = false;
-        gc.setAttacks(upAttacks);
-        gc.setBoats(upBoats);
-        gc.setBuildings(upBuildings);
-        gc.setShips(msg.ships ?? []);
-        gc.setTrucks(msg.trucks ?? []);
-        if (msg.roads) gc.setRoads(msg.roads);
-        gc.setWarships(msg.warships ?? []);
-        gc.setDrones(msg.drones ?? []);
-        gc.addDroneBlasts(msg.droneBlasts ?? []);
-        gc.setShots(msg.shots ?? []);
-        gc.setMissiles(msg.missiles ?? []);
-        gc.addEarnings(msg.earnings ?? []);
-        // HUD (панели React) обновляем через раз (~5 Гц) — canvas рисует из gc и
-        // остаётся плавным, а полная перерисовка App реже нагружает главный поток
-        if ((hudTick++ & 1) === 0) {
-          setAttacks(upAttacks);
-          setBoats(upBoats);
-          setBuildings(upBuildings);
-          setSpeed(msg.speed ?? 1);
-          setHumans(msg.humans ?? 1);
+        // Ход и хеш — всегда в локальную симуляцию (сверка либо источник картинки)
+        if (msg.turnNo !== undefined) simCheck.current?.turn(msg.turnNo, msg.turn ?? []);
+        if (msg.hash !== undefined && msg.turnNo !== undefined) {
+          simCheck.current?.check(msg.turnNo, msg.hash);
         }
-        // список игроков сервер шлёт реже (раз в 500мс) — обрабатываем, когда есть
-        const pl = msg.players && msg.players.length ? buildPlayers(msg.players, msg.playersMeta) : null;
-        if (pl && pl.length) {
-          gc.setPlayers(pl);
-          playersRef.current = pl;
-          setPlayers(pl);
-          if (gc.selfId > 0) {
-            const me = pl.find((p) => p.id === gc.selfId);
-            if (me) {
-              liveTroops.current = me.troops;
-              liveMoney.current = me.money ?? 0;
-              const h = troopHistory.current;
-              h.push(me.troops);
-              if (h.length > 120) h.shift();
-            }
-          }
-        }
+        // В режиме локальной симуляции состояние мира от сервера не применяем: его
+        // считает воркер, а сервер такому клиенту его и не присылает.
+        // Кадр без `changes` — это посылка ТОЛЬКО с потоком ходов (сервер шлёт такие,
+        // пока считает, что состояние нам не нужно). Применять его нельзя: все
+        // остальные поля в нём пустые, и мир мигнул бы пустотой — это видно в момент,
+        // когда симуляция ждёт снимок и картинка временно берётся у сервера.
+        const turnsOnly = (msg as { changes?: number[] }).changes === undefined;
+        if (!simCheck.current?.stats.rendering && !turnsOnly) applyViewRef.current(msg);
       } else if (msg.type === 'relations') {
         gc.setRelations(msg.allies ?? [], msg.enemies ?? []);
         setRelVer((v) => v + 1);
       } else if (msg.type === 'proposal') {
         // входящее предложение союза — показываем, избегая дублей
         setProposals((q) => (q.some((p) => p.from === msg.from) ? q : [...q, { from: msg.from, name: msg.name }]));
+      } else if (msg.type === 'simTurns') {
+        // хвост ходов к общему снимку комнаты — придёт прямо перед снимком
+        simCheck.current?.turnBatch(msg.from, (msg.turns ?? []) as never);
       } else if (msg.type === 'resync') {
         gc.resync(msg.ownersRle); // полный снимок владельцев после лага
       } else if (msg.type === 'spawned') {
@@ -388,7 +477,17 @@ export default function App() {
                 ? `${msg.name} уничтожил ваш торговый корабль`
                 : msg.kind === 'attacked'
                   ? `${msg.name} захватывает вашу территорию`
-                  : `${msg.name} отклонил ваш союз`;
+                  : msg.kind === 'drones'
+                    ? `${msg.name} поднял рой дронов на вас`
+                    : `${msg.name} отклонил ваш союз`;
+        if (msg.kind === 'drones') {
+          // Налёт роя: баннер без координат — по клику камера прыгает к ближайшему
+          // к центру вида дрону (они летят, статичная точка бессмысленна).
+          setUnderAttack({ name: msg.name, drones: true });
+          setAttackFlash(true);
+          setTimeout(() => setAttackFlash(false), ATTACK_FLASH_MS);
+          setTimeout(() => setUnderAttack(null), ATTACK_BANNER_MS);
+        }
         if (msg.kind === 'attacked') {
           // красная рамка вспыхивает на пару секунд, баннер сверху живёт дольше —
           // по нему можно кликнуть и перенестись к месту прорыва
@@ -583,7 +682,8 @@ export default function App() {
   const committed = attacks
     .filter((a) => a.player === gc.selfId)
     .reduce((s, a) => s + a.troops, 0);
-  const nameOf = (id: number) => players.find((p) => p.id === id)?.name ?? '?';
+  // Имя игрока: если статика (playersMeta) ещё не дошла, показываем «?», а не пустоту
+  const nameOf = (id: number) => players.find((p) => p.id === id)?.name || '?';
   // мои десанты (куда плыву) и вражеские (кто плывёт ко мне)
   const myBoats = boats.filter((b) => b.player === gc.selfId);
   const incoming = boats.filter((b) => b.target === gc.selfId);
@@ -893,13 +993,18 @@ export default function App() {
         <button
           className="attack-banner"
           onClick={() => {
-            if (underAttack.x !== undefined) gc.focusOn(underAttack.x, underAttack.y!);
+            if (underAttack.drones) gc.focusNearestDrone();
+            else if (underAttack.x !== undefined) gc.focusOn(underAttack.x, underAttack.y!);
             setUnderAttack(null);
           }}
-          title="Показать место захвата"
+          title={underAttack.drones ? 'Показать ближайший дрон' : 'Показать место захвата'}
         >
-          ⚠ {underAttack.name} захватывает вашу территорию
-          {underAttack.x !== undefined && <span className="attack-banner-go">⌖ показать</span>}
+          {underAttack.drones
+            ? `🛩️ ${underAttack.name} поднял рой дронов на вас`
+            : `⚠ ${underAttack.name} захватывает вашу территорию`}
+          {(underAttack.drones || underAttack.x !== undefined) && (
+            <span className="attack-banner-go">⌖ показать</span>
+          )}
         </button>
       )}
       {phase === 'playing' && self && (

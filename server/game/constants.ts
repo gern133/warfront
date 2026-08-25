@@ -1,4 +1,6 @@
 import { Difficulty } from '../../shared/protocol';
+import type { Rng } from '../../shared/rng';
+import { dpow } from '../../shared/fixmath';
 
 // Скорости движения кружков (клеток за тик)
 export const TRADE_SPEED = 0.6;
@@ -64,7 +66,7 @@ export const CAP_EXP = 0.6; // показатель за изломом. Вык�
 
 // Территория в войсках: сколько «эффективных» клеток идёт в потолок армии.
 export function cellFactor(cells: number): number {
-  return cells <= CAP_KNEE ? cells : CAP_KNEE * Math.pow(cells / CAP_KNEE, CAP_EXP);
+  return cells <= CAP_KNEE ? cells : CAP_KNEE * dpow(cells / CAP_KNEE, CAP_EXP);
 }
 
 // P3. Соотношение сил влияет на ЦЕНУ клетки, а не только на темп (waveScale).
@@ -147,19 +149,22 @@ export const STRONG_NAMES = [
   '🇫🇮 Финляндия', '🇩🇰 Дания', '🇮🇪 Ирландия', '🇮🇱 Израиль', '🇰🇿 Казахстан',
 ];
 
-export function pickShuffled(names: string[], n: number): string[] {
+// Имена ботов тоже выбираются сеяным генератором: иначе одинаковый seed давал бы
+// одинаковую партию, но с разными названиями стран — а состояние обязано совпадать
+// целиком (в т.ч. для сверки хешей между клиентами в модели lockstep).
+export function pickShuffled(names: string[], n: number, rng: Rng): string[] {
   const pool = [...names];
   const out: string[] = [];
   while (out.length < n && pool.length) {
-    out.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
+    out.push(pool.splice(rng.int(pool.length), 1)[0]);
   }
   return out;
 }
 
-export function weakNames(n: number): string[] {
+export function weakNames(n: number, rng: Rng): string[] {
   const combos: string[] = [];
   for (const a of NAME_ADJ) for (const b of NAME_NOUN) combos.push(`${a} ${b}`);
-  return pickShuffled(combos, n);
+  return pickShuffled(combos, n, rng);
 }
 
 // Сглаживание ломаной (углы срезаются по Чайкину), концы сохраняются
