@@ -13,7 +13,6 @@ import {
   hqCost,
   hqUpgradeCost,
   MAX_HQ_LEVEL,
-  portUpgradeCost,
   shipsForLevel,
   portCost,
   cityCost,
@@ -734,17 +733,13 @@ export default function App() {
   // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
   const attackTroops = Math.floor(((self?.troops ?? shownTroops) * ratio) / 100);
   canBuildHqRef.current = shownMoney >= nextHqCost;
-  // порт можно выбрать (клавиша 3), если хватает на новый ИЛИ на апгрейд своего
-  const cheapestPortUpg = buildings
-    .filter((b) => b.owner === gc.selfId && b.type === 'port')
-    .reduce((min, b) => Math.min(min, portUpgradeCost(b.level + 1)), Infinity);
-  // цена нового порта — по СУММЕ УРОВНЕЙ портов (как у заводов и ПВО), а не по их
-  // числу: иначе апгрейды порта не удорожали следующий порт вовсе
+  // Цена порта — по СУММЕ УРОВНЕЙ портов, и постройка нового и апгрейд стоят
+  // одинаково (это один и тот же шаг лестницы), поэтому проверка одна.
   const myPortLevels = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'port')
     .reduce((n, b) => n + b.level, 0);
   const nextPortCost = portCost(myPortLevels);
-  canBuildPortRef.current = shownMoney >= Math.min(nextPortCost, cheapestPortUpg);
+  canBuildPortRef.current = shownMoney >= nextPortCost;
   // город (клавиша 1): можно, если хватает на новый ИЛИ на апгрейд своего
   canBuildCityRef.current = shownMoney >= Math.min(nextCityCost, cheapestCityUpg);
   // завод (клавиша 2): постройка/апгрейд по сумме уровней
@@ -1632,7 +1627,7 @@ export default function App() {
               }
               if (b?.type === 'port') {
                 const toLevel = lvl + 1;
-                const cost = portUpgradeCost(toLevel);
+                const cost = nextPortCost;
                 return (
                   <>
                     <div className="ctx-title">⚓ Торговый порт · ур. {lvl}</div>

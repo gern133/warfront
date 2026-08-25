@@ -21,13 +21,10 @@ import {
   TruckPub,
   WarshipPub,
   TradeEarn,
-  PORT_BUILD_COST,
   portCost,
   PORT_BUILD_TICKS,
   PORT_SHIP_INTERVAL,
   PORT_RADIUS,
-  PORT_MAX_SHIP_LEVEL,
-  portUpgradeCost,
   tradeValue,
   shipsForLevel,
   CITY_BUILD_TICKS,
@@ -2381,10 +2378,14 @@ export class Game {
     if (!b) return 'Здесь нет вашего здания';
     if (this.tickNo < b.readyTick) return 'Ещё строится';
     if (b.type === 'port') {
-      const cost = portUpgradeCost(b.level + 1);
+      const cost = portCost(this.portLevels(playerId)); // тот же шаг цены, что и новый порт
       if (p.money < cost) return 'Недостаточно денег';
       p.money -= cost;
       b.level++; // порт апгрейдится мгновенно, уровней сколько угодно
+      // Дроссель выпуска здесь НЕ трогаем: он привязан к последнему фактическому
+      // выпуску, а забитый порт его не двигает. Поэтому освободившееся место
+      // (в т.ч. от нового уровня) занимается ближайшим тиком, а пачка грейдов
+      // всё равно разливается по одному судну за PORT_SHIP_INTERVAL.
       return null;
     }
     if (b.type === 'city') {
@@ -2732,16 +2733,38 @@ export class Game {
 
   // выпуск торговых кораблей из портов (по одному раз в PORT_SHIP_INTERVAL,
   // одновременно не больше shipsForLevel(level))
+  // Индекс портов по клетке. Раньше и выпуск, и шаг судов искали порт через
+  // buildings.find/reduce на КАЖДОЕ судно, т.е. O(судов × зданий) за тик. После
+  // снятия потолка на число судов это стало главным горячим местом трейда.
+  private portsByCell(): Map<number, Building> {
+    const m = new Map<number, Building>();
+    for (const b of this.buildings) if (b.type === 'port') m.set(b.cell, b);
+    return m;
+  }
+
   private spawnTradeShips() {
+    const ports = this.portsByCell();
+    // сколько судов уже в пути у каждого порта — один проход по судам вместо
+    // reduce по всем судам на каждый порт
+    const active = new Map<number, number>();
+    for (const s of this.tradeShips) {
+      const home = ports.get(s.portCell);
+      if (home && home.owner === s.owner) active.set(s.portCell, (active.get(s.portCell) ?? 0) + 1);
+    }
     for (const b of this.buildings) {
       if (b.type !== 'port' || this.tickNo < b.readyTick) continue;
+      // Вместимость проверяем ДО дросселя. Раньше было наоборот, и забитый порт
+      // каждые PORT_SHIP_INTERVAL сдвигал окно вперёд впустую — поэтому
+      // освободившееся место (вернувшееся судно или новый уровень) ждало полный
+      // интервал. Теперь окно двигает только реальная попытка выпуска, так что
+      // свободный слот занимается ближайшим тиком, а пачка грейдов разливается
+      // по одному судну за интервал, а не выходит разом.
+      if ((active.get(b.cell) ?? 0) >= shipsForLevel(b.level)) continue;
       if (this.tickNo < b.nextShipTick) continue;
+      // Окно «сгорает» и при неудаче: pickTradeDest/waterRoute — самое дорогое в
+      // тике (точный поиск по воде), и без этого порт без партнёра долбил бы
+      // поиск каждый тик.
       b.nextShipTick = this.tickNo + PORT_SHIP_INTERVAL;
-      const active = this.tradeShips.reduce(
-        (n, s) => (s.portCell === b.cell && s.owner === b.owner ? n + 1 : n),
-        0
-      );
-      if (active >= shipsForLevel(b.level)) continue;
       const dest = this.pickTradeDest(b);
       if (!dest) continue;
       const route = this.waterRoute(b.cell, dest.cell);
@@ -2767,20 +2790,20 @@ export class Game {
   }
 
   private stepTradeShips() {
+    if (!this.tradeShips.length) return;
+    const ports = this.portsByCell();
     for (const s of this.tradeShips) {
       const p = this.players.get(s.owner);
       // домашний порт ещё существует и наш?
-      const home = this.buildings.find(
-        (b) => b.cell === s.portCell && b.owner === s.owner && b.type === 'port'
-      );
-      if (!p?.alive || !home) {
+      const home = ports.get(s.portCell);
+      if (!p?.alive || !home || home.owner !== s.owner) {
         s.done = true;
         continue;
       }
       // порт-назначение уничтожен, стал НАШИМ (сам с собой не торгуют — напр.
       // мы захватили страну-партнёра) ИЛИ мы объявили войну его владельцу —
       // корабль тонет, освобождая место под новый маршрут
-      const dest = this.buildings.find((b) => b.cell === s.destCell && b.type === 'port');
+      const dest = ports.get(s.destCell);
       if (!dest || dest.owner === s.owner || this.relation(s.owner, dest.owner) === 'hostile') {
         s.done = true;
         continue;
@@ -4103,7 +4126,7 @@ export class Game {
         : hqCost(this.hqCount(p.id));
       const upCost = (b: Building) =>
         b.type === 'city' ? cityUpgradeCost(b.level + 1)
-        : b.type === 'port' ? portUpgradeCost(b.level + 1)
+        : b.type === 'port' ? portCost(this.portLevels(p.id))
         : b.type === 'factory' ? factoryCost(this.factoryLevels(p.id))
         : b.type === 'sam' ? samCost(this.samLevels(p.id))
         : b.type === 'silo' ? SILO_COST
@@ -4223,7 +4246,7 @@ export class Game {
             if (econ >= cost && spend('port')) { econ -= cost; newB++; did = true; }
           }
           if (!did) {
-            const pb = lowestOf('port', PORT_MAX_SHIP_LEVEL);
+            const pb = lowestOf('port');
             const cost = pb ? upCost(pb) : Infinity;
             if (pb && econ >= cost && this.upgrade(p.id, pb.cell) === null) { econ -= cost; did = true; }
           }
