@@ -15,6 +15,7 @@ import {
   roomFull,
   rooms,
   send,
+  sendSimSnapshot,
 } from './rooms';
 
 // Обработка входящего сообщения от клиента
@@ -76,7 +77,10 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
     case 'lobbySettings': {
       const room = st.room;
       if (!room || room.isPublic || room.phase !== 'lobby' || room.host !== ws) return;
-      if (room.clients.size > 1) return; // с несколькими игроками песочные настройки недоступны
+      // Бесконечные деньги/армию можно включать и в онлайне: настройка комнаты
+      // применяется ко ВСЕМ людям сразу (в игре проверка `!p.bot`), поэтому
+      // преимущества ни у кого нет. Раньше здесь стоял запрет на >1 игрока — из-за
+      // него галочки в лобби с другом молча ничего не делали.
       room.infMoney = !!msg.infMoney;
       room.infArmy = !!msg.infArmy;
       broadcastLobby(room);
@@ -85,9 +89,21 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
     case 'spawn': {
       const room = st.room;
       if (!room || room.phase === 'lobby' || st.playerId === null) return;
-      if (room.game.trySpawn(st.playerId, msg.cell | 0)) {
-        send(ws, { type: 'spawned' });
+      // Выбор точки старта — тоже команда: применится на границе хода, ответ
+      // «spawned» отправим, когда узнаем результат (ошибка придёт из tick).
+      const cell = msg.cell | 0;
+      // Клетку проверяем сразу: команда применится только на тике, а в фазе высадки
+      // мир не тикает — без этой проверки игрок узнал бы об отказе уже после старта
+      // раунда, оставшись без территории.
+      if (!room.game.canSpawnAt(st.playerId, cell)) {
+        send(ws, { type: 'error', message: 'Здесь нельзя высадиться' });
+        return;
       }
+      room.game.enqueue({ t: 'spawn', id: st.playerId, cell });
+      // Отметка о выборе живёт на соединении, а не в симуляции: по `player.spawned`
+      // фаза высадки не заканчивалась бы досрочно (см. checkSpawnPhase).
+      st.spawnPicked = true;
+      send(ws, { type: 'spawned' });
       break;
     }
     case 'respawn': {
@@ -117,78 +133,63 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
     case 'attack': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.launchAttackCell(st.playerId, msg.cell | 0, +msg.ratio);
+      room.game.enqueue({ t: 'attack', id: st.playerId, cell: msg.cell | 0, ratio: +msg.ratio });
       break;
     }
     case 'invade': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const ok = room.game.launchInvasion(st.playerId, msg.cell | 0, +msg.ratio);
-      if (!ok) send(ws, { type: 'error', message: 'Нет морского пути к этой цели' });
+      room.game.enqueue({ t: 'invade', id: st.playerId, cell: msg.cell | 0, ratio: +msg.ratio });
       break;
     }
     case 'recall': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.recallBoat(st.playerId, msg.boatId | 0);
+      room.game.enqueue({ t: 'recall', id: st.playerId, boatId: msg.boatId | 0 });
       break;
     }
     case 'build': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const err = room.game.build(st.playerId, msg.bt, msg.cell | 0);
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'build', id: st.playerId, bt: msg.bt, cell: msg.cell | 0 });
       break;
     }
     case 'upgrade': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const err = room.game.upgrade(st.playerId, msg.cell | 0);
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'upgrade', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'nuke': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const err = room.game.launchNuke(st.playerId, msg.cell | 0, msg.kind || 'basic');
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'nuke', id: st.playerId, cell: msg.cell | 0, kind: msg.kind || 'basic' });
       break;
     }
     case 'warship': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const err = room.game.launchWarship(st.playerId, msg.cell | 0);
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'warship', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'drones': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const err = room.game.launchDrones(st.playerId, msg.cell | 0);
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'drones', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'warshipMove': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.moveWarships(st.playerId, (msg.ids || []).map((n) => n | 0), msg.cell | 0);
+      room.game.enqueue({ t: 'warshipMove', id: st.playerId, ids: (msg.ids || []).map((n) => n | 0), cell: msg.cell | 0 });
       break;
     }
     case 'propose': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      const res = room.game.proposeAlliance(st.playerId, msg.cell | 0);
-      if (!res) break;
-      if (res.auto) { send(ws, { type: 'notice', kind: 'accept', name: res.name }); break; } // бот принял
-      if (res.refused) { send(ws, { type: 'notice', kind: 'reject', name: res.name }); break; } // бот отклонил
-      // человеку — уведомление с возможностью принять/отклонить
-      for (const cws of room.clients) {
-        const cst = clients.get(cws);
-        if (cst?.playerId !== res.toId) continue;
-        cst.proposals.add(st.playerId);
-        send(cws, { type: 'proposal', from: st.playerId, name: st.name });
-        break;
-      }
+      // Предложение — тоже команда: ответы бота и предложение человеку игра положит
+      // в исходящие ящики (relNotices / proposalsOut), сетевой слой их разошлёт.
+      room.game.enqueue({ t: 'propose', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'allianceResponse': {
@@ -196,34 +197,41 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       if (!room || room.phase !== 'running' || st.playerId === null) return;
       const from = msg.from | 0;
       if (!st.proposals.delete(from)) return; // не было такого предложения
-      if (msg.accept) room.game.acceptAlliance(st.playerId, from);
-      // уведомляем предложившего (принял/отклонил) — если он в комнате
-      for (const cws of room.clients) {
-        const cst = clients.get(cws);
-        if (cst?.playerId !== from) continue;
-        send(cws, { type: 'notice', kind: msg.accept ? 'accept' : 'reject', name: room.game.playerName(st.playerId) });
-        break;
-      }
+      room.game.enqueue({ t: 'allianceResponse', id: st.playerId, from, accept: !!msg.accept });
       break;
     }
     case 'breakAlliance': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.breakAlliance(st.playerId, msg.cell | 0);
+      room.game.enqueue({ t: 'breakAlliance', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'war': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.declareWar(st.playerId, msg.cell | 0);
+      room.game.enqueue({ t: 'war', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
     case 'donate': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
       const kind = msg.kind === 'troops' ? 'troops' : 'gold';
-      const err = room.game.donate(st.playerId, msg.cell | 0, kind, Number(msg.amount) || 0);
-      if (err) send(ws, { type: 'error', message: err });
+      room.game.enqueue({ t: 'donate', id: st.playerId, cell: msg.cell | 0, kind, amount: Number(msg.amount) || 0 });
+      break;
+    }
+    case 'simResync': {
+      // Локальной симуляции нужно состояние: клиент вошёл в идущую партию либо
+      // разошёлся по хешу. Отдаём снимок — с него она продолжит счёт.
+      sendSimSnapshot(ws, st);
+      break;
+    }
+    case 'localSim': {
+      // клиент поднял локальную симуляцию: дальше ему шлём только поток ходов
+      const on = !!msg.on;
+      // Выключил (симуляция не сошлась) — состояние мира снова его, но дельты за
+      // время локального счёта потеряны: следующим кадром отдаём владельцев целиком.
+      if (st.localSim && !on) st.needResync = true;
+      st.localSim = on;
       break;
     }
     case 'setSpeed': {

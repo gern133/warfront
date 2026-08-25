@@ -1,4 +1,5 @@
 import { Difficulty } from '../../shared/protocol';
+import type { Rng } from '../../shared/rng';
 
 // Скорости движения кружков (клеток за тик)
 export const TRADE_SPEED = 0.6;
@@ -147,19 +148,22 @@ export const STRONG_NAMES = [
   '🇫🇮 Финляндия', '🇩🇰 Дания', '🇮🇪 Ирландия', '🇮🇱 Израиль', '🇰🇿 Казахстан',
 ];
 
-export function pickShuffled(names: string[], n: number): string[] {
+// Имена ботов тоже выбираются сеяным генератором: иначе одинаковый seed давал бы
+// одинаковую партию, но с разными названиями стран — а состояние обязано совпадать
+// целиком (в т.ч. для сверки хешей между клиентами в модели lockstep).
+export function pickShuffled(names: string[], n: number, rng: Rng): string[] {
   const pool = [...names];
   const out: string[] = [];
   while (out.length < n && pool.length) {
-    out.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
+    out.push(pool.splice(rng.int(pool.length), 1)[0]);
   }
   return out;
 }
 
-export function weakNames(n: number): string[] {
+export function weakNames(n: number, rng: Rng): string[] {
   const combos: string[] = [];
   for (const a of NAME_ADJ) for (const b of NAME_NOUN) combos.push(`${a} ${b}`);
-  return pickShuffled(combos, n);
+  return pickShuffled(combos, n, rng);
 }
 
 // Сглаживание ломаной (углы срезаются по Чайкину), концы сохраняются

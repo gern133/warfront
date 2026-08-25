@@ -1,7 +1,15 @@
 import { WebSocket } from 'ws';
+import { gzip } from 'node:zlib';
 import { TICK_MS, SPAWN_WAIT_S, MAX_HUMANS, Difficulty, MapType, ServerMsg } from '../../shared/protocol';
 import { rleEncode } from '../../shared/rle';
-import { Game } from '../game';
+import { Game, setEarthTerrainProvider } from '../game';
+import { earthTerrain } from '../map/earthmap';
+
+// Провайдер карты Земли подставляем ЗДЕСЬ, а не только в server/index.ts: этот модуль
+// создаёт публичную комнату (а значит и Game) прямо при загрузке, и по правилам ESM
+// это происходит РАНЬШЕ, чем выполнится тело server/index.ts. Симуляция сама карту
+// Земли читать не может — её код идёт и в браузерный воркер, куда node:fs не тянем.
+setEarthTerrainProvider(earthTerrain);
 
 // --- Комнаты и состояние соединений ---
 export type RoomPhase = 'lobby' | 'spawn' | 'running';
@@ -22,14 +30,51 @@ export interface Room {
   infArmy: boolean; // настройка лобби: бесконечная армия (потолок 100млн) у людей
   resetTimer: ReturnType<typeof setTimeout> | null;
   winnerSent: number | null; // id уже объявленного победителя (чтобы не слать повторно)
+  // Ход, на котором проверяем, что все люди действительно высадились. Две высадки
+  // могли претендовать на один плацдарм: проверка при клике прошла у обоих, а
+  // применилась только первая. Кто остался без территории — получает случайную точку.
+  spawnFixAt: number;
 }
 
 export interface CState {
+  // Клиент сам считает симуляцию (модель lockstep): состояние мира ему не нужно,
+  // достаточно потока ходов. Включается сообщением 'localSim'.
+  localSim: boolean;
   playerId: number | null;
   name: string;
   room: Room | null;
   needResync: boolean; // клиент отставал (буфер забит) — при восстановлении ресинк
+  // Игрок уже выбрал точку высадки. Держим на соединении, а не смотрим на
+  // `player.spawned`: команда `spawn` применяется на тике, а в фазе высадки мир не
+  // тикает — иначе фаза не заканчивается досрочно, даже когда все выбрали.
+  spawnPicked: boolean;
+  // Когда этому клиенту последний раз отдавали снимок симуляции: он весит порядка
+  // мегабайта, поэтому чаще раза в две секунды не собираем.
+  snapshotAt: number;
   proposals: Set<number>; // id игроков, приславших этому клиенту предложение союза
+}
+
+/** Отдать клиенту снимок симуляции — для позднего подключения и после расхождения.
+ *  Снимок большой (несколько МБ текста), поэтому едет отдельным СЖАТЫМ бинарным
+ *  кадром: обычные сообщения не сжимаются, включать сжатие на весь сокет ради
+ *  одного разового снимка дорого по процессору. */
+export function sendSimSnapshot(ws: WebSocket, st: CState) {
+  const room = st.room;
+  if (!room) return; // вне комнаты снимать нечего (в фазе выбора спавна ход ещё 0)
+  const now = Date.now();
+  if (now - st.snapshotAt < 2000) return; // защита от спама запросами
+  st.snapshotAt = now;
+  const game = room.game;
+  const payload = JSON.stringify({
+    type: 'simSnapshot',
+    turnNo: game.tickNo,
+    snap: game.snapshot(),
+  } satisfies ServerMsg);
+  // gzip асинхронно: 4 МБ синхронно — это ~100 мс паузы в тиках комнаты
+  gzip(payload, (err, buf) => {
+    if (err || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(buf, { binary: true });
+  });
 }
 
 export const rooms = new Map<string, Room>();
@@ -61,6 +106,7 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
     infArmy: false,
     resetTimer: null,
     winnerSent: null,
+    spawnFixAt: 0,
   };
   rooms.set(code, room);
   return room;
@@ -69,6 +115,22 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
 export const publicRoom = makeRoom('QUICK', 'easy', 'earth', true);
 publicRoom.phase = 'running';
 publicRoom.game.addBots('easy');
+
+/** Страховка после старта раунда: кто из людей так и не высадился (клетку занял
+ *  другой игрок на том же тике) — получает случайную точку, а не пустой старт. */
+export function fixUnspawned(room: Room) {
+  if (!room.spawnFixAt || room.game.tickNo < room.spawnFixAt) return;
+  room.spawnFixAt = 0;
+  for (const cws of room.clients) {
+    const cst = clients.get(cws);
+    if (cst?.playerId == null) continue;
+    const p = room.game.players.get(cst.playerId);
+    if (p && p.alive && !p.spawned) {
+      room.game.enqueue({ t: 'spawnRandom', id: p.id });
+      send(cws, { type: 'spawned' });
+    }
+  }
+}
 
 export function send(ws: WebSocket, msg: ServerMsg) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -83,6 +145,10 @@ export function sendInit(ws: WebSocket, st: CState, room: Room) {
     h: room.game.h,
     terrainRle: rleEncode(room.game.terrain),
     ownersRle: rleEncode(room.game.owners),
+    mapType: room.map, // клиентской симуляции нужен тот же тип карты
+    seed: room.game.seed, // по нему партия воспроизводится побитово (см. shared/rng.ts)
+    difficulty: room.difficulty, // клиентской симуляции нужны те же боты
+    tickNo: room.game.tickNo,
     players: room.game.playersPub(),
     // статику отдаём целиком: новому клиенту нужны имена всех игроков. Именно
     // playersMetaAll, а не playersMetaPub — тот обновил бы общую подпись, и
@@ -138,8 +204,11 @@ export function leaveRoom(ws: WebSocket, st: CState) {
 // Игрок входит в идущую игру: создаём "не заспавненного" игрока,
 // клиент переходит в фазу выбора точки старта
 export function enterGame(ws: WebSocket, st: CState, room: Room) {
+  // Вход в партию — команда с ЗАРАНЕЕ выданным id: так партия воспроизводится из
+  // журнала команд (id входит в команду, а не выдаётся внутри симуляции).
   const p = room.game.addPlayer(st.name);
   st.playerId = p.id;
+  st.spawnPicked = false;
   sendInit(ws, st, room);
 }
 
@@ -190,20 +259,23 @@ export function checkSpawnPhase(room: Room) {
     const cst = clients.get(cws);
     if (cst?.playerId == null) continue;
     anyHuman = true;
-    const p = room.game.players.get(cst.playerId);
-    if (p && !p.spawned) allSpawned = false;
+    if (!cst.spawnPicked) allSpawned = false;
   }
   if ((anyHuman && allSpawned) || room.spawnTicks <= 0) {
     for (const cws of room.clients) {
       const cst = clients.get(cws);
       if (cst?.playerId == null) continue;
-      const p = room.game.players.get(cst.playerId);
-      if (p && !p.spawned) {
-        room.game.spawnRandom(p); // не успел выбрать — случайная точка
+      if (!cst.spawnPicked) {
+        // не успел выбрать — случайная точка, но КОМАНДОЙ: иначе воспроизведение
+        // партии из журнала разошлось бы (это внешнее воздействие по таймеру)
+        room.game.enqueue({ t: 'spawnRandom', id: cst.playerId });
+        cst.spawnPicked = true;
         send(cws, { type: 'spawned' });
       }
     }
     room.phase = 'running';
+    // команды высадки применятся на первом тике — на следующем проверим результат
+    room.spawnFixAt = room.game.tickNo + 2;
     for (const cws of room.clients) send(cws, { type: 'roundStart' });
   }
 }
