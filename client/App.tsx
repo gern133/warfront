@@ -225,13 +225,14 @@ export default function App() {
   // applyView, что и сетевые, а серверу сообщаем, что состояние мира можно не слать.
   if (simCheck.current && !simCheck.current.onView) {
     simCheck.current.onView = (view) => applyViewRef.current(view);
-    simCheck.current.onReady = () => sendMsg({ type: 'localSim', on: true });
+    // Считаем ли мы партию сами. Пока считаем — сервер не присылает состояние мира
+    // (это и есть выигрыш lockstep); как только симуляция ждёт снимок или сдалась —
+    // состояние снова нужно, иначе картинке нечем жить.
+    simCheck.current.onLocalSim = (on) => sendMsg({ type: 'localSim', on });
     // Симуляции нужно состояние: вход в идущую партию или расхождение по хешу.
     simCheck.current.onNeedSnapshot = () => sendMsg({ type: 'simResync' });
     // После восстановления из снимка накопленным дельтам владельцев верить нельзя.
     simCheck.current.onResync = (rle) => gc.resync(rle);
-    // Симуляция сдалась (расхождения повторяются) — снова просим состояние мира.
-    simCheck.current.onGiveUp = () => sendMsg({ type: 'localSim', on: false });
   }
   applyViewRef.current = (msg: any) => {
         // защищаемся от отсутствующих полей (напр. старый сервер) — иначе краш
@@ -433,13 +434,21 @@ export default function App() {
         }
         // В режиме локальной симуляции состояние мира от сервера не применяем: его
         // считает воркер, а сервер такому клиенту его и не присылает.
-        if (!simCheck.current?.stats.rendering) applyViewRef.current(msg);
+        // Кадр без `changes` — это посылка ТОЛЬКО с потоком ходов (сервер шлёт такие,
+        // пока считает, что состояние нам не нужно). Применять его нельзя: все
+        // остальные поля в нём пустые, и мир мигнул бы пустотой — это видно в момент,
+        // когда симуляция ждёт снимок и картинка временно берётся у сервера.
+        const turnsOnly = (msg as { changes?: number[] }).changes === undefined;
+        if (!simCheck.current?.stats.rendering && !turnsOnly) applyViewRef.current(msg);
       } else if (msg.type === 'relations') {
         gc.setRelations(msg.allies ?? [], msg.enemies ?? []);
         setRelVer((v) => v + 1);
       } else if (msg.type === 'proposal') {
         // входящее предложение союза — показываем, избегая дублей
         setProposals((q) => (q.some((p) => p.from === msg.from) ? q : [...q, { from: msg.from, name: msg.name }]));
+      } else if (msg.type === 'simTurns') {
+        // хвост ходов к общему снимку комнаты — придёт прямо перед снимком
+        simCheck.current?.turnBatch(msg.from, (msg.turns ?? []) as never);
       } else if (msg.type === 'resync') {
         gc.resync(msg.ownersRle); // полный снимок владельцев после лага
       } else if (msg.type === 'spawned') {

@@ -65,6 +65,9 @@ import { canalCoarseCells, fbm, smoothstep, EARTH_W, EARTH_H } from '../../share
 import { buildWaterFields, buildCoarseWater, losWater, smoothWaterPath } from '../../shared/map/water';
 import { Rng } from '../../shared/rng';
 import { rleEncode, rleDecode } from '../../shared/rle';
+// Симуляцию считает и клиент, поэтому вся математика — детерминированная
+// (см. shared/fixmath.ts): Math.pow/sin/cos/atan2/hypot между движками расходятся.
+import { sq, dhypot, dsin, dcos, datan2, wrapAngle } from '../../shared/fixmath';
 import type { Intent, IntentResult } from '../../shared/types/intent';
 
 import { GameSnapshot, Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
@@ -948,6 +951,14 @@ export class Game {
 
   /** Добавить игрока с ЗАРАНЕЕ ИЗВЕСТНЫМ id — для применения команды `join` при
    *  воспроизведении партии: id входит в команду, иначе повтор не совпал бы. */
+  /** Забронировать id для входящего игрока. Сам игрок появится, когда применится
+   *  команда `join` — то есть на следующем тике. Но id нужен серверу СРАЗУ: он уходит
+   *  клиенту в `init` как `selfId`, и он же входит в команду, чтобы у всех — и у
+   *  сервера, и у локальных симуляций — игрок получил один и тот же номер. */
+  reserveId(): number {
+    return this.nextId++;
+  }
+
   addPlayerWithId(id: number, name: string): Player {
     if (this.players.has(id)) return this.players.get(id)!;
     if (id >= this.nextId) this.nextId = id + 1;
@@ -1031,7 +1042,10 @@ export class Game {
    *  фазе выбора мир не тикает, и до старта раунда результат иначе неизвестен. */
   canSpawnAt(playerId: number, cell: number): boolean {
     const p = this.players.get(playerId);
-    if (!p?.alive || p.spawned) return false;
+    // Игрока может ещё не быть: вход — тоже команда, и в фазе высадки мир не тикает,
+    // так что `join` применится только на первом тике раунда. Порядок в очереди
+    // сохраняется (join раньше spawn), поэтому проверяем пока только саму клетку.
+    if (p && (!p.alive || p.spawned)) return false;
     return this.canPlace(cell, 5, true);
   }
 
@@ -1292,7 +1306,7 @@ export class Game {
     const comp = this.waterId[pick.water];
     const ranked = own.seeds
       .filter((c) => this.waterId[c] === comp)
-      .map((c) => ({ c, d2: ((c % this.w) - wx) ** 2 + (((c / this.w) | 0) - wy) ** 2 }))
+      .map((c) => ({ c, d2: sq((c % this.w) - wx) + sq(((c / this.w) | 0) - wy) }))
       .sort((a, b) => a.d2 - b.d2);
     if (ranked.length === 0) return false;
     let fine: number[] | null = null;
@@ -1331,7 +1345,7 @@ export class Game {
     // накопленная длина маршрута
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2) {
-      cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+      cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
     }
     p.troops -= troops;
     this.boats.push({
@@ -1387,7 +1401,7 @@ export class Game {
     path.push(wx + 0.5, wy + 0.5);
     const cum: number[] = [0];
     for (let i = 2; i < path.length; i += 2)
-      cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+      cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
     return { path, cum, totalLen: cum[cum.length - 1] || 1 };
   }
 
@@ -1484,7 +1498,7 @@ export class Game {
         const port = this.nearestOwnPort(s.owner, s.x, s.y);
         if (port < 0) return false;
         const px = port % w, py = (port / w) | 0;
-        return (px - s.x) ** 2 + (py - s.y) ** 2 <= 26 * 26;
+        return sq(px - s.x) + sq(py - s.y) <= 26 * 26;
       };
       // стоим в порту на ремонте — плавно восполняем hp, потом обратно в зону
       if (s.healTicks > 0) {
@@ -1526,9 +1540,9 @@ export class Game {
       }
       if (!s.moving && !s.repairing) {
         // патруль по кругу вокруг центра зоны; держимся воды
-        s.patrolAng += WARSHIP_PATROL_SPD;
-        let tx = s.patrolX + Math.cos(s.patrolAng) * WARSHIP_PATROL_R;
-        let ty = s.patrolY + Math.sin(s.patrolAng) * WARSHIP_PATROL_R;
+        s.patrolAng = wrapAngle(s.patrolAng + WARSHIP_PATROL_SPD);
+        let tx = s.patrolX + dcos(s.patrolAng) * WARSHIP_PATROL_R;
+        let ty = s.patrolY + dsin(s.patrolAng) * WARSHIP_PATROL_R;
         const cx = Math.round(tx), cy = Math.round(ty);
         if (cx < 0 || cy < 0 || cx >= w || cy >= h || this.terrain[cy * w + cx]) {
           const [nwx, nwy] = this.nearestWaterFine(
@@ -1539,7 +1553,7 @@ export class Game {
           tx = nwx + 0.5; ty = nwy + 0.5;
         }
         const dx = tx - s.x, dy = ty - s.y;
-        const dist = Math.hypot(dx, dy) || 1;
+        const dist = dhypot(dx, dy) || 1;
         const step = Math.min(WARSHIP_SPEED, dist);
         s.x += (dx / dist) * step;
         s.y += (dy / dist) * step;
@@ -1557,18 +1571,18 @@ export class Game {
       const key = (k: string, id: number) => k.charCodeAt(0) * 1e7 + id;
       for (const ts of this.tradeShips) {
         if (ts.owner === s.owner || this.relation(s.owner, ts.owner) !== 'hostile') continue;
-        const d = (ts.x - s.x) ** 2 + (ts.y - s.y) ** 2;
+        const d = sq(ts.x - s.x) + sq(ts.y - s.y);
         if (d <= R2 && !busy.has(key('t', ts.id))) cands.push({ d, kind: 'trade', id: ts.id });
       }
       for (const bt of this.boats) {
         if (bt.player === s.owner || this.relation(s.owner, bt.player) !== 'hostile') continue;
-        const d = (bt.x - s.x) ** 2 + (bt.y - s.y) ** 2;
+        const d = sq(bt.x - s.x) + sq(bt.y - s.y);
         if (d <= R2 && !busy.has(key('b', bt.id))) cands.push({ d, kind: 'boat', id: bt.id });
       }
       for (const w2 of this.warships) {
         if (w2 === s || w2.owner === s.owner || this.relation(s.owner, w2.owner) !== 'hostile') continue;
         if (w2.healTicks > 0) continue; // корабль на починке в порту — не атакуем
-        const d = (w2.x - s.x) ** 2 + (w2.y - s.y) ** 2;
+        const d = sq(w2.x - s.x) + sq(w2.y - s.y);
         if (d <= R2 && !busy.has(key('w', w2.id))) cands.push({ d, kind: 'war', id: w2.id });
       }
       cands.sort((a, b) => a.d - b.d);
@@ -1613,7 +1627,7 @@ export class Game {
               : this.tradeShips.find((s) => s.id === b.targetId && !s.done);
       if (!tgt) { b.dmg = 0; continue; } // цель исчезла — пуля гаснет (промах)
       const dx = tgt.x - b.x, dy = tgt.y - b.y;
-      const dist = Math.hypot(dx, dy) || 1;
+      const dist = dhypot(dx, dy) || 1;
       if (dist <= BULLET_SPEED + 1.5) {
         // попадание
         if (b.targetKind === 'war') {
@@ -1884,7 +1898,7 @@ export class Game {
         const c = tour.cells[i];
         const px = (c % this.w) + 0.5, py = ((c / this.w) | 0) + 0.5;
         path.push(px, py);
-        if (i > 0) cum.push(cum[cum.length - 1] + Math.hypot(px - path[(i - 1) * 2], py - path[(i - 1) * 2 + 1]));
+        if (i > 0) cum.push(cum[cum.length - 1] + dhypot(px - path[(i - 1) * 2], py - path[(i - 1) * 2 + 1]));
       }
       const payDist = tour.pay.map((p2) => cum[p2.at]);
       const payCell = tour.pay.map((p2) => p2.cell);
@@ -2142,7 +2156,7 @@ export class Game {
       (b) =>
         b.type === type &&
         b.owner === playerId &&
-        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+        sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy) <= r2
     );
   }
 
@@ -2153,7 +2167,7 @@ export class Game {
     let best: Building | undefined, bestD = Infinity;
     for (const b of this.buildings) {
       if (b.type !== 'hq' || b.owner !== playerId) continue;
-      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      const d = sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy);
       if (d <= r2 && d < bestD) { bestD = d; best = b; }
     }
     return best;
@@ -2168,7 +2182,7 @@ export class Game {
     return this.buildings.some(
       (b) =>
         types.includes(b.type) &&
-        (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2 <= r2
+        sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy) <= r2
     );
   }
 
@@ -2664,7 +2678,7 @@ export class Game {
         path.push(lx + 0.5, ly + 0.5); // и до самого порта-получателя
         const cum: number[] = [0];
         for (let i = 2; i < path.length; i += 2) {
-          cum.push(cum[cum.length - 1] + Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
+          cum.push(cum[cum.length - 1] + dhypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]));
         }
         result = { path, cum, totalLen: cum[cum.length - 1] || 1 };
       }
@@ -2833,7 +2847,7 @@ export class Game {
       if (b.reloads.length >= b.level) continue; // все заряды на перезарядке
       const bx = b.cell % this.w;
       const by = (b.cell / this.w) | 0;
-      const d = (bx + 0.5 - cx) ** 2 + (by + 0.5 - cy) ** 2;
+      const d = sq(bx + 0.5 - cx) + sq(by + 0.5 - cy);
       if (d <= r2 && d < bestD) {
         bestD = d;
         sam = b;
@@ -2847,8 +2861,8 @@ export class Game {
     // (та же формула дуги, что в рендере: arc = min(dist*0.4, 140))
     const kx = m.sx + (m.tx - m.sx) * m.killProg;
     const ky = m.sy + (m.ty - m.sy) * m.killProg;
-    const gdist = Math.hypot(m.tx - m.sx, m.ty - m.sy);
-    const lift = Math.min(gdist * 0.4, 140) * Math.sin(Math.PI * m.killProg);
+    const gdist = dhypot(m.tx - m.sx, m.ty - m.sy);
+    const lift = Math.min(gdist * 0.4, 140) * dsin(Math.PI * m.killProg);
     this.missiles.push({
       id: this.nextMissileId++,
       owner: sam.owner,
@@ -2885,7 +2899,7 @@ export class Game {
     for (const b of this.buildings) {
       if (b.type !== 'silo' || b.owner !== playerId) continue;
       if (this.tickNo < b.readyTick || b.stock <= 0) continue;
-      const d = (b.cell % this.w - cx) ** 2 + ((b.cell / this.w | 0) - cy) ** 2;
+      const d = sq(b.cell % this.w - cx) + sq((b.cell / this.w | 0) - cy);
       if (d < bestD) {
         bestD = d;
         silo = b;
@@ -2899,7 +2913,7 @@ export class Game {
     if (silo.reloadTick <= this.tickNo) silo.reloadTick = this.tickNo + SILO_RELOAD_TICKS;
     const sx = (silo.cell % this.w) + 0.5;
     const sy = ((silo.cell / this.w) | 0) + 0.5;
-    const dist = Math.hypot(cx + 0.5 - sx, cy + 0.5 - sy);
+    const dist = dhypot(cx + 0.5 - sx, cy + 0.5 - sy);
     const nuke: Missile = {
       id: this.nextMissileId++,
       owner: playerId,
@@ -3009,7 +3023,7 @@ export class Game {
         if (this.owners[c] !== target) continue;
         fallback = c;
         const cx = c % w, cy = (c / w) | 0;
-        if ((cx - fx) ** 2 + (cy - fy) ** 2 >= SPREAD * SPREAD) return c; // достаточно далеко
+        if (sq(cx - fx) + sq(cy - fy) >= SPREAD * SPREAD) return c; // достаточно далеко
       }
       return fallback; // не нашли дальней — берём хоть какую-то занятую
     };
@@ -3025,9 +3039,9 @@ export class Game {
       // бомбу ПРИ ПРИЛЁТЕ, после чего берёт новую дальнюю точку → рой разлетается,
       // а не бьёт кучей в одно место.
       const dx = d.wx - d.x, dy = d.wy - d.y;
-      const dist = Math.hypot(dx, dy);
+      const dist = dhypot(dx, dy);
       if (dist >= 2) {
-        d.a = Math.atan2(dy, dx);
+        d.a = datan2(dy, dx);
         d.x += (dx / dist) * DRONE_SPEED;
         d.y += (dy / dist) * DRONE_SPEED;
       } else {
@@ -3045,8 +3059,8 @@ export class Game {
         } else {
           // ждём перезарядку — медленно кружим над точкой (чтобы не зависать пикселем)
           d.a += 0.25;
-          d.x += Math.cos(d.a) * 0.35;
-          d.y += Math.sin(d.a) * 0.35;
+          d.x += dcos(d.a) * 0.35;
+          d.y += dsin(d.a) * 0.35;
         }
       }
       // ПВО цели пускает по дрону самонаводящуюся ракету (тратит заряд). Дрон не
@@ -3059,7 +3073,7 @@ export class Game {
           if (this.relation(b.owner, d.owner) === 'allied') continue;
           if (b.reloads.length >= b.level) continue; // нет свободных зарядов
           const sx = (b.cell % w) + 0.5, sy = ((b.cell / w) | 0) + 0.5;
-          if ((sx - d.x) ** 2 + (sy - d.y) ** 2 <= samR2) {
+          if (sq(sx - d.x) + sq(sy - d.y) <= samR2) {
             b.reloads.push(this.tickNo + SAM_RELOAD_TICKS);
             d.doomed = true;
             this.bullets.push({
@@ -3260,9 +3274,9 @@ export class Game {
     // ядерный взрыв топит любые суда в радиусе — боевые, торговые и десант
     const bx = cx + 0.5, by = cy + 0.5;
     let sunkWar = false, sunkTrade = false, sunkBoat = false;
-    for (const s of this.warships) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.hp = 0; sunkWar = true; }
-    for (const s of this.tradeShips) if ((s.x - bx) ** 2 + (s.y - by) ** 2 <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
-    for (const b of this.boats) if ((b.x - bx) ** 2 + (b.y - by) ** 2 <= R2) { b.troops = 0; sunkBoat = true; }
+    for (const s of this.warships) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.hp = 0; sunkWar = true; }
+    for (const s of this.tradeShips) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
+    for (const b of this.boats) if (sq(b.x - bx) + sq(b.y - by) <= R2) { b.troops = 0; sunkBoat = true; }
     if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
     if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);
     if (sunkBoat) this.boats = this.boats.filter((b) => b.troops >= 1);
@@ -3789,7 +3803,7 @@ export class Game {
     // ещё не прикрывает его (иначе зря пересчитываем маршрут каждый тик)
     if (threats.length && myWar.length) {
       const t = threats[0];
-      const covered = myWar.some((s) => (s.x - t.x) ** 2 + (s.y - t.y) ** 2 < WARSHIP_RANGE * WARSHIP_RANGE);
+      const covered = myWar.some((s) => sq(s.x - t.x) + sq(s.y - t.y) < WARSHIP_RANGE * WARSHIP_RANGE);
       if (!covered) {
         const cell = (Math.round(t.y) | 0) * this.w + (Math.round(t.x) | 0);
         this.moveWarships(p.id, myWar.map((s) => s.id), cell);
@@ -3836,7 +3850,7 @@ export class Game {
       // не гоняем, если уже кто-то рядом с этой зоной
       if (zoneCell >= 0) {
         const zx = zoneCell % this.w, zy = (zoneCell / this.w) | 0;
-        const covered = myWar.some((s) => (s.x - zx) ** 2 + (s.y - zy) ** 2 < (WARSHIP_RANGE * 0.7) ** 2);
+        const covered = myWar.some((s) => sq(s.x - zx) + sq(s.y - zy) < sq(WARSHIP_RANGE * 0.7));
         if (!covered) this.moveWarships(p.id, myWar.map((s) => s.id), zoneCell);
       }
     }
@@ -3883,7 +3897,7 @@ export class Game {
       let coastal = false;
       this.forNeighbors(c, (n) => { if (!this.terrain[n]) coastal = true; });
       if (!coastal) continue;
-      const d = (rx - hx) ** 2 + (ry - hy) ** 2;
+      const d = sq(rx - hx) + sq(ry - hy);
       if (d < bestD) { bestD = d; best = c; }
     }
     if (best >= 0) this.launchInvasion(p.id, best, 0.35);
@@ -3936,7 +3950,7 @@ export class Game {
       for (const b of own) {
         const bx = b.cell % w;
         const by = (b.cell / w) | 0;
-        const d = (bx - cx) ** 2 + (by - cy) ** 2;
+        const d = sq(bx - cx) + sq(by - cy);
         if (d < dmin) dmin = d;
       }
       if (dmin > bestD) {
@@ -4260,7 +4274,7 @@ export class Game {
           if (!pr || b.owner === p.id || b.owner <= 0) continue;
           if (this.relation(p.id, b.owner) === 'allied') continue;
           const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
-          const d2 = (bx - fx) ** 2 + (by - fy) ** 2;
+          const d2 = sq(bx - fx) + sq(by - fy);
           if (d2 > 500 * 500) continue; // слишком далеко — не бьём через полмира
           const score = pr * 1e7 - d2; // приоритет типа, при равенстве — ближе
           if (score > bestScore) { bestScore = score; targetCell = b.cell; }
@@ -4269,7 +4283,7 @@ export class Game {
           // стратегических целей нет — бьём вглубь территории врага (как раньше)
           const R = NUKES[kind].radius;
           const ex = enemyTo % this.w, ey = (enemyTo / this.w) | 0;
-          const dx = ex - fx, dy = ey - fy, len = Math.hypot(dx, dy) || 1;
+          const dx = ex - fx, dy = ey - fy, len = dhypot(dx, dy) || 1;
           const tx = Math.max(0, Math.min(this.w - 1, Math.round(ex + (dx / len) * R)));
           const ty = Math.max(0, Math.min(this.h - 1, Math.round(ey + (dy / len) * R)));
           targetCell = ty * this.w + tx;
@@ -4352,7 +4366,7 @@ export class Game {
               const pr = prio[b.type];
               if (!pr) continue;
               const bx = b.cell % this.w, by = (b.cell / this.w) | 0;
-              const score = pr * 1e7 - ((bx - fx0) ** 2 + (by - fy0) ** 2);
+              const score = pr * 1e7 - (sq(bx - fx0) + sq(by - fy0));
               if (score > bs) { bs = score; tc = b.cell; }
             }
             if (tc >= 0) {

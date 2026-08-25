@@ -34,6 +34,8 @@ type InMsg =
     }
   | { t: 'turn'; turnNo: number; intents: Intent[] }
   | { t: 'check'; turnNo: number; hash: number }
+  // пачка ходов от сервера: хвост от общего снимка до «сейчас» (см. serveSnapshot)
+  | { t: 'turns'; from: number; turns: Intent[][] }
   | { t: 'restore'; turnNo: number; snap: GameSnapshot };
 
 export type SimOutMsg =
@@ -46,6 +48,8 @@ export type SimOutMsg =
   | { t: 'resync'; ownersRle: number[] }
   // симуляции нужно состояние с сервера (вход в идущую партию или расхождение)
   | { t: 'needSnapshot'; reason: 'late' | 'desync' | 'gap' }
+  // устройство не успевает считать симуляцию в реальном времени
+  | { t: 'slow'; avgMs: number }
   // расхождение симуляций: дальше локальной картинке верить нельзя
   | { t: 'desync'; turnNo: number; ours: number; theirs: number }
   | { t: 'error'; message: string };
@@ -60,6 +64,13 @@ let firstView = true; // первую посылку зданий отдаём �
 let awaiting = false;
 const queue: { turnNo: number; intents: Intent[] }[] = [];
 const QUEUE_MAX = 600; // минута ходов; дальше снимок всё равно уже неактуален
+// Успевает ли устройство считать симуляцию в реальном времени. Ход приходит раз в
+// 100 мс; если счёт стоит дороже, сообщения копятся в очереди воркера, картинка
+// незаметно отстаёт всё сильнее — лучше честно вернуться к состоянию от сервера.
+let costSum = 0;
+let costN = 0;
+let slowSent = false;
+const SLOW_MS = 45; // почти половина бюджета хода — дальше запас уже не отыграть
 
 const post = (m: SimOutMsg) => (self as unknown as Worker).postMessage(m);
 
@@ -73,6 +84,7 @@ function runTurn(turnNo: number, intents: Intent[]): boolean {
     post({ t: 'needSnapshot', reason: 'gap' });
     return false;
   }
+  const t0 = performance.now();
   for (const i of intents) game.enqueue(i);
   game.tick();
   ticks++;
@@ -94,6 +106,16 @@ function runTurn(turnNo: number, intents: Intent[]): boolean {
   }
   // старые хеши не держим
   if (hashes.size > 64) for (const k of hashes.keys()) { if (k < turnNo - 32) hashes.delete(k); }
+  costSum += performance.now() - t0;
+  if (++costN >= 50) {
+    const avg = costSum / costN;
+    costSum = 0;
+    costN = 0;
+    if (avg > SLOW_MS && !slowSent) {
+      slowSent = true;
+      post({ t: 'slow', avgMs: avg });
+    }
+  }
   return true;
 }
 
@@ -112,8 +134,10 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       // ПОЗДНЕЕ ПОДКЛЮЧЕНИЕ: партия уже идёт, с нулевого хода её не догнать —
       // просим снимок и до его прихода только копим ходы.
       awaiting = msg.tickNo > 0;
+      // «Готов» говорим только когда симуляция действительно считает: иначе главный
+      // поток решит, что картинку можно брать у нас, и мир замрёт до снимка.
       if (awaiting) post({ t: 'needSnapshot', reason: 'late' });
-      post({ t: 'ready', tickNo: game.tickNo });
+      else post({ t: 'ready', tickNo: game.tickNo });
       return;
     }
     if (!game) return;
@@ -128,7 +152,23 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       // Ходы, пришедшие пока снимок ехал: применяем те, что после него.
       const pending = queue.filter((q) => q.turnNo >= game!.tickNo).sort((a, b) => a.turnNo - b.turnNo);
       queue.length = 0;
-      for (const q of pending) if (!runTurn(q.turnNo, q.intents)) break;
+      for (const q of pending) {
+        // хвост от сервера и собственная очередь перекрываются — уже применённые
+        // ходы просто пропускаем, иначе runTurn увидел бы разрыв и запросил всё заново
+        if (q.turnNo < game.tickNo) continue;
+        if (!runTurn(q.turnNo, q.intents)) break;
+      }
+      if (!awaiting) post({ t: 'ready', tickNo: game.tickNo });
+      return;
+    }
+    if (msg.t === 'turns') {
+      // Снимок общий на комнату и может быть на пару секунд старше нашего запроса —
+      // это хвост, закрывающий разрыв. Складываем туда же, в очередь: она всё равно
+      // разбирается после восстановления и пропускает уже применённое.
+      for (let i = 0; i < msg.turns.length; i++) {
+        queue.push({ turnNo: msg.from + i, intents: msg.turns[i] });
+      }
+      while (queue.length > QUEUE_MAX) queue.shift();
       return;
     }
     if (msg.t === 'turn') {

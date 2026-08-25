@@ -1,5 +1,6 @@
 import { Difficulty } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
+import { dpow } from '../../shared/fixmath';
 
 // Скорости движения кружков (клеток за тик)
 export const TRADE_SPEED = 0.6;
@@ -65,7 +66,7 @@ export const CAP_EXP = 0.6; // показатель за изломом. Вык�
 
 // Территория в войсках: сколько «эффективных» клеток идёт в потолок армии.
 export function cellFactor(cells: number): number {
-  return cells <= CAP_KNEE ? cells : CAP_KNEE * Math.pow(cells / CAP_KNEE, CAP_EXP);
+  return cells <= CAP_KNEE ? cells : CAP_KNEE * dpow(cells / CAP_KNEE, CAP_EXP);
 }
 
 // P3. Соотношение сил влияет на ЦЕНУ клетки, а не только на темп (waveScale).

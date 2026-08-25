@@ -52,7 +52,23 @@ const server = http.createServer((req, res) => {
 });
 
 // --- WebSocket: подключения и маршрутизация сообщений ---
-const wss = new WebSocketServer({ server });
+// Сжатие кадров (permessage-deflate). Данные у нас — длинные массивы целых чисел в
+// JSON, они жмутся в разы. Это главный выигрыш по трафику для клиентов, которым
+// состояние мира всё-таки приходится присылать: у кого не поднялась локальная
+// симуляция, кто только вошёл (init с картой и владельцами) или чьё устройство не
+// успевает считать партию.
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: {
+    threshold: 512, // мелочь (ответы, уведомления) жать дороже, чем отправить как есть
+    // Уровень 1, а не 3: замер на 12 клиентах показал 12% ядра против 17% при разнице
+    // в объёме всего 5% (10.7 против 10.2 МБ). Сжатие идёт для каждого соединения
+    // отдельно, поэтому процессор здесь растёт линейно по числу таких клиентов —
+    // ~0.5% ядра на клиента, и дешёвый уровень важнее пары процентов размера.
+    zlibDeflateOptions: { level: 1, memLevel: 7 },
+    concurrencyLimit: 10,
+  },
+});
 
 wss.on('connection', (ws) => {
   const st: CState = { playerId: null, name: '', room: null, needResync: false, spawnPicked: false, snapshotAt: 0, proposals: new Set(), localSim: false };

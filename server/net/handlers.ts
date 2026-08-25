@@ -16,6 +16,7 @@ import {
   rooms,
   send,
   sendSimSnapshot,
+  dropSnapshot,
 } from './rooms';
 
 // Обработка входящего сообщения от клиента
@@ -116,6 +117,7 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
           clearTimeout(room.resetTimer);
           room.resetTimer = null;
         }
+        dropSnapshot(room); // снимок прошлого раунда непригоден
         room.game.reset();
         room.game.addBots(room.difficulty);
       }

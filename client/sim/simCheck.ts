@@ -1,10 +1,12 @@
 // Подключение клиентской симуляции.
 //
 // Воркер считает ту же партию, что сервер (из карты, seed и потока ходов), и сверяет
-// хеши состояния. Два режима:
-//   sim=1 — только СВЕРКА: рисуем по данным сервера, локальную симуляцию сверяем.
-//   sim=2 — полный lockstep: рисуем по локальной симуляции, сервер присылает только
-//           поток ходов (0.27 КБ/с против 118 КБ/с состояния мира).
+// хеши состояния. Режим по умолчанию — ПОЛНЫЙ LOCKSTEP: картинку берём из локальной
+// симуляции, а сервер присылает только поток ходов (0.27 КБ/с против 118 КБ/с
+// состояния мира). Переключается адресом страницы или localStorage:
+//   sim=2 (по умолчанию) — считаем и рисуем сами;
+//   sim=1 — только СВЕРКА: рисуем по данным сервера, симуляцию сверяем по хешам;
+//   sim=0 — выключить воркер совсем.
 //
 // Здесь же живут две вещи, без которых модель нерабочая в реальной партии:
 //
@@ -18,9 +20,10 @@
 //   расхождения повторяются, симуляция сдаётся и мир снова рисуется по данным
 //   сервера — играть можно в любом случае.
 //
-// Включается флагом, чтобы работающая игра от воркера не зависела:
-//   • в адресе страницы: ?sim=1
-//   • или в консоли: localStorage.setItem('warfront.sim', '1')
+// Игра не должна зависеть от того, получилось ли поднять симуляцию, поэтому любой
+// сбой — не создался воркер, нет распаковки снимков, устройство не успевает счётом,
+// расхождения повторяются — приводит к одному и тому же: сервер снова присылает
+// состояние мира, и играть можно как раньше.
 import type { Intent } from '../../shared/types/intent';
 import type { SimOutMsg } from './worker';
 
@@ -58,32 +61,47 @@ export class SimCheck {
   };
   /** Куда отдавать посчитанные локально данные для отрисовки. */
   onView: ((view: unknown) => void) | null = null;
-  /** Сообщить серверу, что состояние мира нам больше не нужно. */
-  onReady: (() => void) | null = null;
+  /** Сообщить серверу, нужно ли нам состояние мира: `true` — считаем сами, шли только
+   *  ходы; `false` — верни состояние (симуляция ещё не готова, ждёт снимок или сдалась). */
+  onLocalSim: ((on: boolean) => void) | null = null;
   /** Запросить у сервера снимок состояния симуляции. */
   onNeedSnapshot: (() => void) | null = null;
   /** Владельцы клеток целиком — после восстановления дельтам верить нельзя. */
   onResync: ((ownersRle: number[]) => void) | null = null;
-  /** Симуляция сдалась: снова рисуем по данным сервера (и просим их присылать). */
-  onGiveUp: (() => void) | null = null;
   private worker: Worker | null = null;
+  /** Чего мы хотим: 'render' — считать и рисовать самим, 'verify' — только сверять.
+   *  `stats.rendering` при этом говорит, идёт ли это ПРЯМО СЕЙЧАС (в ожидании снимка
+   *  и после отказа — нет). */
+  private mode: 'render' | 'verify' = 'verify';
   // Запрос снимка сервер может отбить (он не собирает их чаще раза в 2 секунды) —
   // тогда без повтора воркер ждал бы вечно, копя ходы.
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    let mode = '';
+    let mode = '2'; // по умолчанию — считаем партию сами
     try {
       mode =
         new URLSearchParams(location.search).get('sim') ??
         localStorage.getItem('warfront.sim') ??
-        '';
+        '2';
     } catch {
-      mode = ''; // приватный режим — localStorage может бросать
+      mode = '2'; // приватный режим — localStorage может бросать
     }
-    if (mode !== '1' && mode !== '2') return;
-    this.stats.rendering = mode === '2';
-    this.worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+    if (mode !== '1' && mode !== '2') return; // sim=0 или мусор — воркер не поднимаем
+    // Снимок состояния приходит сжатым (позднее подключение, восстановление после
+    // расхождения). Без распаковки в браузере вести симуляцию самим нельзя — войти в
+    // идущую партию будет невозможно; остаёмся в режиме сверки.
+    if (mode === '2' && typeof DecompressionStream === 'undefined') {
+      console.warn('[sim] браузер не умеет распаковывать снимки — только сверка');
+      mode = '1';
+    }
+    this.mode = mode === '2' ? 'render' : 'verify';
+    try {
+      this.worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+    } catch (e) {
+      console.warn('[sim] воркер не создан, играем по данным сервера:', e);
+      return;
+    }
     this.stats.enabled = true;
     this.worker.onmessage = (e: MessageEvent<SimOutMsg>) => {
       const m = e.data;
@@ -96,17 +114,21 @@ export class SimCheck {
         );
       } else if (m.t === 'needSnapshot') {
         this.stats.awaiting = true;
+        // Пока снимка нет, симуляция не считает — картинку на это время берём у
+        // сервера, иначе мир замрёт на секунду-две.
+        if (this.stats.rendering) {
+          this.stats.rendering = false;
+          this.onLocalSim?.(false);
+        }
         // Больше MAX_RESTORES попыток не делаем: значит расходимся систематически.
         if (this.stats.restored >= MAX_RESTORES) {
-          if (!this.stats.gaveUp) {
-            this.stats.gaveUp = true;
-            this.stats.rendering = false;
-            console.error('[sim] локальная симуляция не сходится — рисуем по данным сервера');
-            this.onGiveUp?.();
-          }
+          this.giveUp('локальная симуляция не сходится');
           return;
         }
         this.askSnapshot();
+      } else if (m.t === 'slow') {
+        // Устройство не успевает считать партию в реальном времени.
+        this.giveUp(`симуляция не укладывается в такт (${m.avgMs.toFixed(0)} мс на ход)`);
       } else if (m.t === 'resync') {
         this.onResync?.(m.ownersRle);
       } else if (m.t === 'error') {
@@ -115,13 +137,31 @@ export class SimCheck {
       } else if (m.t === 'view') {
         if (this.stats.rendering) this.onView?.(m.view);
       } else if (m.t === 'ready') {
+        // Воркер говорит «готов» только когда действительно считает партию.
         console.info(
           `[sim] локальная симуляция поднята на ходу ${m.tickNo}` +
-            (this.stats.rendering ? ' — она же источник картинки' : ' (режим сверки)'),
+            (this.mode === 'render' ? ' — она же источник картинки' : ' (режим сверки)'),
         );
-        if (this.stats.rendering) this.onReady?.();
+        if (this.mode === 'render' && !this.stats.gaveUp) {
+          this.stats.rendering = true;
+          this.onLocalSim?.(true);
+        }
       }
     };
+  }
+
+  /** Отказаться от локальной симуляции: дальше играем по данным сервера. */
+  private giveUp(why: string) {
+    if (this.stats.gaveUp) return;
+    this.stats.gaveUp = true;
+    this.stats.rendering = false;
+    this.stats.awaiting = false;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    console.error(`[sim] ${why} — рисуем по данным сервера`);
+    this.onLocalSim?.(false);
   }
 
   /** Попросить снимок и повторять запрос, пока он не придёт. */
@@ -148,6 +188,11 @@ export class SimCheck {
   /** Ход: команды этого хода (может быть пусто) — воркер применит и посчитает хеш. */
   turn(turnNo: number, intents: Intent[]) {
     this.worker?.postMessage({ t: 'turn', turnNo, intents });
+  }
+
+  /** Пачка ходов от сервера — хвост к общему снимку комнаты (см. serveSnapshot). */
+  turnBatch(from: number, turns: Intent[][]) {
+    this.worker?.postMessage({ t: 'turns', from, turns });
   }
 
   /** Хеш сервера для сверки (приходит раз в секунду). */

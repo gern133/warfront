@@ -113,6 +113,9 @@ export type ServerMsg =
   // Едет отдельным сжатым бинарным кадром — он большой (несколько МБ текста),
   // поэтому в этом сообщении только заголовок, а `snap` разбирает воркер.
   | { type: 'simSnapshot'; turnNo: number; snap: unknown }
+  // Хвост ходов от снимка до «сейчас». Снимок общий на комнату и может быть на пару
+  // секунд старше запроса — этот хвост склеивает разрыв (см. sendSimSnapshot).
+  | { type: 'simTurns'; from: number; turns: unknown[][] }
   | { type: 'relations'; allies: number[]; enemies: number[] } // отношения игрока
   | { type: 'proposal'; from: number; name: string } // входящее предложение союза
   // союз: принял/отклонил/расторг; trade: уничтожил мой торговый корабль;

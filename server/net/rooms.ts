@@ -34,6 +34,14 @@ export interface Room {
   // могли претендовать на один плацдарм: проверка при клике прошла у обоих, а
   // применилась только первая. Кто остался без территории — получает случайную точку.
   spawnFixAt: number;
+  // ОБЩИЙ снимок состояния для клиентов с локальной симуляцией. Собирается один раз
+  // и уходит всем, кто входит следом: сборка со сжатием стоит около 150 мс процессора,
+  // и при массовом входе (100 человек за три секунды) сто персональных снимков съедали
+  // больше ядра целиком. Разрыв между временем снимка и моментом запроса закрывается
+  // хвостом ходов.
+  snap: { tick: number; buf: Buffer; at: number } | null;
+  snapWaiting: Set<WebSocket>;
+  snapBuilding: boolean;
 }
 
 export interface CState {
@@ -58,23 +66,62 @@ export interface CState {
  *  Снимок большой (несколько МБ текста), поэтому едет отдельным СЖАТЫМ бинарным
  *  кадром: обычные сообщения не сжимаются, включать сжатие на весь сокет ради
  *  одного разового снимка дорого по процессору. */
+/** Сколько снимок годится к переиспользованию. Всё это время он раздаётся как есть, а
+ *  накопившиеся с тех пор ходы едут отдельным хвостом — он маленький (5 с это 50 ходов). */
+const SNAP_TTL_MS = 5000;
+
 export function sendSimSnapshot(ws: WebSocket, st: CState) {
   const room = st.room;
   if (!room) return; // вне комнаты снимать нечего (в фазе выбора спавна ход ещё 0)
   const now = Date.now();
   if (now - st.snapshotAt < 2000) return; // защита от спама запросами
   st.snapshotAt = now;
-  const game = room.game;
+  // свежий снимок уже есть — отдаём как есть, ничего не считая
+  if (room.snap && now - room.snap.at < SNAP_TTL_MS) {
+    serveSnapshot(ws, room, room.snap);
+    return;
+  }
+  room.snapWaiting.add(ws);
+  buildSnapshot(room);
+}
+
+/** Собрать снимок ОДИН раз на всех ожидающих. */
+function buildSnapshot(room: Room) {
+  if (room.snapBuilding) return; // уже собираем — ожидающие получат этот же снимок
+  room.snapBuilding = true;
+  const tick = room.game.tickNo;
   const payload = JSON.stringify({
     type: 'simSnapshot',
-    turnNo: game.tickNo,
-    snap: game.snapshot(),
+    turnNo: tick,
+    snap: room.game.snapshot(),
   } satisfies ServerMsg);
-  // gzip асинхронно: 4 МБ синхронно — это ~100 мс паузы в тиках комнаты
+  // gzip асинхронно (в пуле потоков): 4 МБ синхронно — это ~100 мс паузы в тиках
   gzip(payload, (err, buf) => {
-    if (err || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(buf, { binary: true });
+    room.snapBuilding = false;
+    const waiting = [...room.snapWaiting];
+    room.snapWaiting.clear();
+    if (err || !buf) return;
+    room.snap = { tick, buf, at: Date.now() };
+    for (const w of waiting) serveSnapshot(w, room, room.snap);
   });
+}
+
+function serveSnapshot(ws: WebSocket, room: Room, snap: { tick: number; buf: Buffer }) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  // Ходы от снимка до текущего момента — ПЕРЕД снимком: клиент положит их в очередь и
+  // разберёт после восстановления. Без них общий (чуть устаревший) снимок дал бы
+  // разрыв в последовательности ходов, и клиент запросил бы всё заново.
+  const turns: unknown[][] = [];
+  for (let t = snap.tick; t < room.game.tickNo; t++) turns.push(room.game.turnLog[t] ?? []);
+  if (turns.length) send(ws, { type: 'simTurns', from: snap.tick, turns });
+  // compress: false — снимок уже сжат gzip'ом, второй проход только жжёт процессор
+  ws.send(snap.buf, { binary: true, compress: false });
+}
+
+/** Снимок предыдущего раунда непригоден: нумерация ходов начинается заново. */
+export function dropSnapshot(room: Room) {
+  room.snap = null;
+  room.snapWaiting.clear();
 }
 
 export const rooms = new Map<string, Room>();
@@ -107,6 +154,9 @@ export function makeRoom(code: string, difficulty: Difficulty, map: MapType, isP
     resetTimer: null,
     winnerSent: null,
     spawnFixAt: 0,
+    snap: null,
+    snapWaiting: new Set(),
+    snapBuilding: false,
   };
   rooms.set(code, room);
   return room;
@@ -179,7 +229,9 @@ export function leaveRoom(ws: WebSocket, st: CState) {
   const room = st.room;
   if (!room) return;
   room.clients.delete(ws);
-  if (st.playerId !== null) room.game.removePlayer(st.playerId);
+  room.snapWaiting.delete(ws);
+  // Выход — тоже команда: см. enterGame про локальные симуляции остальных.
+  if (st.playerId !== null) room.game.enqueue({ t: 'leave', id: st.playerId });
   st.playerId = null;
   st.room = null;
   if (!room.isPublic) {
@@ -206,14 +258,19 @@ export function leaveRoom(ws: WebSocket, st: CState) {
 export function enterGame(ws: WebSocket, st: CState, room: Room) {
   // Вход в партию — команда с ЗАРАНЕЕ выданным id: так партия воспроизводится из
   // журнала команд (id входит в команду, а не выдаётся внутри симуляции).
-  const p = room.game.addPlayer(st.name);
-  st.playerId = p.id;
+  // Вход — КОМАНДА, а не прямая правка мира. Иначе локальные симуляции остальных
+  // игроков о новичке не узнают: у них в партии его просто нет, и через пару тиков
+  // хеши расходятся. id бронируем заранее — он нужен сразу для `init`.
+  const id = room.game.reserveId();
+  room.game.enqueue({ t: 'join', id, name: st.name });
+  st.playerId = id;
   st.spawnPicked = false;
   sendInit(ws, st, room);
 }
 
 // Запуск раунда: боты на карту, всем — фаза выбора спавна с таймером
 export function beginRound(room: Room) {
+  dropSnapshot(room);
   room.phase = 'spawn';
   room.spawnTicks = (SPAWN_WAIT_S * 1000) / TICK_MS;
   // Бесконечные деньги/армия работают и в онлайне: настройка комнаты применяется ко
@@ -229,6 +286,7 @@ export function beginRound(room: Room) {
 }
 
 export function resetRoom(room: Room) {
+  dropSnapshot(room);
   room.winnerSent = null;
   room.game.reset();
   if (room.isPublic) {
