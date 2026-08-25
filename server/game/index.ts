@@ -37,6 +37,7 @@ import {
   factoryCost,
   factoryBoostPct,
   factoryIncome,
+  truckReward,
   FACTORY_COVER,
   SILO_COST,
   SILO_BUILD_TICKS,
@@ -1979,12 +1980,14 @@ export class Game {
       const fac = this.buildings.find((b) => b.cell === t.factoryCell && b.owner === t.owner && b.type === 'factory');
       if (!p?.alive || !fac) { t.done = true; any = true; continue; }
       t.traveled += TRUCK_SPEED;
-      // оплата за пройденные здания (10к, если здание ещё наше)
+      // Оплата за пройденные здания (если здание ещё наше). Размер выплаты зависит
+      // от уровня ЗАВОДА-отправителя: +10% за уровень.
+      const reward = truckReward(TRUCK_REWARD, fac.level);
       while (t.payIdx < t.payDist.length && t.traveled >= t.payDist[t.payIdx]) {
         const cell = t.payCell[t.payIdx];
         if (this.buildings.some((bd) => bd.cell === cell && bd.owner === t.owner)) {
-          p.money += TRUCK_REWARD;
-          if (!p.bot) this.tradeEarnings.push({ x: (cell % this.w) + 0.5, y: ((cell / this.w) | 0) + 0.5, amount: TRUCK_REWARD, owner: t.owner });
+          p.money += reward;
+          if (!p.bot) this.tradeEarnings.push({ x: (cell % this.w) + 0.5, y: ((cell / this.w) | 0) + 0.5, amount: reward, owner: t.owner });
         }
         t.payIdx++;
       }

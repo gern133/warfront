@@ -30,4 +30,13 @@ export function factoryIncome(level: number): number {
 export function factoryBoostPct(level: number): number {
   return 0.1 + 0.03 * Math.floor(level / 10);
 }
+// Выплата грузовика за посещённое здание растёт с уровнем завода: +10% за уровень,
+// без потолка. Раньше она была плоской (TRUCK_REWARD), и завод 30-го уровня возил
+// ровно столько же золота, сколько только что построенный, — прокачка добавляла
+// только пассивный factoryIncome и радиус усиления.
+export const TRUCK_REWARD_PER_LEVEL = 0.1;
+export function truckReward(base: number, level: number): number {
+  return Math.round(base * dpow(1 + TRUCK_REWARD_PER_LEVEL, Math.max(1, level) - 1));
+}
+
 export const FACTORY_COVER = 30000; // войск, которые «покрывает» один завод

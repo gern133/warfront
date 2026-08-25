@@ -10,7 +10,8 @@
     "build": "vite build",
     "start": "tsx server/index.ts",
     "typecheck": "tsc --noEmit",
-    "check:sim": "tsx tools/check-determinism.mjs"
+    "check:sim": "tsx tools/check-determinism.mjs",
+    "deploy": "./tools/publish.sh"
   },
   "dependencies": {
     "react": "^19.1.0",
