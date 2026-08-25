@@ -1944,6 +1944,11 @@ button {
   gap: 1px;
 }
 
+.ship-star {
+  font-size: 14px;
+  line-height: 1;
+}
+
 .ship-stripes i {
   display: block;
   width: 13px;
@@ -1979,4 +1984,16 @@ button {
   margin-top: 4px;
   font-size: 11px;
   opacity: 0.75;
+}
+
+/* Множитель пакетной постройки на слоте панели (Ctrl — 5, Shift — 10) */
+.tool-batch {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #ffcc33;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
 }

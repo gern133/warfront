@@ -22,6 +22,7 @@ export const WARSHIP_SPEED = 0.7; // скорость хода (клеток/т�
 // (полоска, звание, подсказка при наведении), и сервер.
 export {
   WARSHIP_HP,
+  WARSHIP_RANGE,
   WARSHIP_XP_HP_GAIN,
   WARSHIP_RANK_MULTS,
   WARSHIP_MAX_RANK,
@@ -32,7 +33,6 @@ export {
   WARSHIP_AA_FROM_RANK,
   WARSHIP_AA_RELOAD_TICKS,
 } from '../../shared/constants/warship';
-export const WARSHIP_RANGE = 59; // радиус стрельбы (клетки)
 export const WARSHIP_COOLDOWN = 8; // тиков между выстрелами
 export const WARSHIP_DAMAGE = 25; // урон по кораблю: 4 попадания топят (трейдер — с одного)
 export const WARSHIP_PATROL_R = 11; // радиус орбиты патруля (клетки)

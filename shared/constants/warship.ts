@@ -13,6 +13,7 @@
 // При WARSHIP_DAMAGE = 25 и базовых 100 HP четыре попадания топят новичка, то есть
 // первое звание — примерно два-три сбитых корабля, последнее — несколько десятков.
 export const WARSHIP_HP = 100; // здоровье новичка (звание «Матрос»)
+export const WARSHIP_RANGE = 59; // радиус стрельбы и зоны ПВО (клетки)
 export const WARSHIP_XP_HP_GAIN = 0.05; // +5% макс. здоровья за попадание
 
 export const WARSHIP_RANK_MULTS = [1.5, 3, 6, 10] as const;

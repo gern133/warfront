@@ -29,6 +29,10 @@ import {
   BADGE_ZOOM_MUL,
   TERRAIN,
 } from './constants';
+import {
+  WARSHIP_RANGE,
+  warshipAaCharges,
+} from '../../shared/constants/warship';
 import { fmtTroops, fmtMoney } from '../lib/format';
 import { drawShips, drawMissiles, drawFleet, drawDrones } from './render/projectiles';
 import { IconSet, ICON_URLS } from './icons';
@@ -54,6 +58,7 @@ export class GameClient {
   private lastHoverOwner = -2; // -2 = ещё не знаем; чтобы дедуплицировать вызовы onHover
   // Боевой корабль под курсором — ЛЮБОГО владельца (панель здоровья и звания).
   onWarshipHoverId: ((id: number) => void) | null = null; // -1 = курсор не на корабле
+  hoverWarshipId = -1; // читает рендер: рисует зону ПВО этого корабля
   private lastHoverWarship = -2;
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
@@ -1717,26 +1722,41 @@ export class GameClient {
       }
       ctx.globalAlpha = 1;
     }
-    // зоны покрытия ВСЕХ ПВО на карте: при выборе ракеты (там её собьют) и при
+    // Зоны покрытия ПВО на всей карте: при выборе ракеты (там её собьют) и при
     // постройке ПВО (видно, где уже есть покрытие и куда ставить). Свои — голубые,
-    // чужие — красные.
+    // чужие — красные. Кроме зениток сюда входят боевые корабли от 2 звания: они
+    // тоже перехватывают ядерки, и не показывать их было бы обманом — игрок пускал
+    // бы ракету в «чистую» зону и терял её.
     if (this.nukeKind || this.buildMode === 'sam') {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      const rr = SAM_RANGE * this.zoom;
-      for (const b of this.buildings) {
-        if (b.type !== 'sam' || b.progress < 1) continue;
-        const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
-        const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
-        if (sx < -rr || sy < -rr || sx > vw + rr || sy > vh + rr) continue;
-        const mine = b.owner === this.selfId;
+      const ring = (sx: number, sy: number, rr: number, mine: boolean, dashed: boolean) => {
+        if (sx < -rr || sy < -rr || sx > vw + rr || sy > vh + rr) return;
         ctx.beginPath();
         ctx.arc(sx, sy, rr, 0, Math.PI * 2);
         ctx.fillStyle = mine ? 'rgba(77,225,255,0.10)' : 'rgba(255,40,40,0.12)';
         ctx.fill();
         ctx.lineWidth = 1.5;
         ctx.strokeStyle = mine ? 'rgba(77,225,255,0.6)' : 'rgba(255,60,60,0.6)';
+        // подвижное ПВО (корабль) — пунктиром: зона уплывёт, полагаться на неё
+        // так же, как на стационарную зенитку, нельзя
+        if (dashed) ctx.setLineDash([7, 5]);
         ctx.stroke();
+        if (dashed) ctx.setLineDash([]);
+      };
+      const rr = SAM_RANGE * this.zoom;
+      for (const b of this.buildings) {
+        if (b.type !== 'sam' || b.progress < 1) continue;
+        const sx = this.panX + (b.cell % this.w + 0.5) * this.zoom;
+        const sy = this.panY + ((b.cell / this.w | 0) + 0.5) * this.zoom;
+        ring(sx, sy, rr, b.owner === this.selfId, false);
+      }
+      const wr = WARSHIP_RANGE * this.zoom;
+      for (const wship of this.warships) {
+        if (warshipAaCharges(wship.xp ?? 0) <= 0) continue;
+        const sx = this.panX + wship.x * this.zoom;
+        const sy = this.panY + wship.y * this.zoom;
+        ring(sx, sy, wr, wship.owner === this.selfId, true);
       }
     }
     // наведение ядерного удара: прицел + радиус поражения выбранной ракеты
@@ -1973,6 +1993,7 @@ export class GameClient {
         const wid = this.warshipUnder(e.clientX, e.clientY)?.id ?? -1;
         if (wid !== this.lastHoverWarship) {
           this.lastHoverWarship = wid;
+          this.hoverWarshipId = wid;
           this.onWarshipHoverId?.(wid);
         }
       }

@@ -20,6 +20,9 @@ import {
   cityUpgradeCost,
   cityTroopBonus,
   SILO_COST,
+  BUILD_BATCH_CTRL,
+  BUILD_BATCH_SHIFT,
+  batchCost,
   DRONE_COST,
   NUKES,
   samCost,
@@ -133,6 +136,11 @@ export default function App() {
   const [boats, setBoats] = useState<BoatPub[]>([]);
   const [buildings, setBuildings] = useState<BuildingPub[]>([]);
   const [buildMode, setBuildMode] = useState<BuildingType | null>(null);
+  // Пакетная постройка. heldBatch — модификатор, зажатый ПРЯМО СЕЙЧАС (нужен только
+  // для подписей в панели: сколько построек выберется, если сейчас нажать слот).
+  // buildLevels — сколько ещё зданий поставить в уже включённом пакете.
+  const [heldBatch, setHeldBatch] = useState(1);
+  const [buildLevels, setBuildLevels] = useState(0);
   const [nukeKind, setNukeKind] = useState<string | null>(null); // выбранная ракета для наведения
   // «Залипающий» режим бомбардировки: выбран с Shift, поэтому после пуска НЕ
   // сбрасывается — можно бить по цели за целью, не нажимая 8/9 перед каждым сбросом.
@@ -185,6 +193,8 @@ export default function App() {
   nukeKindRef.current = nukeKind;
   const nukeStickyRef = useRef(false);
   nukeStickyRef.current = nukeSticky;
+  const buildLevelsRef = useRef(0);
+  buildLevelsRef.current = buildLevels;
   const fleetModeRef = useRef(false);
   fleetModeRef.current = fleetMode;
   const droneModeRef = useRef(false);
@@ -369,8 +379,13 @@ export default function App() {
     };
     // клик в режиме постройки — ставим здание и выходим из режима
     gc.onBuild = (cell) => {
-      if (buildModeRef.current) sendMsg({ type: 'build', bt: buildModeRef.current, cell });
+      const bt = buildModeRef.current;
+      if (!bt) return;
+      // levels — сколько уровней купить сразу (Ctrl — 5, Shift — 10). Клик по своему
+      // зданию сервер сам превратит в апгрейд на столько же уровней.
+      sendMsg({ type: 'build', bt, cell, levels: Math.max(1, buildLevelsRef.current) });
       setBuildMode(null);
+      setBuildLevels(0);
     };
     // приказ выделенным боевым кораблям — идти в точку (и патрулировать её)
     gc.onFleetMove = (cell) => {
@@ -588,6 +603,7 @@ export default function App() {
         }
         if (buildModeRef.current) {
           setBuildMode(null);
+          setBuildLevels(0);
           return;
         }
         if (fleetModeRef.current) {
@@ -612,8 +628,11 @@ export default function App() {
         return;
       }
       // хоткеи панели 1–0 (в игре): здания (1 город,3 порт,4 штаб,5 шахта,6 ПВО) и ракеты (8,9)
-      if (phaseRef.current === 'playing' && /^[0-9]$/.test(e.key)) {
-        const idx = e.key === '0' ? 9 : +e.key - 1;
+      // Цифру берём из e.code, а не из e.key: с зажатым Shift раскладка отдаёт
+      // '#', '@' и прочие символы, и хоткеи пакетной постройки не срабатывали.
+      const digit = /^Digit[0-9]$/.test(e.code) ? e.code.slice(5) : /^[0-9]$/.test(e.key) ? e.key : '';
+      if (phaseRef.current === 'playing' && digit) {
+        const idx = digit === '0' ? 9 : +digit - 1;
         const nk = TOOLS[idx]?.nuke;
         if (nk) {
           // ☢️/💥 — режим наведения. С Shift режим ЗАЛИПАЕТ: после пуска остаётся
@@ -655,13 +674,37 @@ export default function App() {
         if (bt === 'silo' && !canBuildSiloRef.current) return;
         if (bt === 'sam' && !canBuildSamRef.current) return;
         if (bt) {
+          const n = e.shiftKey
+            ? BUILD_BATCH_SHIFT
+            : e.ctrlKey || e.metaKey
+              ? BUILD_BATCH_CTRL
+              : 1;
           setNukeKind(null);
           setBuildMode((bm) => (bm === bt ? null : bt));
+          setBuildLevels((left) => (left > 0 && buildModeRef.current === bt ? 0 : n));
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Ctrl/Shift, зажатые сейчас → сколько построек возьмётся при выборе слота.
+  // Отдельный слушатель, потому что подписи в панели должны меняться живьём, ещё
+  // до нажатия на слот.
+  useEffect(() => {
+    const read = (e: KeyboardEvent) =>
+      e.shiftKey ? BUILD_BATCH_SHIFT : e.ctrlKey || e.metaKey ? BUILD_BATCH_CTRL : 1;
+    const on = (e: KeyboardEvent) => setHeldBatch(read(e));
+    const off = () => setHeldBatch(1);
+    window.addEventListener('keydown', on);
+    window.addEventListener('keyup', on);
+    window.addEventListener('blur', off);
+    return () => {
+      window.removeEventListener('keydown', on);
+      window.removeEventListener('keyup', on);
+      window.removeEventListener('blur', off);
+    };
   }, []);
 
   // пришли по ссылке-приглашению и уже есть сохранённый позывной — входим сразу
@@ -744,22 +787,51 @@ export default function App() {
   // превью выделенных на атаку — от ЖИВОГО числа войск (обновляется каждый тик),
   // чтобы сразу менялось после клика, а не ждало троттлинг счётчика
   const attackTroops = Math.floor(((self?.troops ?? shownTroops) * ratio) / 100);
-  canBuildHqRef.current = shownMoney >= nextHqCost;
   // Цена порта — по СУММЕ УРОВНЕЙ портов, и постройка нового и апгрейд стоят
   // одинаково (это один и тот же шаг лестницы), поэтому проверка одна.
   const myPortLevels = buildings
     .filter((b) => b.owner === gc.selfId && b.type === 'port')
     .reduce((n, b) => n + b.level, 0);
   const nextPortCost = portCost(myPortLevels);
-  canBuildPortRef.current = shownMoney >= nextPortCost;
-  // город (клавиша 1): можно, если хватает на новый ИЛИ на апгрейд своего
-  canBuildCityRef.current = shownMoney >= Math.min(nextCityCost, cheapestCityUpg);
+  // Пакетная постройка: Ctrl — 5 зданий, Shift — 10. Пока пакет активен, показываем
+  // ОСТАТОК, иначе — то, что возьмётся при зажатом модификаторе.
+  const batchN = buildLevels > 0 ? buildLevels : heldBatch;
+  // Шаг цены по типу и сколько уже построено. Цена пакета — СУММА следующих шагов:
+  // каждая постройка дорожает, поэтому «цена × N» дала бы неправду.
+  const costStep: Partial<Record<BuildingType, (n: number) => number>> = {
+    hq: hqCost,
+    port: portCost,
+    city: cityCost,
+    factory: factoryCost,
+    sam: samCost,
+    silo: () => SILO_COST,
+  };
+  const ownedOf: Partial<Record<BuildingType, number>> = {
+    hq: myHqs,
+    port: myPortLevels,
+    city: myCities,
+    factory: myFactoryLevels,
+    sam: mySamLevels,
+    silo: mySiloLevels,
+  };
+  const batchCostOf = (bt: BuildingType, n = batchN) => {
+    const step = costStep[bt];
+    return step ? batchCost(step, ownedOf[bt] ?? 0, Math.max(1, n)) : 0;
+  };
+  canBuildHqRef.current = shownMoney >= batchCostOf('hq');
+  canBuildPortRef.current = shownMoney >= batchCostOf('port');
+  // Город (клавиша 1): можно, если хватает на новый ИЛИ на апгрейд своего. В пакете
+  // апгрейд не при чём — там ставятся только новые.
+  canBuildCityRef.current =
+    batchN > 1
+      ? shownMoney >= batchCostOf('city')
+      : shownMoney >= Math.min(nextCityCost, cheapestCityUpg);
   // завод (клавиша 2): постройка/апгрейд по сумме уровней
-  canBuildFactoryRef.current = shownMoney >= nextFactoryCost;
+  canBuildFactoryRef.current = shownMoney >= batchCostOf('factory');
   // шахта (клавиша 5): постройка и апгрейд по 1млн
-  canBuildSiloRef.current = shownMoney >= SILO_COST;
+  canBuildSiloRef.current = shownMoney >= batchCostOf('silo');
   // ПВО (клавиша 6): постройка/апгрейд по сумме уровней
-  canBuildSamRef.current = shownMoney >= nextSamCost;
+  canBuildSamRef.current = shownMoney >= batchCostOf('sam');
   // ракеты (8/9): нужна заряженная шахта и деньги на пуск конкретного типа
   nukeAffordRef.current = {
     basic: nukeReady && shownMoney >= NUKES.basic.cost,
@@ -904,12 +976,16 @@ export default function App() {
               <span className="ship-name">{owner?.name ?? '?'}</span>
               <span className="ship-rank">
                 {warshipRankName(xp)}
-                {rank > 0 && (
-                  <span className="ship-stripes">
-                    {Array.from({ length: rank }, (_, i) => (
-                      <i key={i} />
-                    ))}
-                  </span>
+                {rank >= WARSHIP_MAX_RANK ? (
+                  <span className="ship-star">★</span>
+                ) : (
+                  rank > 0 && (
+                    <span className="ship-stripes">
+                      {Array.from({ length: rank }, (_, i) => (
+                        <i key={i} />
+                      ))}
+                    </span>
+                  )
                 )}
               </span>
             </div>
@@ -1125,6 +1201,12 @@ export default function App() {
               ))}
             </div>
           )}
+          {buildMode && buildLevels > 1 && (
+            <div className="build-hint">
+              📦 Сразу <b>{buildLevels}</b> уровней за клик — цена суммарная. Клик по
+              своему зданию поднимет его на столько же. Esc — отмена
+            </div>
+          )}
           {buildMode === 'hq' && (
             <div className="build-hint">
               Кликните по своей внутренней клетке — поставить штаб (Esc — отмена)
@@ -1216,16 +1298,16 @@ export default function App() {
                     : t.fleet
                     ? nextWarshipCost
                     : t.bt === 'port'
-                      ? nextPortCost
+                      ? batchCostOf('port')
                       : t.bt === 'city'
-                        ? nextCityCost
+                        ? batchCostOf('city')
                         : t.bt === 'factory'
-                          ? nextFactoryCost
+                          ? batchCostOf('factory')
                           : t.bt === 'silo'
-                            ? SILO_COST
+                            ? batchCostOf('silo')
                             : t.bt === 'sam'
-                              ? nextSamCost
-                              : nextHqCost;
+                              ? batchCostOf('sam')
+                              : batchCostOf('hq');
                 // Для города/завода/ПОРТА/ПВО показываем СУММАРНЫЙ уровень: именно от
                 // него зависят и цена следующей постройки, и эффект. Порт был
                 // исключением — показывал количество, поэтому апгрейд не увеличивал
@@ -1281,7 +1363,7 @@ export default function App() {
                     disabled={!usable}
                     title={
                       active
-                        ? `${t.name} · ${fmtK(cost)}${afford ? '' : (nk ? ' — нужна заряженная шахта' : ' — не хватает денег')}${nk ? ' · Shift — непрерывный сброс' : ''}`
+                        ? `${t.bt && batchN > 1 ? `${batchN} × ` : ''}${t.name} · ${fmtK(cost)}${afford ? '' : (nk ? ' — нужна заряженная шахта' : ' — не хватает денег')}${nk ? ' · Shift — непрерывный сброс' : ''}${t.bt ? ` · Ctrl — ${BUILD_BATCH_CTRL} ур. сразу, Shift — ${BUILD_BATCH_SHIFT}` : ''}`
                         : `${t.name} — скоро`
                     }
                     onClick={(e) => {
@@ -1308,7 +1390,16 @@ export default function App() {
                         setNukeKind(null);
                         setFleetMode(false);
                         setDroneMode(false);
+                        // Ctrl — пакет из 5 построек, Shift — из 10. Модификатор
+                        // читаем в момент ВЫБОРА: при клике по карте Shift уже занят
+                        // выделением кораблей и непрерывным сбросом ракет.
+                        const n = e.shiftKey
+                          ? BUILD_BATCH_SHIFT
+                          : e.ctrlKey || e.metaKey
+                            ? BUILD_BATCH_CTRL
+                            : 1;
                         setBuildMode(selected ? null : t.bt);
+                        setBuildLevels(selected ? 0 : n);
                       }
                     }}
                   >
@@ -1319,6 +1410,9 @@ export default function App() {
                       <span className="tool-icon">{t.icon}</span>
                     )}
                     <span className="tool-count">{count}</span>
+                    {t.bt && batchN > 1 && (
+                      <span className="tool-batch">×{batchN}</span>
+                    )}
                     {active && <span className="tool-cost">{fmtK(cost)}</span>}
                   </button>
                 );
@@ -1608,7 +1702,7 @@ export default function App() {
                         className="ctx-btn"
                         disabled={shownMoney < SILO_COST}
                         onClick={() => {
-                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                           setUpgradeMenu(null);
                         }}
                       >
@@ -1633,7 +1727,7 @@ export default function App() {
                         className="ctx-btn"
                         disabled={shownMoney < nextSamCost}
                         onClick={() => {
-                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                          sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                           setUpgradeMenu(null);
                         }}
                       >
@@ -1656,7 +1750,7 @@ export default function App() {
                       className="ctx-btn"
                       disabled={shownMoney < cost}
                       onClick={() => {
-                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                         setUpgradeMenu(null);
                       }}
                     >
@@ -1678,7 +1772,7 @@ export default function App() {
                       className="ctx-btn"
                       disabled={shownMoney < cost}
                       onClick={() => {
-                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                         setUpgradeMenu(null);
                       }}
                     >
@@ -1701,7 +1795,7 @@ export default function App() {
                       className="ctx-btn"
                       disabled={shownMoney < cost}
                       onClick={() => {
-                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                         setUpgradeMenu(null);
                       }}
                     >
@@ -1725,7 +1819,7 @@ export default function App() {
                       className="ctx-btn"
                       disabled={shownMoney < cost}
                       onClick={() => {
-                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell });
+                        sendMsg({ type: 'upgrade', cell: upgradeMenu.cell, levels: heldBatch });
                         setUpgradeMenu(null);
                       }}
                     >

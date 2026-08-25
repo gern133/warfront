@@ -2239,13 +2239,33 @@ export class Game {
   }
 
   // Постройка здания. Возвращает код ошибки или null при успехе.
-  build(playerId: number, bt: BuildingType, cell: number): string | null {
+  /**
+   * Построить здание. `levels` — сколько уровней купить одним действием (Ctrl — 5,
+   * Shift — 10): здание ставится 1 уровня и тут же доращивается через upgrade, то
+   * есть цена — сумма шагов лестницы, а не цена первого × levels. Если денег
+   * хватило не на все уровни, останется столько, сколько оплатилось.
+   */
+  build(playerId: number, bt: BuildingType, cell: number, levels = 1): string | null {
+    const before = this.buildings.length;
+    const err = this.buildOnce(playerId, bt, cell, levels);
+    if (err) return err;
+    // Поставлено НОВОЕ здание (а не сработал апгрейд соседнего — там levels уже
+    // применён внутри). Доращиваем его тем же путём, что обычный апгрейд: цена
+    // считается по каждому шагу лестницы отдельно.
+    if (levels > 1 && this.buildings.length > before) {
+      const fresh = this.buildings[this.buildings.length - 1];
+      this.upgrade(playerId, fresh.cell, levels - 1, true);
+    }
+    return null;
+  }
+
+  private buildOnce(playerId: number, bt: BuildingType, cell: number, levels = 1): string | null {
     const p = this.players.get(playerId);
     if (!p?.alive || !p.spawned) return 'Нельзя строить';
     if (bt === 'port') {
       // клик рядом со своим портом — апгрейд, а не новый порт
       const near = this.nearbyOwnType(playerId, cell, 'port');
-      if (near) return this.upgrade(playerId, near.cell);
+      if (near) return this.upgrade(playerId, near.cell, levels);
       // притягиваем к ближайшему своему берегу (клик в радиусе PORT_RADIUS от него)
       const shore = this.canBuildPort(playerId, cell)
         ? cell
@@ -2279,7 +2299,7 @@ export class Game {
     if (bt === 'city') {
       // клик рядом со своим городом — апгрейд, а не новый город
       const near = this.nearbyOwnType(playerId, cell, 'city');
-      if (near) return this.upgrade(playerId, near.cell);
+      if (near) return this.upgrade(playerId, near.cell, levels);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       // города нельзя ставить впритык к любому другому строению
       if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
@@ -2310,7 +2330,7 @@ export class Game {
     if (bt === 'factory') {
       // клик рядом со своим заводом — апгрейд
       const near = this.nearbyOwnType(playerId, cell, 'factory');
-      if (near) return this.upgrade(playerId, near.cell);
+      if (near) return this.upgrade(playerId, near.cell, levels);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
@@ -2339,7 +2359,7 @@ export class Game {
     if (bt === 'silo') {
       // клик рядом со своей шахтой — апгрейд
       const near = this.nearbyOwnType(playerId, cell, 'silo');
-      if (near) return this.upgrade(playerId, near.cell);
+      if (near) return this.upgrade(playerId, near.cell, levels);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
@@ -2367,7 +2387,7 @@ export class Game {
     if (bt === 'sam') {
       // клик рядом со своим ПВО — апгрейд
       const near = this.nearbyOwnType(playerId, cell, 'sam');
-      if (near) return this.upgrade(playerId, near.cell);
+      if (near) return this.upgrade(playerId, near.cell, levels);
       if (!this.canBuildAt(playerId, cell)) return 'Стройте в глубине своей земли';
       if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
         return 'Слишком близко к другому зданию';
@@ -2397,7 +2417,7 @@ export class Game {
     // (а не постройка нового); максимальный/занятый штаб не мешает строить рядом
     const coverHq = this.hqCovering(playerId, cell);
     if (coverHq && coverHq.upEnd === 0 && coverHq.level < MAX_HQ_LEVEL && this.tickNo >= coverHq.readyTick)
-      return this.upgrade(playerId, coverHq.cell);
+      return this.upgrade(playerId, coverHq.cell, levels);
     if (!this.canBuildAt(playerId, cell)) return 'Здесь строить нельзя';
     // штаб нельзя ставить впритык к другому штабу/порту/городу/шахте
     if (this.buildingNear(cell, PORT_RADIUS, ['hq', 'city', 'port', 'silo', 'sam', 'factory']))
@@ -2426,13 +2446,37 @@ export class Game {
     return null;
   }
 
+  /**
+   * Прокачка на `levels` уровней одним действием. Каждый шаг считается отдельно
+   * через upgradeOnce, поэтому цена растёт как при последовательных кликах, а
+   * постройки с таймером (ПВО, шахта, штаб) складывают шаги в свою очередь.
+   *
+   * Частичный успех — это норма: если денег хватило на три уровня из пяти, три и
+   * купятся. Ошибку возвращаем только когда не прошёл ни один шаг.
+   */
+  upgrade(playerId: number, cell: number, levels = 1, allowUnbuilt = false): string | null {
+    let first: string | null = null;
+    let done = 0;
+    for (let i = 0; i < Math.max(1, levels); i++) {
+      const err = this.upgradeOnce(playerId, cell, allowUnbuilt);
+      if (err) {
+        if (first === null) first = err;
+        break;
+      }
+      done++;
+    }
+    return done > 0 ? null : first;
+  }
+
   // Прокачка: штаб (до 3 ур.) или порт (бесконечно) — оба с таймером и прогрессом
-  upgrade(playerId: number, cell: number): string | null {
+  private upgradeOnce(playerId: number, cell: number, allowUnbuilt = false): string | null {
     const p = this.players.get(playerId);
     if (!p?.alive) return 'Нельзя';
     const b = this.buildings.find((x) => x.cell === cell && x.owner === playerId);
     if (!b) return 'Здесь нет вашего здания';
-    if (this.tickNo < b.readyTick) return 'Ещё строится';
+    // allowUnbuilt — только для доращивания здания, поставленного этим же
+    // действием (Ctrl/Shift): его readyTick в будущем, но уровни уже оплачены.
+    if (!allowUnbuilt && this.tickNo < b.readyTick) return 'Ещё строится';
     if (b.type === 'port') {
       const cost = portCost(this.portLevels(playerId)); // тот же шаг цены, что и новый порт
       if (p.money < cost) return 'Недостаточно денег';
@@ -2948,6 +2992,7 @@ export class Game {
     const cy = m.ty;
     const r2 = SAM_RANGE * SAM_RANGE;
     let sam: Building | undefined;
+    let ship: Warship | undefined;
     let bestD = Infinity;
     for (const b of this.buildings) {
       if (b.type !== 'sam' || b.owner === m.owner) continue;
@@ -2961,8 +3006,23 @@ export class Game {
         sam = b;
       }
     }
-    if (!sam) return;
-    sam.reloads.push(this.tickNo + SAM_RELOAD_TICKS); // заряд израсходован
+    // Боевые корабли от 2 звания перехватывают ядерки тем же зарядом ПВО, что и
+    // дроны — но в своём радиусе стрельбы, а не в радиусе зенитки. Кто ближе к
+    // точке падения, тот и стреляет.
+    const warR2 = WARSHIP_RANGE * WARSHIP_RANGE;
+    for (const s2 of this.warships) {
+      if (s2.owner === m.owner || s2.healTicks > 0) continue;
+      if (s2.aaReloads.length >= warshipAaCharges(s2.xp)) continue;
+      const d = sq(s2.x - cx) + sq(s2.y - cy);
+      if (d <= warR2 && d < bestD) {
+        bestD = d;
+        ship = s2;
+        sam = undefined;
+      }
+    }
+    if (!sam && !ship) return;
+    if (ship) ship.aaReloads.push(this.tickNo + WARSHIP_AA_RELOAD_TICKS);
+    else sam!.reloads.push(this.tickNo + SAM_RELOAD_TICKS); // заряд израсходован
     // точка перехвата впереди по курсу ракеты (с запасом на подлёт перехватчика)
     m.killProg = Math.min(0.9, m.prog + 0.5);
     // точка встречи — где ракета будет В ВОЗДУХЕ на своей баллистической дуге
@@ -2973,10 +3033,10 @@ export class Game {
     const lift = Math.min(gdist * 0.4, 140) * dsin(Math.PI * m.killProg);
     this.missiles.push({
       id: this.nextMissileId++,
-      owner: sam.owner,
+      owner: ship ? ship.owner : sam!.owner,
       kind: 'interceptor',
-      sx: (sam.cell % this.w) + 0.5,
-      sy: ((sam.cell / this.w) | 0) + 0.5,
+      sx: ship ? ship.x : (sam!.cell % this.w) + 0.5,
+      sy: ship ? ship.y : ((sam!.cell / this.w) | 0) + 0.5,
       tx: kx,
       ty: ky - lift, // целимся выше — в точку ракеты на дуге, а не в землю
       targetCell: 0,
@@ -3522,9 +3582,9 @@ export class Game {
         this.recallBoat(i.id, i.boatId);
         return null;
       case 'build':
-        return this.build(i.id, i.bt as BuildingType, i.cell);
+        return this.build(i.id, i.bt as BuildingType, i.cell, i.levels);
       case 'upgrade':
-        return this.upgrade(i.id, i.cell);
+        return this.upgrade(i.id, i.cell, i.levels);
       case 'nuke':
         return this.launchNuke(i.id, i.cell, i.kind);
       case 'drones':

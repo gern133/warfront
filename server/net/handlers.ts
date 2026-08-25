@@ -18,6 +18,14 @@ import {
   sendSimSnapshot,
   dropSnapshot,
 } from './rooms';
+import { BUILD_BATCH_SHIFT } from '../../shared/constants/game';
+
+// Сколько уровней купить одним действием. Клиенту не доверяем: режем в 1…10, иначе
+// подделанное сообщение попыталось бы прокачать здание на тысячу уровней за тик.
+function clampLevels(n: unknown): number {
+  const v = typeof n === 'number' && Number.isFinite(n) ? Math.floor(n) : 1;
+  return Math.max(1, Math.min(BUILD_BATCH_SHIFT, v));
+}
 
 // Обработка входящего сообщения от клиента
 export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
@@ -153,13 +161,19 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
     case 'build': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.enqueue({ t: 'build', id: st.playerId, bt: msg.bt, cell: msg.cell | 0 });
+      room.game.enqueue({
+        t: 'build',
+        id: st.playerId,
+        bt: msg.bt,
+        cell: msg.cell | 0,
+        levels: clampLevels(msg.levels),
+      });
       break;
     }
     case 'upgrade': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
-      room.game.enqueue({ t: 'upgrade', id: st.playerId, cell: msg.cell | 0 });
+      room.game.enqueue({ t: 'upgrade', id: st.playerId, cell: msg.cell | 0, levels: clampLevels(msg.levels) });
       break;
     }
     case 'nuke': {

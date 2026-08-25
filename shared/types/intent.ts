@@ -21,8 +21,8 @@ export type Intent =
   | { t: 'invade'; id: number; cell: number; ratio: number }
   | { t: 'recall'; id: number; boatId: number }
   // постройки
-  | { t: 'build'; id: number; bt: string; cell: number }
-  | { t: 'upgrade'; id: number; cell: number }
+  | { t: 'build'; id: number; bt: string; cell: number; levels?: number }
+  | { t: 'upgrade'; id: number; cell: number; levels?: number }
   // оружие
   | { t: 'nuke'; id: number; cell: number; kind: string }
   | { t: 'drones'; id: number; cell: number }

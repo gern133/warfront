@@ -1,11 +1,61 @@
 import { NUKES, DRONE_BLAST_R } from '../../../shared/protocol';
-import { DRONE_DOT_SIZE_MAX, SHIP_DOT_RADIUS_MAX } from '../constants';
+import { DRONE_DOT_SIZE_MAX, SHIP_DOT_RADIUS_MAX, WARSHIP_DETAIL_ZOOM } from '../constants';
 import { playerColorCSS } from '../../../shared/color';
-import { warshipRank } from '../../../shared/constants/warship';
+import {
+  WARSHIP_MAX_RANK,
+  WARSHIP_RANGE,
+  warshipAaCharges,
+  warshipRank,
+} from '../../../shared/constants/warship';
 import type { GameClient } from '../GameClient';
 
-// Золото знаков различия боевых кораблей (обводка круга + полоски звания)
+// Золото знаков различия боевых кораблей (обводка круга + знаки звания)
 const RANK_GOLD = '#ffcc33';
+
+// Знаки различия под кораблём: 1–3 звания — золотые полоски, высшее (адмирал) —
+// звезда. Полосок специально не больше трёх: иначе с каждым новым званием их
+// пришлось бы мельчить, и они перестали бы читаться.
+function drawRankMark(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  rad: number,
+  rank: number
+) {
+  if (rank >= WARSHIP_MAX_RANK) {
+    const r = rad * 0.42;
+    if (r < 2.5) return;
+    const cy = sy + rad + r + 2;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const rr = i % 2 ? r * 0.45 : r;
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      const x = sx + Math.cos(a) * rr;
+      const y = cy + Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = RANK_GOLD;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = Math.max(1, r * 0.22);
+    ctx.stroke();
+    ctx.fill();
+    return;
+  }
+  const sh = rad * 0.15;
+  if (sh < 1.2) return;
+  const sw = rad * 1.15;
+  const gap = sh * 0.75;
+  let by = sy + rad + sh * 1.4;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(sx - sw / 2 - 1, by - 1, sw + 2, rank * (sh + gap) - gap + 2);
+  ctx.fillStyle = RANK_GOLD;
+  for (let i = 0; i < rank; i++) {
+    ctx.fillRect(sx - sw / 2, by, sw, sh);
+    by += sh + gap;
+  }
+}
 
 // ─── Рой дронов «Мопед» ──────────────────────────────────────────────────────
 // Рисуется спрайтами из кэша, а не построением путей. Раньше на КАЖДЫЙ дрон каждый
@@ -225,6 +275,12 @@ export function drawFleet(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
     }
   }
   const rad = Math.max(11, Math.min(30, z * 4.5)); // ≈×5 от трейд-кораблей
+  // LOD: подробный вид (иконка + знаки различия) только вблизи. На обзорном виде
+  // радиус упирается в минимум 11 px, и тогда иконка из 64-пиксельного спрайта
+  // масштабируется в 14 px на КАЖДЫЙ корабль каждый кадр — картинку это только
+  // засоряет, а звание всё равно не прочитать. Ранг там несёт толщина золотой
+  // обводки, поэтому «не стоковый корабль» видно и с обзора.
+  const detailed = z >= WARSHIP_DETAIL_ZOOM;
   for (const wship of gc.warships) {
     const sx = px + wship.x * z, sy = py + wship.y * z;
     if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) continue;
@@ -236,34 +292,40 @@ export function drawFleet(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
       ctx.stroke();
     }
     const rank = warshipRank(wship.xp ?? 0);
+    // Зона ПВО корабля под курсором — видна и противнику: понятно, куда не стоит
+    // вести дроны и ядерки. Рисуется только для одного корабля, поэтому на кадр
+    // это один arc. При наведении ракеты и в режиме постройки ПВО не рисуем: там
+    // уже показан общий оверлей зон по всей карте, кольцо было бы вторым поверх.
+    if (
+      wship.id === gc.hoverWarshipId &&
+      !gc.nukeKind &&
+      gc.buildMode !== 'sam' &&
+      warshipAaCharges(wship.xp ?? 0) > 0
+    ) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, WARSHIP_RANGE * z, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,204,51,0.07)';
+      ctx.fill();
+      ctx.setLineDash([7, 5]);
+      ctx.strokeStyle = 'rgba(255,204,51,0.6)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     ctx.beginPath();
     ctx.arc(sx, sy, rad, 0, Math.PI * 2);
     ctx.fillStyle = playerColorCSS(wship.owner);
     ctx.fill();
-    // Заслуженный корабль обведён золотом, а не чёрным: ранг виден даже на
-    // сильном отдалении, когда полоски ниже становятся мельче пикселя.
-    ctx.lineWidth = Math.max(2, rad * 0.18);
+    // Заслуженный корабль обведён золотом вместо чёрного, и на обзорном виде
+    // обводка ещё и толще со званием — там это единственный носитель ранга.
+    const lw = Math.max(2, rad * 0.18);
+    ctx.lineWidth = rank > 0 && !detailed ? lw + rank * 0.9 : lw;
     ctx.strokeStyle = rank > 0 ? RANK_GOLD : 'rgba(0,0,0,0.65)';
     ctx.stroke();
-    // иконка корабля (белый силуэт поверх цветного круга владельца)
-    gc.drawIcon(ctx, 'warship', sx, sy, rad * 1.3);
-    // Звание — золотые полоски под кораблём, по одной за пройденную кратность
-    // здоровья (×1.5/3/6/10). Рисуем только когда полоска шире пикселя, иначе на
-    // отдалении это тысячи fillRect ни за чем.
-    if (rank > 0) {
-      const sh = rad * 0.15;
-      if (sh >= 1.2) {
-        const sw = rad * 1.15;
-        const gap = sh * 0.75;
-        let by2 = sy + rad + sh * 1.4;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(sx - sw / 2 - 1, by2 - 1, sw + 2, rank * (sh + gap) - gap + 2);
-        ctx.fillStyle = RANK_GOLD;
-        for (let i = 0; i < rank; i++) {
-          ctx.fillRect(sx - sw / 2, by2, sw, sh);
-          by2 += sh + gap;
-        }
-      }
+    if (detailed) {
+      // иконка корабля (белый силуэт поверх цветного круга владельца)
+      gc.drawIcon(ctx, 'warship', sx, sy, rad * 1.3);
+      if (rank > 0) drawRankMark(ctx, sx, sy, rad, rank);
     }
     // полоска здоровья над кораблём (если ранен)
     if (wship.hp < 1) {

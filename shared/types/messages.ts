@@ -26,8 +26,10 @@ export type ClientMsg =
   | { type: 'attack'; cell: number; ratio: number } // сухопутная атака (ЛКМ)
   | { type: 'invade'; cell: number; ratio: number } // морское вторжение (ПКМ)
   | { type: 'recall'; boatId: number } // отозвать десант
-  | { type: 'build'; bt: BuildingType; cell: number } // построить здание
-  | { type: 'upgrade'; cell: number } // прокачать здание
+  // Построить здание. levels — сколько уровней купить сразу (Ctrl — 5, Shift — 10):
+  // здание ставится 1 уровня и тут же доращивается, цена — сумма шагов.
+  | { type: 'build'; bt: BuildingType; cell: number; levels?: number }
+  | { type: 'upgrade'; cell: number; levels?: number } // прокачать здание
   | { type: 'nuke'; cell: number; kind?: string } // пуск ракеты в точку (с ближайшей шахты)
   | { type: 'warship'; cell: number } // выпустить боевой корабль из ближайшего порта в зону
   | { type: 'drones'; cell: number } // запустить рой дронов «Мопед» по стране-владельцу клетки
