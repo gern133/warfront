@@ -15,6 +15,7 @@ import {
   MAX_HQ_LEVEL,
   shipsForLevel,
   portCost,
+  portRepairSpeed,
   cityCost,
   cityUpgradeCost,
   cityTroopBonus,
@@ -24,6 +25,14 @@ import {
   samCost,
   factoryCost,
 } from '../shared/protocol';
+import {
+  WARSHIP_MAX_RANK,
+  warshipAaCharges,
+  warshipMaxHp,
+  warshipRank,
+  warshipRankName,
+  warshipXpForRank,
+} from '../shared/constants/warship';
 import { playerColorCSS } from '../shared/color';
 import { GameClient } from './engine/GameClient';
 import { SimCheck } from './sim/simCheck';
@@ -159,6 +168,7 @@ export default function App() {
   const noticeId = useRef(0);
   const [lbExpanded, setLbExpanded] = useState(false); // лидерборд: топ-10 вместо топ-5
   const [hoverOwner, setHoverOwner] = useState(0); // владелец под курсором (для тултипа)
+  const [hoverShipId, setHoverShipId] = useState(-1); // боевой корабль под курсором
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -369,6 +379,8 @@ export default function App() {
     };
     // наведение на территорию: показываем тултип чужого игрока (не себя, не нейтраль)
     gc.onHover = (owner) => setHoverOwner(owner > 0 && owner !== gc.selfId ? owner : 0);
+    // наведение на боевой корабль: панель здоровья и звания сверху экрана
+    gc.onWarshipHoverId = setHoverShipId;
 
     // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
     // Без неё — старое поведение: через https-туннель (cloudflared/ngrok) wss на том же хосте.
@@ -871,6 +883,56 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* здоровье и звание боевого корабля под курсором */}
+      {phase === 'playing' && hoverShipId >= 0 && (() => {
+        // Корабль берём из живых данных клиента, а не из состояния React: так hp
+        // обновляется каждым кадром состояния без setState на движение мыши.
+        const ws = gc.warships.find((w) => w.id === hoverShipId);
+        if (!ws) return null;
+        const xp = ws.xp ?? 0;
+        const max = warshipMaxHp(xp);
+        const cur = Math.max(0, Math.round(ws.hp * max));
+        const rank = warshipRank(xp);
+        const nextAt = rank < WARSHIP_MAX_RANK ? warshipXpForRank(rank + 1) : 0;
+        const aa = warshipAaCharges(xp); // зарядов ПВО — считаем из xp, по сети не идёт
+        const owner = players.find((p) => p.id === ws.owner);
+        return (
+          <div className="panel ship-tip">
+            <div className="ship-tip-head">
+              <span className="ship-dot" style={{ background: playerColorCSS(ws.owner) }} />
+              <span className="ship-name">{owner?.name ?? '?'}</span>
+              <span className="ship-rank">
+                {warshipRankName(xp)}
+                {rank > 0 && (
+                  <span className="ship-stripes">
+                    {Array.from({ length: rank }, (_, i) => (
+                      <i key={i} />
+                    ))}
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="ship-hp-wrap">
+              <div
+                className="ship-hp-fill"
+                style={{
+                  width: `${Math.min(100, ws.hp * 100)}%`,
+                  background: ws.hp > 0.5 ? '#4caf50' : ws.hp > 0.25 ? '#ffb300' : '#e53935',
+                }}
+              />
+              <span className="ship-hp-nums">
+                {cur} / {max} ❤
+              </span>
+            </div>
+            <div className="ship-tip-note">
+              Попаданий: {xp}
+              {aa > 0 && ` · ПВО: ${aa} ${aa === 1 ? 'заряд' : 'заряда'}`}
+              {nextAt > 0 && ` · до звания: ${nextAt - xp}`}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* тултип противника при наведении на его территорию */}
       {phase === 'playing' && hoverOwner > 0 && (() => {
@@ -1632,7 +1694,8 @@ export default function App() {
                   <>
                     <div className="ctx-title">⚓ Торговый порт · ур. {lvl}</div>
                     <div className="ctx-note">
-                      Кораблей: {shipsForLevel(lvl)} · дальше — дороже доставка
+                      Кораблей: {shipsForLevel(lvl)} · ремонт ×
+                      {portRepairSpeed(lvl).toFixed(1)} · дальше — дороже доставка
                     </div>
                     <button
                       className="ctx-btn"

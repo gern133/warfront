@@ -117,7 +117,9 @@ export interface Warship {
   patrolX: number; // центр зоны патруля
   patrolY: number;
   patrolAng: number; // текущий угол на орбите
-  hp: number; // здоровье (0..WARSHIP_HP)
+  hp: number; // здоровье (0..warshipMaxHp(xp))
+  xp: number; // попаданий по чужим БОЕВЫМ кораблям — растит макс. hp и звание
+  aaReloads: number[]; // тики восстановления зарядов ПВО (с 2 звания, см. warshipAaCharges)
   cooldown: number; // тиков до следующего выстрела
   hits: number; // сколько пуль прилетело с прошлой полной починки (время ремонта)
   repairing: boolean; // идёт в порт чиниться / стоит на ремонте

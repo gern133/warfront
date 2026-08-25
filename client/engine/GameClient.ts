@@ -52,6 +52,9 @@ export class GameClient {
   onFleetMove: ((cell: number) => void) | null = null; // приказ выделенным кораблям
   onHover: ((owner: number) => void) | null = null; // владелец клетки под курсором (для тултипа)
   private lastHoverOwner = -2; // -2 = ещё не знаем; чтобы дедуплицировать вызовы onHover
+  // Боевой корабль под курсором — ЛЮБОГО владельца (панель здоровья и звания).
+  onWarshipHoverId: ((id: number) => void) | null = null; // -1 = курсор не на корабле
+  private lastHoverWarship = -2;
 
   // режим постройки: тип здания или null; клетка под курсором для предпросмотра
   buildMode: BuildingType | null = null;
@@ -443,6 +446,22 @@ export class GameClient {
   }
 
   // id своего боевого корабля под курсором (экранные координаты) или -1
+  // Корабль под курсором любого владельца — для панели здоровья/звания. Считаем
+  // на mousemove, поэтому сперва отбрасываем всё за экраном, как в отрисовке.
+  warshipUnder(clientX: number, clientY: number): WarshipPub | null {
+    const rad = Math.max(11, Math.min(30, this.zoom * 4.5)) + 5;
+    let best: WarshipPub | null = null;
+    let bestD = rad * rad;
+    for (const wship of this.warships) {
+      const sx = this.panX + wship.x * this.zoom;
+      const sy = this.panY + wship.y * this.zoom;
+      if (Math.abs(sx - clientX) > rad || Math.abs(sy - clientY) > rad) continue;
+      const d = (sx - clientX) ** 2 + (sy - clientY) ** 2;
+      if (d < bestD) { bestD = d; best = wship; }
+    }
+    return best;
+  }
+
   myWarshipUnder(clientX: number, clientY: number): number {
     const rad = Math.max(11, Math.min(30, this.zoom * 4.5)) + 5;
     let best = -1, bestD = rad * rad;
@@ -1948,6 +1967,14 @@ export class GameClient {
         const c = cellUnder(e);
         const o = c >= 0 ? this.owners[c] : 0;
         if (o !== this.lastHoverOwner) { this.lastHoverOwner = o; this.onHover?.(o); }
+        // Корабль под курсором. Сообщаем ТОЛЬКО о смене id: иначе на каждое
+        // движение мыши уходил бы setState в React. Актуальные hp/звание панель
+        // берёт из gc.warships сама при очередной перерисовке.
+        const wid = this.warshipUnder(e.clientX, e.clientY)?.id ?? -1;
+        if (wid !== this.lastHoverWarship) {
+          this.lastHoverWarship = wid;
+          this.onWarshipHoverId?.(wid);
+        }
       }
       if (!down) return;
       if (selecting && this.selBox) {

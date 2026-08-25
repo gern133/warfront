@@ -29,6 +29,13 @@ export const PORT_SHIP_INTERVAL = 15; // судно раз в 1.5с, пока е
 export const TRADE_BASE_VALUE = 3000; // деньги за заход в порт (1 ур.)
 export const PORT_RADIUS = 10; // клик в этом радиусе от порта — апгрейд, а не новый
 
+// Ремонт боевых кораблей: чем выше уровень порта, тем быстрее он их починит.
+// +10% скорости за уровень, без потолка (1 ур. — базовая скорость, 11 ур. — вдвое).
+export const REPAIR_SPEED_PER_LEVEL = 0.1;
+export function portRepairSpeed(level: number): number {
+  return 1 + Math.max(0, level - 1) * REPAIR_SPEED_PER_LEVEL;
+}
+
 export function tradeValue(level: number): number {
   // +5% за уровень, без потолка: «прайс доставки» растёт вечно, но от низкой базы
   return TRADE_BASE_VALUE * dpow(1.05, level - 1);

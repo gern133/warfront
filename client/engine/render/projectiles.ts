@@ -1,7 +1,11 @@
 import { NUKES, DRONE_BLAST_R } from '../../../shared/protocol';
 import { DRONE_DOT_SIZE_MAX, SHIP_DOT_RADIUS_MAX } from '../constants';
 import { playerColorCSS } from '../../../shared/color';
+import { warshipRank } from '../../../shared/constants/warship';
 import type { GameClient } from '../GameClient';
+
+// Золото знаков различия боевых кораблей (обводка круга + полоски звания)
+const RANK_GOLD = '#ffcc33';
 
 // ─── Рой дронов «Мопед» ──────────────────────────────────────────────────────
 // Рисуется спрайтами из кэша, а не построением путей. Раньше на КАЖДЫЙ дрон каждый
@@ -231,15 +235,36 @@ export function drawFleet(gc: GameClient, ctx: CanvasRenderingContext2D, dpr: nu
       ctx.lineWidth = 2.5;
       ctx.stroke();
     }
+    const rank = warshipRank(wship.xp ?? 0);
     ctx.beginPath();
     ctx.arc(sx, sy, rad, 0, Math.PI * 2);
     ctx.fillStyle = playerColorCSS(wship.owner);
     ctx.fill();
+    // Заслуженный корабль обведён золотом, а не чёрным: ранг виден даже на
+    // сильном отдалении, когда полоски ниже становятся мельче пикселя.
     ctx.lineWidth = Math.max(2, rad * 0.18);
-    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeStyle = rank > 0 ? RANK_GOLD : 'rgba(0,0,0,0.65)';
     ctx.stroke();
     // иконка корабля (белый силуэт поверх цветного круга владельца)
     gc.drawIcon(ctx, 'warship', sx, sy, rad * 1.3);
+    // Звание — золотые полоски под кораблём, по одной за пройденную кратность
+    // здоровья (×1.5/3/6/10). Рисуем только когда полоска шире пикселя, иначе на
+    // отдалении это тысячи fillRect ни за чем.
+    if (rank > 0) {
+      const sh = rad * 0.15;
+      if (sh >= 1.2) {
+        const sw = rad * 1.15;
+        const gap = sh * 0.75;
+        let by2 = sy + rad + sh * 1.4;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(sx - sw / 2 - 1, by2 - 1, sw + 2, rank * (sh + gap) - gap + 2);
+        ctx.fillStyle = RANK_GOLD;
+        for (let i = 0; i < rank; i++) {
+          ctx.fillRect(sx - sw / 2, by2, sw, sh);
+          by2 += sh + gap;
+        }
+      }
+    }
     // полоска здоровья над кораблём (если ранен)
     if (wship.hp < 1) {
       const bw = rad * 2, bh = Math.max(3, rad * 0.2);

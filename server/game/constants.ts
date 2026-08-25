@@ -18,7 +18,20 @@ export const MAX_BOATS = 3;
 
 // Боевые корабли
 export const WARSHIP_SPEED = 0.7; // скорость хода (клеток/тик)
-export const WARSHIP_HP = 100; // здоровье
+// Здоровье, опыт и звания боевых кораблей живут в shared: их считает и клиент
+// (полоска, звание, подсказка при наведении), и сервер.
+export {
+  WARSHIP_HP,
+  WARSHIP_XP_HP_GAIN,
+  WARSHIP_RANK_MULTS,
+  WARSHIP_MAX_RANK,
+  warshipHpMult,
+  warshipMaxHp,
+  warshipRank,
+  warshipAaCharges,
+  WARSHIP_AA_FROM_RANK,
+  WARSHIP_AA_RELOAD_TICKS,
+} from '../../shared/constants/warship';
 export const WARSHIP_RANGE = 59; // радиус стрельбы (клетки)
 export const WARSHIP_COOLDOWN = 8; // тиков между выстрелами
 export const WARSHIP_DAMAGE = 25; // урон по кораблю: 4 попадания топят (трейдер — с одного)

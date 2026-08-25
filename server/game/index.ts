@@ -22,6 +22,7 @@ import {
   WarshipPub,
   TradeEarn,
   portCost,
+  portRepairSpeed,
   PORT_BUILD_TICKS,
   PORT_SHIP_INTERVAL,
   PORT_RADIUS,
@@ -78,6 +79,9 @@ import {
   TRUCK_INTERVAL,
   WARSHIP_SPEED,
   WARSHIP_HP,
+  warshipMaxHp,
+  warshipAaCharges,
+  WARSHIP_AA_RELOAD_TICKS,
   WARSHIP_RANGE,
   WARSHIP_COOLDOWN,
   WARSHIP_DAMAGE,
@@ -1443,6 +1447,8 @@ export class Game {
       patrolY: wy + 0.5,
       patrolAng: 0,
       hp: WARSHIP_HP,
+      xp: 0,
+      aaReloads: [],
       cooldown: 0,
       hits: 0,
       repairing: false,
@@ -1487,23 +1493,48 @@ export class Game {
   private stepWarships() {
     const R2 = WARSHIP_RANGE * WARSHIP_RANGE;
     const w = this.w, h = this.h;
+    // Готовые порты по владельцу. Раньше nearOwnPort() на КАЖДЫЙ корабль (и не по
+    // одному разу за тик) прогонял nearestOwnPort, а тот — полный проход по всем
+    // зданиям: O(кораблей × зданий) за тик. Теперь один проход и поиск только по
+    // портам самого владельца.
+    const readyPorts = new Map<number, Building[]>();
+    for (const b of this.buildings) {
+      if (b.type !== 'port' || this.tickNo < b.readyTick) continue;
+      const list = readyPorts.get(b.owner);
+      if (list) list.push(b);
+      else readyPorts.set(b.owner, [b]);
+    }
     for (const s of this.warships) {
       const p = this.players.get(s.owner);
       if (!p?.alive) { s.hp = 0; continue; }
-      // рядом ли СВОЙ порт (чинимся только в своём порту; цель могла быть
-      // захвачена, пока корабль плыл — тогда ремонт не начинаем / прерываем)
-      const nearOwnPort = () => {
-        const port = this.nearestOwnPort(s.owner, s.x, s.y);
-        if (port < 0) return false;
-        const px = port % w, py = (port / w) | 0;
-        return sq(px - s.x) + sq(py - s.y) <= 26 * 26;
+      // восстановление зарядов ПВО — до любых ранних continue, иначе у корабля на
+      // ремонте заряды повисли бы навсегда
+      if (s.aaReloads.length && s.aaReloads.some((t) => this.tickNo >= t)) {
+        s.aaReloads = s.aaReloads.filter((t) => this.tickNo < t);
+      }
+      // Ближайший СВОЙ порт, если корабль уже у него (чинимся только в своём
+      // порту; его могли захватить, пока корабль плыл — тогда ремонт не начинаем
+      // и прерываем). Возвращаем здание, а не клетку: нужен уровень порта, от
+      // него зависит скорость починки.
+      const dockedPort = (): Building | null => {
+        const list = readyPorts.get(s.owner);
+        if (!list) return null;
+        let best: Building | null = null;
+        let bestD = 26 * 26;
+        for (const b of list) {
+          const d = sq((b.cell % w) - s.x) + sq(((b.cell / w) | 0) - s.y);
+          if (d <= bestD) { bestD = d; best = b; }
+        }
+        return best;
       };
+      const nearOwnPort = () => dockedPort() !== null;
       // стоим в порту на ремонте — плавно восполняем hp, потом обратно в зону
       if (s.healTicks > 0) {
         if (!nearOwnPort()) { s.healTicks = 0; s.repairing = false; s.moving = false; continue; } // порт уже не наш — прекращаем
-        s.hp = Math.min(WARSHIP_HP, s.hp + s.healRate);
+        const full = warshipMaxHp(s.xp);
+        s.hp = Math.min(full, s.hp + s.healRate);
         if (--s.healTicks <= 0) {
-          s.hp = WARSHIP_HP;
+          s.hp = full;
           s.hits = 0;
           s.repairing = false;
           // возвращаемся патрулировать свою зону
@@ -1519,9 +1550,14 @@ export class Game {
           if (s.repairing) {
             // дошли до цели — встаём на ремонт ТОЛЬКО если это по-прежнему свой
             // порт (его могли захватить, пока плыли); иначе просто патрулируем
-            if (nearOwnPort()) {
-              s.healTicks = Math.max(REPAIR_TICKS_PER_HIT, s.hits * REPAIR_TICKS_PER_HIT);
-              s.healRate = (WARSHIP_HP - s.hp) / s.healTicks;
+            const dock = dockedPort();
+            if (dock) {
+              // Чем выше уровень порта, тем быстрее ремонт: длительность делится
+              // на portRepairSpeed(level). Минимум один тик, иначе healRate уйдёт
+              // в бесконечность.
+              const base = Math.max(REPAIR_TICKS_PER_HIT, s.hits * REPAIR_TICKS_PER_HIT);
+              s.healTicks = Math.max(1, Math.round(base / portRepairSpeed(dock.level)));
+              s.healRate = (warshipMaxHp(s.xp) - s.hp) / s.healTicks;
             } else {
               s.repairing = false;
             }
@@ -1613,11 +1649,17 @@ export class Game {
     if (!this.bullets.length) return;
     let boatKilled = false;
     let droneKilled = false;
+    // Индекс боевых кораблей по id: нужен и для цели, и для стрелка (опыт за
+    // попадание). Раньше цель искалась линейным find на КАЖДУЮ пулю, т.е.
+    // O(пуль × кораблей) за тик; теперь один проход по кораблям и Map.get.
+    const warById = new Map<number, Warship>();
+    for (const s of this.warships) warById.set(s.id, s);
     for (const b of this.bullets) {
       // цель по типу; если её уже нет (потоплена / десант успел высадиться) — пуля мажет
+      const war = b.targetKind === 'war' ? warById.get(b.targetId) : undefined;
       const tgt =
         b.targetKind === 'war'
-          ? this.warships.find((s) => s.id === b.targetId && s.healTicks <= 0) // на починке — неуязвим
+          ? war && war.healTicks <= 0 ? war : undefined // на починке — неуязвим
           : b.targetKind === 'boat'
             ? this.boats.find((s) => s.id === b.targetId && s.troops >= 1)
             : b.targetKind === 'drone'
@@ -1632,8 +1674,19 @@ export class Game {
           const s = tgt as Warship;
           s.hp -= b.dmg;
           s.hits++;
+          // Попадание по БОЕВОМУ кораблю — опыт стрелявшему: растёт максимальное
+          // здоровье, на кратностях ×1.5/3/6/10 приходит звание. Здоровому кораблю
+          // добавляем прибавку и в текущее hp, иначе он «ранился» бы от своего же
+          // повышения. Ищем стрелка в том же индексе, что и цель — без нового
+          // прохода по кораблям.
+          const shooter = warById.get(b.fromId);
+          if (shooter && shooter.owner !== s.owner) {
+            const before = warshipMaxHp(shooter.xp);
+            shooter.xp++;
+            shooter.hp = Math.min(warshipMaxHp(shooter.xp), shooter.hp + (warshipMaxHp(shooter.xp) - before));
+          }
           // при ≤50% и если ещё не чинится — сам плывёт в ближайший свой порт
-          if (!s.repairing && s.hp > 0 && s.hp <= WARSHIP_HP * WARSHIP_REPAIR_AT) {
+          if (!s.repairing && s.hp > 0 && s.hp <= warshipMaxHp(s.xp) * WARSHIP_REPAIR_AT) {
             const port = this.nearestOwnPort(s.owner, s.x, s.y);
             if (port >= 0) {
               const route = this.warRoute(Math.round(s.x) | 0, Math.round(s.y) | 0, port % this.w, (port / this.w) | 0);
@@ -1678,7 +1731,10 @@ export class Game {
       owner: s.owner,
       x: +s.x.toFixed(1),
       y: +s.y.toFixed(1),
-      hp: Math.max(0, Math.min(1, s.hp / WARSHIP_HP)),
+      hp: Math.max(0, Math.min(1, s.hp / warshipMaxHp(s.xp))),
+      // xp опускаем у новичков: у большинства кораблей его нет, а поле уходит
+      // на каждого в каждом кадре состояния
+      xp: s.xp || undefined,
     }));
   }
 
@@ -3062,6 +3118,13 @@ export class Game {
     if (!this.drones.length) return;
     const w = this.w;
     const samR2 = SAM_RANGE * SAM_RANGE;
+    const warR2 = WARSHIP_RANGE * WARSHIP_RANGE;
+    // Корабли, способные сбить дрон прямо сейчас: со 2 звания и со свободным
+    // зарядом. Собираем ОДИН раз — у подавляющего большинства кораблей звания нет
+    // вовсе, поэтому обычно список пуст и цикл по дронам его даже не трогает.
+    const aaShips = this.warships.filter(
+      (s) => s.healTicks <= 0 && s.aaReloads.length < warshipAaCharges(s.xp)
+    );
     let dead = false;
     // Новая точка полёта: случайная ещё ЗАНЯТАЯ клетка цели, ПОДАЛЬШЕ от текущей
     // позиции (≥ SPREAD) — чтобы дроны разлетались, а не кучковались в одном месте.
@@ -3140,6 +3203,30 @@ export class Game {
             });
             break;
           }
+        }
+      }
+      // Боевые корабли от 2 звания добивают то, что не достала зенитка: один
+      // перехватчик на дрон, вместимость зарядов растёт со званием. d.doomed не
+      // даёт двум стрелкам тратить заряды на одну цель.
+      if (!d.doomed && aaShips.length) {
+        for (const ws of aaShips) {
+          if (ws.owner === d.owner) continue;
+          if (this.relation(ws.owner, d.owner) === 'allied') continue;
+          if (ws.aaReloads.length >= warshipAaCharges(ws.xp)) continue; // заряд ушёл этим же тиком
+          if (sq(ws.x - d.x) + sq(ws.y - d.y) > warR2) continue;
+          ws.aaReloads.push(this.tickNo + WARSHIP_AA_RELOAD_TICKS);
+          d.doomed = true;
+          this.bullets.push({
+            id: this.nextBulletId++,
+            owner: ws.owner,
+            fromId: ws.id, // опыт за дрон не начисляется: только за боевые корабли
+            x: ws.x,
+            y: ws.y,
+            targetId: d.id,
+            targetKind: 'drone',
+            dmg: 1,
+          });
+          break;
         }
       }
     }
