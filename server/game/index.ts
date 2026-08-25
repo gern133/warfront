@@ -73,6 +73,7 @@ import type { Intent, IntentResult } from '../../shared/types/intent';
 import { GameSnapshot, Player, Building, TradeShip, Missile, Attack, Boat, Warship, Bullet, Truck, Drone } from './types';
 import {
   TRADE_SPEED,
+  TRADE_KILL_BOUNTY_FRAC,
   BOAT_SPEED,
   MAX_BOATS,
   TRUCK_SPEED,
@@ -1654,9 +1655,7 @@ export class Game {
           droneKilled = true;
           this.droneBomb(dr); // падает и взрывается с уроном по области, как сброшенная бомба
         } else {
-          const ts = tgt as TradeShip;
-          ts.done = true;
-          this.noticeTradeLost(ts.owner, b.owner, ts.x, ts.y); // место гибели ≈ где корабль-убийца
+          this.sinkTradeShip(tgt as TradeShip, b.owner);
         }
         b.dmg = 0; // пуля отработала
       } else {
@@ -2555,6 +2554,36 @@ export class Game {
     this.relNotices.push({ to: shipOwner, kind: 'trade', name: this.playerName(attacker), x, y });
   }
 
+  // Потопление трейдера: помечаем на удаление, уведомляем владельца и платим
+  // убийце долю от уже провезённого груза.
+  //
+  // Доля пути считается по обоим плечам рейса, т.к. рейс и платит дважды:
+  //   туда:    traveled                       (0 … totalLen)
+  //   обратно: totalLen + (totalLen - traveled)  (totalLen … 2·totalLen)
+  // Груз из Дубая в Калифорнию за 100k, потоплен на середине пути туда →
+  // carried = 0.5 → 0.3 · 100k · 0.5 = 15k.
+  //
+  // Всплывашку кладём в тот же поток tradeEarnings, что и заработок портов:
+  // клиент рисует её существующим moneyPops в точке гибели корабля, новых полей
+  // в протоколе не появляется.
+  private sinkTradeShip(s: TradeShip, attacker: number) {
+    s.done = true;
+    this.noticeTradeLost(s.owner, attacker, s.x, s.y);
+
+    if (attacker <= 0 || attacker === s.owner) return;
+    const killer = this.players.get(attacker);
+    if (!killer?.alive) return;
+
+    const legs = s.returning ? s.totalLen + (s.totalLen - s.traveled) : s.traveled;
+    const carried = s.totalLen > 0 ? legs / s.totalLen : 0;
+    const bounty = Math.round(s.payout * carried * TRADE_KILL_BOUNTY_FRAC);
+    if (bounty <= 0) return;
+
+    killer.money += bounty;
+    // ботам всплывашки не считаем — их никто не видит
+    if (!killer.bot) this.tradeEarnings.push({ x: s.x, y: s.y, amount: bounty, owner: attacker });
+  }
+
   acceptAlliance(a: number, b: number) {
     this.setRel(this.hostiles, a, b, false); // союз снимает вражду
     this.setRel(this.allies, a, b, true);
@@ -3275,7 +3304,7 @@ export class Game {
     const bx = cx + 0.5, by = cy + 0.5;
     let sunkWar = false, sunkTrade = false, sunkBoat = false;
     for (const s of this.warships) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.hp = 0; sunkWar = true; }
-    for (const s of this.tradeShips) if (sq(s.x - bx) + sq(s.y - by) <= R2) { s.done = true; sunkTrade = true; this.noticeTradeLost(s.owner, attacker, s.x, s.y); }
+    for (const s of this.tradeShips) if (sq(s.x - bx) + sq(s.y - by) <= R2) { this.sinkTradeShip(s, attacker); sunkTrade = true; }
     for (const b of this.boats) if (sq(b.x - bx) + sq(b.y - by) <= R2) { b.troops = 0; sunkBoat = true; }
     if (sunkWar) this.warships = this.warships.filter((s) => s.hp > 0);
     if (sunkTrade) this.tradeShips = this.tradeShips.filter((s) => !s.done);
