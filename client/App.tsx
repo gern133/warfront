@@ -177,6 +177,7 @@ export default function App() {
   const [lbExpanded, setLbExpanded] = useState(false); // лидерборд: топ-10 вместо топ-5
   const [hoverOwner, setHoverOwner] = useState(0); // владелец под курсором (для тултипа)
   const [hoverShipId, setHoverShipId] = useState(-1); // боевой корабль под курсором
+  const [selectedShips, setSelectedShips] = useState<number[]>([]); // выделенный флот
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const miniRef = useRef<HTMLCanvasElement>(null);
@@ -195,6 +196,8 @@ export default function App() {
   nukeStickyRef.current = nukeSticky;
   const buildLevelsRef = useRef(0);
   buildLevelsRef.current = buildLevels;
+  const selectedShipsRef = useRef<number[]>([]);
+  selectedShipsRef.current = selectedShips;
   const fleetModeRef = useRef(false);
   fleetModeRef.current = fleetMode;
   const droneModeRef = useRef(false);
@@ -396,6 +399,8 @@ export default function App() {
     gc.onHover = (owner) => setHoverOwner(owner > 0 && owner !== gc.selfId ? owner : 0);
     // наведение на боевой корабль: панель здоровья и звания сверху экрана
     gc.onWarshipHoverId = setHoverShipId;
+    // выделение флота живёт в движке — держим копию в состоянии для кнопок над ним
+    gc.onWarshipSelect = setSelectedShips;
 
     // VITE_WS_URL — для раздельного хостинга (клиент на GitHub Pages, сервер отдельно).
     // Без неё — старое поведение: через https-туннель (cloudflared/ngrok) wss на том же хосте.
@@ -595,6 +600,14 @@ export default function App() {
   // Escape: сначала отменяет режим постройки, затем из игры/лобби — в меню
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // R — отправить выделенный флот чиниться (RTS-привычка). Раскладку не
+      // проверяем через e.key: с русской он даёт 'к', поэтому смотрим e.code.
+      if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (phaseRef.current === 'playing' && selectedShipsRef.current.length) {
+          sendMsg({ type: 'warshipRepair', ids: selectedShipsRef.current });
+          return;
+        }
+      }
       if (e.key === 'Escape') {
         if (nukeKindRef.current) {
           setNukeKind(null);
@@ -616,6 +629,7 @@ export default function App() {
         }
         if (gc.selectedWarships.size) {
           gc.selectedWarships.clear(); // снять выделение флота
+          gc.emitSelection();
           return;
         }
         // в игре Esc — переключатель паузы (второй раз продолжает игру)
@@ -1201,6 +1215,33 @@ export default function App() {
               ))}
             </div>
           )}
+          {selectedShips.length > 0 && (() => {
+            // Кнопка ремонта: считаем, сколько из выделенных реально побиты и не
+            // чинятся уже. hp приходит долей от актуального максимума, поэтому
+            // «побит» — это просто hp < 1.
+            const sel = gc.warships.filter((w) => selectedShips.includes(w.id));
+            const damaged = sel.filter((w) => w.hp < 1).length;
+            const canRepair = damaged > 0 && myPorts > 0;
+            return (
+              <div className="panel fleet-actions">
+                <span className="fleet-count">🚢 {sel.length}</span>
+                <button
+                  className="fleet-btn"
+                  disabled={!canRepair}
+                  title={
+                    myPorts === 0
+                      ? 'Нет своего порта — чиниться негде'
+                      : damaged === 0
+                        ? 'Все выделенные корабли целы'
+                        : `Отправить ${damaged} в ближайший свой порт (R)`
+                  }
+                  onClick={() => sendMsg({ type: 'warshipRepair', ids: selectedShips })}
+                >
+                  🛠 На ремонт{damaged > 0 ? ` · ${damaged}` : ''}
+                </button>
+              </div>
+            );
+          })()}
           {buildMode && buildLevels > 1 && (
             <div className="build-hint">
               📦 Сразу <b>{buildLevels}</b> уровней за клик — цена суммарная. Клик по

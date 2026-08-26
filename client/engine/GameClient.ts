@@ -78,6 +78,19 @@ export class GameClient {
   droneFlashes: { x: number; y: number; t0: number }[] = []; // вспышки взрывов дронов
   warships: WarshipPub[] = []; // боевые корабли (читает engine/render)
   selectedWarships = new Set<number>(); // выделенные свои корабли (RTS-выделение)
+  // Выделение живёт в движке (мутируется из обработчиков мыши), а кнопки над ним
+  // рисует React — поэтому о каждом изменении сообщаем наружу. Дедуплицируем по
+  // размеру и составу, чтобы не дёргать setState на каждое движение мыши.
+  onWarshipSelect: ((ids: number[]) => void) | null = null;
+  private lastSelectionKey = '';
+
+  emitSelection() {
+    const ids = [...this.selectedWarships];
+    const key = ids.join(',');
+    if (key === this.lastSelectionKey) return;
+    this.lastSelectionKey = key;
+    this.onWarshipSelect?.(ids);
+  }
   bullets: number[] = []; // пули кораблей в полёте: [x0,y0,x1,y1,...] (клетки)
   selBox: { x0: number; y0: number; x1: number; y1: number } | null = null; // рамка выделения
   private hoverCell = -1;
@@ -442,6 +455,7 @@ export class GameClient {
     if (this.selectedWarships.size) {
       const live = new Set(this.warships.map((w) => w.id));
       for (const id of [...this.selectedWarships]) if (!live.has(id)) this.selectedWarships.delete(id);
+      this.emitSelection();
     }
   }
 
@@ -1945,6 +1959,11 @@ export class GameClient {
         drawMissiles(this, ctx, dpr);
         this.drawMinimap(mapChanged);
       }
+      // Выделение флота отдаём в React раз в кадр. Точечные вызовы из обработчиков
+      // мыши остались (реакция мгновенная), но это страховка: любой путь, который
+      // меняет selectedWarships — включая новые — доедет до кнопок сам. Дедуп по
+      // составу внутри emitSelection не даёт лишних setState.
+      this.emitSelection();
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -2023,6 +2042,7 @@ export class GameClient {
             if (this.selectedWarships.has(id)) this.selectedWarships.delete(id);
             else this.selectedWarships.add(id);
           }
+          this.emitSelection();
         } else {
           // Shift+рамка — добавить корабли в рамке к выделению
           for (const wship of this.warships) {
@@ -2031,6 +2051,7 @@ export class GameClient {
             const sy = this.panY + wship.y * this.zoom;
             if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) this.selectedWarships.add(wship.id);
           }
+          this.emitSelection();
         }
         this.selBox = null;
         selecting = false;
@@ -2044,6 +2065,7 @@ export class GameClient {
         if (id >= 0) {
           this.selectedWarships.clear();
           this.selectedWarships.add(id);
+          this.emitSelection();
         } else {
           const cell = cellUnder(e);
           if (cell >= 0) {
@@ -2053,7 +2075,10 @@ export class GameClient {
               this.onFleetMove?.(cell);
             } else {
               // клик по суше/территории (или без выделения) — сбрасываем флот и обычное действие (атака)
-              if (this.selectedWarships.size) this.selectedWarships.clear();
+              if (this.selectedWarships.size) {
+                this.selectedWarships.clear();
+                this.emitSelection();
+              }
               this.onCellClick?.(cell, e.clientX, e.clientY, e.shiftKey);
             }
           }

@@ -1479,6 +1479,37 @@ export class Game {
     }
   }
 
+  /**
+   * Принудительно отправить корабли на ремонт в ближайший свой порт — ручной
+   * вариант того же, что делается автоматически при hp ≤ WARSHIP_REPAIR_AT.
+   * Целые корабли и те, что уже стоят на ремонте, пропускаем: посылать их в порт
+   * нечего, а приказ выглядел бы как баг («корабль уплыл сам по себе»).
+   */
+  repairWarships(playerId: number, ids: number[]) {
+    if (!ids?.length) return;
+    const set = new Set(ids);
+    for (const s of this.warships) {
+      if (s.owner !== playerId || !set.has(s.id)) continue;
+      if (s.healTicks > 0 || s.repairing) continue; // уже чинится или уже плывёт чиниться
+      if (s.hp >= warshipMaxHp(s.xp)) continue; // целый
+      const port = this.nearestOwnPort(s.owner, s.x, s.y);
+      if (port < 0) continue; // портов нет — чиниться негде
+      const route = this.warRoute(
+        Math.round(s.x) | 0,
+        Math.round(s.y) | 0,
+        port % this.w,
+        (port / this.w) | 0
+      );
+      if (!route) continue;
+      s.repairing = true;
+      s.path = route.path;
+      s.cum = route.cum;
+      s.totalLen = route.totalLen;
+      s.traveled = 0;
+      s.moving = true;
+    }
+  }
+
   // ближайший свой достроенный порт к точке (x,y), клетка или -1
   private nearestOwnPort(playerId: number, x: number, y: number): number {
     let port = -1, bestD = Infinity;
@@ -3596,6 +3627,9 @@ export class Game {
         return this.launchWarship(i.id, i.cell);
       case 'warshipMove':
         this.moveWarships(i.id, i.ids, i.cell);
+        return null;
+      case 'warshipRepair':
+        this.repairWarships(i.id, i.ids);
         return null;
       case 'propose': {
         const res = this.proposeAlliance(i.id, i.cell);

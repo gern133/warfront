@@ -28,6 +28,7 @@ export type Intent =
   | { t: 'drones'; id: number; cell: number }
   | { t: 'warship'; id: number; cell: number }
   | { t: 'warshipMove'; id: number; ids: number[]; cell: number }
+  | { t: 'warshipRepair'; id: number; ids: number[] }
   // дипломатия
   | { t: 'propose'; id: number; cell: number }
   | { t: 'allianceResponse'; id: number; from: number; accept: boolean }

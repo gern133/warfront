@@ -194,6 +194,16 @@ export function handleMessage(ws: WebSocket, st: CState, msg: ClientMsg) {
       room.game.enqueue({ t: 'drones', id: st.playerId, cell: msg.cell | 0 });
       break;
     }
+    case 'warshipRepair': {
+      const room = st.room;
+      if (!room || room.phase !== 'running' || st.playerId === null) return;
+      room.game.enqueue({
+        t: 'warshipRepair',
+        id: st.playerId,
+        ids: (msg.ids || []).map((n) => n | 0),
+      });
+      break;
+    }
     case 'warshipMove': {
       const room = st.room;
       if (!room || room.phase !== 'running' || st.playerId === null) return;
