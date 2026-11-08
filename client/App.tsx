@@ -939,10 +939,10 @@ export default function App() {
                     <span className="dot" style={{ background: playerColorCSS(p.id) }} />
                     <span className="lb-name">
                       {p.name}
-                      {p.bot && !p.strong ? ' 🤖' : ''}
+                      {p.bot && !p.strong && <span className="lb-bot">бот</span>}
                     </span>
                     <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
-                    <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
+                    <span className="lb-stat">{fmtK(stat?.max ?? p.maxTroops)}</span>
                     <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
                   </div>
                 );
@@ -1293,9 +1293,10 @@ export default function App() {
           )}
           <div className="panel hud">
             <div className="hud-top">
-              <span className="growth-chip">
-                🪖 {growthView.rate >= 0 ? '+' : ''}
-                {growthView.rate}/с
+              <span className="growth-chip" title="Прирост войск в секунду">
+                {growthView.rate >= 0 ? '+' : ''}
+                {fmtK(growthView.rate)}
+                <small>/с</small>
               </span>
               <div className="troop-wrap">
                 <div
@@ -1306,7 +1307,7 @@ export default function App() {
                   }}
                 />
                 <span className="troop-nums">
-                  {fmtK(shownTroops)} / {fmtK(self.maxTroops)} 🧍
+                  {fmtK(shownTroops)} <small>из {fmtK(self.maxTroops)}</small>
                   {committed > 0 && <span className="committed"> ⚔ {fmtK(committed)}</span>}
                 </span>
               </div>
@@ -1324,6 +1325,8 @@ export default function App() {
                 step={5}
                 defaultValue={ratio}
                 onInput={(e) => setRatio(+(e.target as HTMLInputElement).value)}
+                // доля заполнения дорожки слева от ползунка (5…100 → 0…100%)
+                style={{ '--fill': `${((ratio - 5) / 95) * 100}%` } as React.CSSProperties}
               />
             </label>
 

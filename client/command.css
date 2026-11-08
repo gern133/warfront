@@ -1,0 +1,742 @@
+/* ==========================================================================
+   Обновление поверх styles.css — палитра и шрифты прежние («полевой командный
+   пункт»: хаки, сигнальный красный, Russo One / IBM Plex).
+   1) Главный экран: колонка меню слева, точечная карта мира справа.
+   2) HUD: элементы стали «фишками» с толщиной — жёсткая тень снизу без размытия,
+      доступный слот стоит, выбранный приподнят, недоступный лежит.
+   ========================================================================== */
+
+:root {
+  --chit-edge: #000;
+  --chit: 0 3px 0 var(--chit-edge);
+  --olive: #4c5934;
+  --gold: #e3b23c;
+  --slot: #141a13;
+}
+
+/* ------------------------- главный экран ------------------------- */
+
+.home {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 70% at 68% 50%, rgba(30, 40, 26, 0.5), transparent 70%),
+    var(--ocean);
+}
+
+.home-map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* колонка меню плавно уходит в карту */
+.home-shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(5, 7, 13, 0.97) 0,
+    rgba(5, 7, 13, 0.93) 400px,
+    rgba(5, 7, 13, 0.5) 640px,
+    rgba(5, 7, 13, 0) 900px
+  );
+}
+
+.home-side {
+  position: relative;
+  z-index: 1;
+  width: min(460px, 100%);
+  height: 100%;
+  padding: 52px 52px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 44px;
+  overflow-y: auto;
+  animation: home-in 0.45s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes home-in {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* бренд и меню — одной группой по центру высоты, футер прижат вниз */
+.home-brand {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.home-mark {
+  width: 30px;
+  height: 30px;
+}
+
+.home-title {
+  font-family: 'Russo One', sans-serif;
+  font-weight: 400;
+  font-size: 62px;
+  line-height: 0.9;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.home-sub {
+  max-width: 34ch;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-dim);
+}
+
+.home-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: auto;
+}
+
+.home-subhead {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.home-back {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.home-back:hover {
+  color: var(--ink);
+}
+
+.home-h2 {
+  font-family: 'Russo One', sans-serif;
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.home-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.home-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.home-field input {
+  padding: 8px 0 10px;
+  border: none;
+  border-bottom: 1px solid var(--edge);
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 19px;
+  font-weight: 600;
+  transition: border-color 0.15s;
+}
+
+.home-field input::placeholder {
+  color: var(--ink-faint);
+  font-weight: 400;
+}
+
+.home-field input:focus {
+  outline: none;
+  border-bottom-color: var(--khaki);
+}
+
+.home-field input.home-code {
+  padding: 14px;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.3);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.5em;
+  text-align: center;
+  padding-left: calc(14px + 0.5em);
+}
+
+.home-field input.home-code:focus {
+  border-color: var(--khaki);
+}
+
+/* главная кнопка */
+.home-primary,
+.home-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 16px;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.home-primary {
+  margin-top: 6px;
+  padding: 16px 18px;
+  border: none;
+  border-radius: 3px;
+  background: var(--signal);
+  color: #fff;
+  box-shadow: var(--chit);
+  transition: background 0.15s, transform 0.08s, box-shadow 0.08s;
+}
+
+.home-primary-main {
+  font-family: 'Russo One', sans-serif;
+  font-size: 17px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.home-primary-sub {
+  grid-column: 1;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.home-arrow {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-size: 20px;
+  transition: transform 0.15s;
+}
+
+.home-primary:not(:disabled):hover {
+  background: #ff6249;
+}
+
+.home-primary:not(:disabled):hover .home-arrow,
+.home-item:not(:disabled):hover .home-arrow {
+  transform: translateX(4px);
+}
+
+.home-primary:not(:disabled):active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--chit-edge);
+}
+
+/* второстепенные пункты — строки списка */
+.home-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--edge);
+}
+
+.home-item {
+  padding: 15px 4px;
+  border: none;
+  border-bottom: 1px solid var(--edge);
+  background: none;
+  color: var(--ink);
+  transition: padding 0.15s, box-shadow 0.15s;
+}
+
+.home-item-main {
+  font-size: 15.5px;
+  font-weight: 600;
+}
+
+.home-item-sub {
+  grid-column: 1;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.home-item .home-arrow {
+  color: var(--ink-faint);
+  font-size: 17px;
+}
+
+.home-item:not(:disabled):hover {
+  padding-left: 14px;
+  box-shadow: inset 2px 0 0 var(--khaki);
+}
+
+.home-item:not(:disabled):hover .home-arrow {
+  color: var(--khaki);
+}
+
+.home-primary:disabled,
+.home-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* выбор сложности */
+.home-diffs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.home-diff {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.home-diff:hover {
+  border-color: rgba(185, 194, 138, 0.55);
+}
+
+.home-diff.active {
+  border-color: var(--signal);
+  background: rgba(255, 77, 51, 0.08);
+  box-shadow: inset 3px 0 0 var(--signal);
+}
+
+/* радио скрыто визуально, но остаётся для клавиатуры */
+.home-diff input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.home-diff:has(input:focus-visible) {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.home-diff-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+}
+
+.home-diff-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.home-diff-desc {
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.home-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--edge);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.home-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+
+.home-status.on {
+  color: var(--ink-dim);
+}
+
+.home-status.on::before {
+  background: #7dd18b;
+}
+
+@media (max-width: 760px) {
+  .home-shade {
+    background: rgba(5, 7, 13, 0.8);
+  }
+
+  .home-side {
+    padding: 56px 22px 20px; /* сверху место под счётчик FPS */
+    gap: 32px;
+  }
+
+  .home-title {
+    font-size: 48px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-side {
+    animation: none;
+  }
+}
+
+/* ------------------------------- HUD ------------------------------- */
+
+/* панели получают «толщину» */
+.panel,
+.ctrl-panel,
+.chat-toggle,
+.myboat {
+  box-shadow: var(--chit), 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+/* Лидерборд — карточка счёта с шапкой */
+.leaderboard {
+  padding: 0 14px 10px;
+  overflow: hidden;
+}
+
+.leaderboard .eyebrow {
+  margin: 0 -14px 8px;
+  padding: 8px 14px;
+  background: rgba(185, 194, 138, 0.13);
+  border-bottom: 1px solid var(--edge);
+  color: var(--khaki);
+}
+
+.room-code {
+  color: var(--signal);
+}
+
+.lb-brow {
+  border-bottom: 1px dotted rgba(185, 194, 138, 0.18);
+}
+
+/* моя строка — маркер хаки и полоса слева */
+.lb-row.me {
+  background: linear-gradient(transparent 14%, rgba(185, 194, 138, 0.18) 14% 90%, transparent 90%);
+  box-shadow: inset 2px 0 0 var(--khaki);
+}
+
+.lb-row.me .lb-name {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.lb-bot {
+  margin-left: 5px;
+  padding: 0 3px;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  vertical-align: 1px;
+}
+
+.lb-stat {
+  color: var(--ink);
+}
+
+.dot {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* верхняя строка HUD: прирост — оливковая фишка, золото — монета */
+.growth-chip,
+.gold-chip {
+  border-radius: 3px;
+  box-shadow: var(--chit);
+  font-variant-numeric: tabular-nums;
+}
+
+.growth-chip {
+  background: var(--olive);
+  border: 1px solid rgba(185, 194, 138, 0.5);
+  color: #eef2dc;
+}
+
+.growth-chip small,
+.troop-nums small {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.gold-chip {
+  background: var(--gold);
+  border: 1px solid #a37a16;
+  border-radius: 999px;
+  color: #1a1406;
+}
+
+/* армия — сплошная полоса со штриховкой, без делений */
+.troop-wrap {
+  height: 32px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.troop-fill {
+  border-radius: 0;
+  opacity: 0.85;
+  border-right: 2px solid var(--ink);
+}
+
+/* штриховка поверх цвета игрока (inline background перетирает background-image) */
+.troop-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.2) 0 2px, transparent 2px 7px);
+}
+
+.troop-nums {
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 3px #000, 0 0 3px #000, 0 1px 1px #000;
+}
+
+/* ползунок доли войск: дорожка заполняется красным слева от ползунка.
+   Доля приходит из App.tsx в переменной --fill. */
+.ratio-val {
+  font-variant-numeric: tabular-nums;
+}
+
+.ratio input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ratio input[type='range']::-webkit-slider-runnable-track {
+  height: 10px;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--signal) 0 var(--fill, 0%),
+    rgba(0, 0, 0, 0.35) var(--fill, 0%) 100%
+  );
+  /* без этого фон повторяется под правой рамкой и даёт красный штрих в конце */
+  background-origin: border-box;
+  background-repeat: no-repeat;
+}
+
+.ratio input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 22px;
+  margin-top: -7px;
+  background: var(--ink);
+  border: 1px solid var(--chit-edge);
+  border-radius: 2px;
+  box-shadow: 0 2px 0 var(--chit-edge);
+}
+
+.ratio input[type='range']::-moz-range-track {
+  height: 8px;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+/* в Firefox заполнение рисует сам браузер */
+.ratio input[type='range']::-moz-range-progress {
+  height: 8px;
+  border-radius: 2px 0 0 2px;
+  background: var(--signal);
+}
+
+.ratio input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 20px;
+  background: var(--ink);
+  border: 1px solid var(--chit-edge);
+  border-radius: 2px;
+  box-shadow: 0 2px 0 var(--chit-edge);
+}
+
+/* слоты построек — фишки */
+.toolbar {
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.tool {
+  background: var(--slot);
+  border-radius: 3px;
+  box-shadow: var(--chit);
+  overflow: hidden;
+  transition: transform 0.08s, box-shadow 0.08s, background 0.08s, border-color 0.08s;
+}
+
+.tool:not(.disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 5px 0 var(--chit-edge);
+}
+
+.tool.selected,
+.tool.selected:not(.disabled):hover {
+  background: var(--signal);
+  border-color: var(--chit-edge);
+  transform: translateY(-3px);
+  box-shadow: 0 6px 0 var(--chit-edge);
+}
+
+/* недоступная фишка «лежит»: ниже, без толщины, иконка приглушена,
+   а цена читается — видно, сколько ещё копить */
+.tool.disabled {
+  opacity: 1;
+  filter: none;
+  background: rgba(0, 0, 0, 0.3);
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--chit-edge);
+}
+
+.tool.disabled .tool-icon-svg,
+.tool.disabled .tool-icon {
+  opacity: 0.3;
+}
+
+.tool.disabled .tool-cost,
+.tool.disabled .tool-count {
+  opacity: 0.8;
+}
+
+.tool-key {
+  top: 0;
+  left: 0;
+  padding: 1px 4px 1px 3px;
+  background: var(--khaki);
+  color: #10140c;
+  border-bottom-right-radius: 3px;
+  font-weight: 700;
+}
+
+.tool.selected .tool-key {
+  background: #fff;
+}
+
+.tool.selected .tool-cost {
+  color: #fff;
+}
+
+/* множитель пакета — вправо, чтобы не налезал на номер клавиши */
+.tool-batch {
+  left: auto;
+  right: 3px;
+}
+
+/* подсказки режимов — жёлтая памятка */
+.build-hint {
+  background: var(--gold);
+  color: #1a1406;
+  border: 1px solid var(--chit-edge);
+  box-shadow: var(--chit);
+  animation: none;
+}
+
+.build-hint.nuke-hint {
+  background: var(--signal);
+  color: #fff;
+  border-color: var(--chit-edge);
+}
+
+/* входящий десант — красная тревожная фишка */
+.incoming-row {
+  background: #b8321f;
+  border: 1px solid var(--chit-edge);
+  box-shadow: var(--chit);
+  backdrop-filter: none;
+  animation: none;
+}
+
+.incoming-row:hover {
+  background: #cc3a25;
+  border-color: var(--chit-edge);
+}
+
+.inc-focus {
+  color: #fff;
+}
+
+.inc-dot {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* мини-карта в рамке */
+.minimap {
+  left: 20px;
+  bottom: 24px;
+  box-shadow:
+    0 0 0 4px #0e130d,
+    0 0 0 5px var(--edge),
+    0 4px 0 5px var(--chit-edge),
+    0 14px 26px rgba(0, 0, 0, 0.45);
+}
+
+/* кнопки управления — тоже фишки */
+.ctrl-btn,
+.lb-tbtn,
+.fleet-btn {
+  box-shadow: 0 2px 0 var(--chit-edge);
+  transition: transform 0.08s, box-shadow 0.08s;
+}
+
+.ctrl-btn:active,
+.lb-tbtn:active:not(:disabled),
+.fleet-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: none;
+}
+
+.lb-tbtn:disabled {
+  box-shadow: none;
+}
+
+@media (max-width: 700px) {
+  .minimap {
+    left: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool,
+  .ctrl-btn,
+  .home-primary,
+  .home-item {
+    transition: none;
+  }
+}

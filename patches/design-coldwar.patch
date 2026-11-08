@@ -1,0 +1,1266 @@
+diff --git a/client/App.tsx b/client/App.tsx
+index cba983e..6befdba 100644
+--- a/client/App.tsx
++++ b/client/App.tsx
+@@ -939,10 +939,10 @@ export default function App() {
+                     <span className="dot" style={{ background: playerColorCSS(p.id) }} />
+                     <span className="lb-name">
+                       {p.name}
+-                      {p.bot && !p.strong ? ' 🤖' : ''}
++                      {p.bot && !p.strong && <span className="lb-bot">бот</span>}
+                     </span>
+                     <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
+-                    <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
++                    <span className="lb-stat">{fmtK(stat?.max ?? p.maxTroops)}</span>
+                     <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
+                   </div>
+                 );
+@@ -1293,9 +1293,10 @@ export default function App() {
+           )}
+           <div className="panel hud">
+             <div className="hud-top">
+-              <span className="growth-chip">
+-                🪖 {growthView.rate >= 0 ? '+' : ''}
+-                {growthView.rate}/с
++              <span className="growth-chip" title="Прирост войск в секунду">
++                {growthView.rate >= 0 ? '+' : ''}
++                {fmtK(growthView.rate)}
++                <small>/с</small>
+               </span>
+               <div className="troop-wrap">
+                 <div
+@@ -1306,7 +1307,7 @@ export default function App() {
+                   }}
+                 />
+                 <span className="troop-nums">
+-                  {fmtK(shownTroops)} / {fmtK(self.maxTroops)} 🧍
++                  {fmtK(shownTroops)} <small>из {fmtK(self.maxTroops)}</small>
+                   {committed > 0 && <span className="committed"> ⚔ {fmtK(committed)}</span>}
+                 </span>
+               </div>
+diff --git a/client/index.html b/client/index.html
+index eab8559..4394677 100644
+--- a/client/index.html
++++ b/client/index.html
+@@ -3,12 +3,12 @@
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+-    <meta name="theme-color" content="#05070d" />
++    <meta name="theme-color" content="#0c0e11" />
+     <title>Warfront — захвати мир</title>
+     <link rel="preconnect" href="https://fonts.googleapis.com" />
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+     <link
+-      href="https://fonts.googleapis.com/css2?family=Russo+One&family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@500;700&display=swap"
++      href="https://fonts.googleapis.com/css2?family=Tektur:wght@500;700;900&family=Onest:wght@400;500;700&family=JetBrains+Mono:wght@500;700&family=IBM+Plex+Mono:wght@500;700&display=swap"
+       rel="stylesheet"
+     />
+   </head>
+diff --git a/client/main.tsx b/client/main.tsx
+index 3658304..c1ea2b3 100644
+--- a/client/main.tsx
++++ b/client/main.tsx
+@@ -1,5 +1,6 @@
+ import { createRoot } from 'react-dom/client';
+ import App from './App';
+ import './styles.css';
++import './coldwar.css'; // «ситуационный центр, холодная война» — поверх базовых стилей
+ 
+ createRoot(document.getElementById('root')!).render(<App />);
+diff --git a/client/screens/MenuScreen.tsx b/client/screens/MenuScreen.tsx
+index 346a6d5..cb8c91f 100644
+--- a/client/screens/MenuScreen.tsx
++++ b/client/screens/MenuScreen.tsx
+@@ -19,24 +19,55 @@ interface Props {
+ }
+ 
+ const DIFFS: Difficulty[] = ['easy', 'normal', 'hard', 'insane'];
+-const THREAT: Record<Difficulty, number> = { easy: 1, normal: 2, hard: 3, insane: 4 };
++// Сложность как уровень боевой готовности: чем меньше DEFCON, тем ближе война
++const DEFCON: Record<Difficulty, number> = { easy: 4, normal: 3, hard: 2, insane: 1 };
+ 
+-// Главное меню: быстрая игра, создание операции, вход по коду
++// Полярная азимутальная проекция (вид на Северный полюс) с дугами траекторий —
++// фон меню. Чистая декорация, статичная (анимация фона роняла FPS, см. styles.css).
++function PolarMap() {
++  const rings = [22, 44, 66, 88];
++  const meridians = Array.from({ length: 12 }, (_, i) => (i * Math.PI) / 6);
++  return (
++    <svg className="cw-polar" viewBox="-100 -100 200 200" aria-hidden="true">
++      {rings.map((r) => (
++        <circle key={r} r={r} className="cw-polar-ring" />
++      ))}
++      {meridians.map((a, i) => (
++        <line key={i} x1={0} y1={0} x2={Math.cos(a) * 88} y2={Math.sin(a) * 88} className="cw-polar-ring" />
++      ))}
++      <path d="M-62 38 Q -8 -58 46 -36" className="cw-polar-arc" />
++      <path d="M58 46 Q 10 -40 -40 -52" className="cw-polar-arc" />
++      <g className="cw-polar-target">
++        <circle cx="46" cy="-36" r="3.5" />
++        <circle cx="-40" cy="-52" r="3.5" />
++      </g>
++    </svg>
++  );
++}
++
++// Главное меню — бланк оперативной сводки
+ export function MenuScreen(p: Props) {
+   return (
+     <div className="overlay">
+-      <div className="menu">
+-        <div className="menu-head">
+-          <span className="menu-eyebrow">Мировой театр военных действий</span>
++      <PolarMap />
++      <div className="menu cw-sheet">
++        <div className="cw-sheet-top">
++          <span>Для служебного пользования</span>
++          <span>Сводка № 01</span>
++        </div>
++
++        <div className="cw-head">
+           <h1 className="title">Warfront</h1>
+-          <div className="frontline" aria-hidden="true" />
+-          <span className="menu-tagline">Захвати планету — регион за регионом</span>
++          <p className="menu-tagline">
++            Операция <span className="cw-redact" aria-label="засекречено">▇▇▇▇▇▇▇</span>: захватить
++            планету — регион за регионом
++          </p>
+         </div>
+ 
+         <label className="field">
+-          <span className="eyebrow">Позывной командующего</span>
++          <span className="eyebrow">Позывной</span>
+           <input
+-            placeholder="Введите имя"
++            placeholder="Как вас называть"
+             value={p.name}
+             maxLength={16}
+             onChange={(e) => p.setName(e.target.value)}
+@@ -46,48 +77,46 @@ export function MenuScreen(p: Props) {
+         {p.menuView === 'main' && (
+           <>
+             <button className="primary" onClick={p.onQuick} disabled={!p.connected}>
+-              В бой<span className="btn-chev">→</span>
++              В бой
+             </button>
+             <div className="menu-split">
+               <button className="secondary" onClick={() => p.setMenuView('create')} disabled={!p.connected}>
+-                Создать операцию
++                Своя операция
+               </button>
+               <button className="secondary" onClick={() => p.setMenuView('join')} disabled={!p.connected}>
+                 Войти по коду
+               </button>
+             </div>
+-            <p className="hint">
+-              {p.connected ? 'Сервер на связи · карта: Земля' : 'Установка связи с сервером…'}
+-            </p>
+           </>
+         )}
+ 
+         {p.menuView === 'create' && (
+           <>
+             <div className="field">
+-              <span className="eyebrow">Уровень угрозы</span>
+-              <div className="opt-list">
++              <span className="eyebrow">Готовность противника</span>
++              <div className="cw-defcon" role="radiogroup">
+                 {DIFFS.map((d) => (
+-                  <label key={d} className={'opt' + (p.difficulty === d ? ' active' : '')}>
+-                    <input type="radio" name="diff" checked={p.difficulty === d} onChange={() => p.setDifficulty(d)} />
+-                    <span className="opt-body">
+-                      <span className="opt-name">{DIFF_LABELS[d].name}</span>
+-                      <span className="opt-desc">{DIFF_LABELS[d].desc}</span>
+-                    </span>
+-                    <span className="threat" aria-hidden="true">
+-                      {[0, 1, 2, 3].map((i) => (
+-                        <span key={i} className={'threat-dot' + (i < THREAT[d] ? ' on' : '')} />
+-                      ))}
+-                    </span>
++                  <label key={d} className={'cw-def cw-def-' + DEFCON[d] + (p.difficulty === d ? ' active' : '')}>
++                    <input
++                      type="radio"
++                      name="diff"
++                      checked={p.difficulty === d}
++                      onChange={() => p.setDifficulty(d)}
++                    />
++                    <span className="cw-def-label">DEFCON</span>
++                    <span className="cw-def-num">{DEFCON[d]}</span>
+                   </label>
+                 ))}
+               </div>
++              <p className="cw-def-desc">
++                <b>{DIFF_LABELS[p.difficulty].name}</b> — {DIFF_LABELS[p.difficulty].desc}
++              </p>
+             </div>
+             <button className="primary" onClick={p.onCreate} disabled={!p.connected}>
+-              Развернуть лобби<span className="btn-chev">→</span>
++              Развернуть штаб
+             </button>
+             <button className="link" onClick={() => p.setMenuView('main')}>
+-              ← Назад
++              Назад
+             </button>
+           </>
+         )}
+@@ -95,10 +124,10 @@ export function MenuScreen(p: Props) {
+         {p.menuView === 'join' && (
+           <>
+             <label className="field">
+-              <span className="eyebrow">Шифр доступа</span>
++              <span className="eyebrow">Код операции</span>
+               <input
+                 className="code-input"
+-                placeholder="•••••"
++                placeholder="_____"
+                 value={p.joinCode}
+                 maxLength={5}
+                 onChange={(e) => p.setJoinCode(e.target.value.toUpperCase())}
+@@ -106,14 +135,20 @@ export function MenuScreen(p: Props) {
+               />
+             </label>
+             <button className="primary" onClick={p.onJoin} disabled={!p.connected || p.joinCode.length < 5}>
+-              Войти в лобби<span className="btn-chev">→</span>
++              Подключиться
+             </button>
+             <button className="link" onClick={() => p.setMenuView('main')}>
+-              ← Назад
++              Назад
+             </button>
+           </>
+         )}
++
+         {p.error && <p className="error">{p.error}</p>}
++
++        <div className={'cw-status' + (p.connected ? ' on' : '')}>
++          <span>{p.connected ? 'Связь установлена' : 'Поиск сервера…'}</span>
++          <span>до 100 игроков · Земля</span>
++        </div>
+       </div>
+     </div>
+   );
+diff --git a/client/coldwar.css b/client/coldwar.css
+new file mode 100644
+index 0000000..a60e81a
+--- /dev/null
++++ b/client/coldwar.css
+@@ -0,0 +1,1018 @@
++/* ==========================================================================
++   СИТУАЦИОННЫЙ ЦЕНТР · ХОЛОДНАЯ ВОЙНА (современная подача)
++   • Полярная проекция с дугами траекторий — фон меню (эмблема эпохи).
++   • Сложность — шкала DEFCON 4→1 с её настоящими цветами.
++   • Один акцент — международный оранжевый (аэрокосмос 60-х), «золото» — янтарь.
++   • Швейцарская сетка: волосяные линии 1px, острые углы, без свечений и размытий.
++   Дисплей: Tektur. Текст: Onest. Цифры и служебные пометки: JetBrains Mono.
++   Подключается после styles.css; прошлый стиль — patches/design-tabletop.patch.
++   ========================================================================== */
++
++:root {
++  --cw-bg: #0c0e11;
++  --cw-panel: rgba(17, 20, 24, 0.95);
++  --cw-panel-solid: #12151a;
++  --cw-line: rgba(235, 232, 223, 0.12);
++  --cw-line-2: rgba(235, 232, 223, 0.26);
++  --cw-ink: #ebe8df;
++  --cw-dim: #959ba3;
++  --cw-faint: #5f656d;
++  --cw-orange: #ff5a1f;
++  --cw-orange-hi: #ff7340;
++  --cw-amber: #f0b23e;
++  --cw-ok: #5fbf6e;
++  --defcon-4: #3fa34d;
++  --defcon-3: #f2c230;
++  --defcon-2: #e0362c;
++  --defcon-1: #f2f1ec;
++  --mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
++
++  /* базовые токены styles.css — перекрашиваем весь интерфейс разом */
++  --ocean: var(--cw-bg);
++  --ink: var(--cw-ink);
++  --ink-dim: var(--cw-dim);
++  --ink-faint: var(--cw-faint);
++  --panel: var(--cw-panel);
++  --edge: var(--cw-line-2);
++  --khaki: #c9ced4;
++  --signal: var(--cw-orange);
++  --signal-deep: #d9480f;
++}
++
++html,
++body {
++  font-family: 'Onest', 'Segoe UI', sans-serif;
++}
++
++:focus-visible {
++  outline: 2px solid var(--cw-orange);
++  outline-offset: 2px;
++}
++
++/* Острые углы и плоские поверхности везде */
++.panel,
++.menu,
++.ctx-menu,
++.donate-modal,
++.proposal-card,
++.spectate-bar,
++.ctrl-panel,
++.speed-pop,
++.chat-history,
++.chat-toggle,
++.chat-toast,
++.chat-line,
++.fps,
++.minimap,
++.myboat,
++.build-hint,
++.incoming-row,
++.spawn-banner,
++.pause-banner,
++.winner,
++.attack-banner,
++.radial-label,
++.menu input,
++.menu button,
++.ctx-btn,
++.ctrl-btn,
++.lb-tbtn,
++.fleet-btn,
++.donate-tab,
++.spectate-btn,
++.tool,
++.troop-wrap,
++.troop-fill,
++.growth-chip,
++.gold-chip,
++.setting-row,
++.invite-btn,
++.lobby-player,
++.lobby-host,
++.error,
++.dot,
++.inc-dot,
++.chat-badge,
++.inc-eta,
++.myboat-eta,
++.myboat-recall,
++.ship-hp-wrap {
++  border-radius: 0;
++}
++
++.panel,
++.ctx-menu,
++.ctrl-panel,
++.speed-pop,
++.chat-history,
++.chat-toggle,
++.myboat,
++.spectate-bar,
++.proposal-card,
++.radial-label {
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-line-2);
++  backdrop-filter: none;
++  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
++}
++
++/* служебные пометки — моноширинным */
++.eyebrow {
++  font-family: var(--mono);
++  font-size: 10px;
++  font-weight: 500;
++  letter-spacing: 0.18em;
++  color: var(--cw-dim);
++}
++
++/* Кнопки: главное действие — плоский оранжевый с чёрным текстом */
++.ctx-btn,
++.spectate-btn,
++.menu button.primary {
++  background: var(--cw-orange);
++  border: 1px solid var(--cw-orange);
++  color: var(--cw-bg);
++  box-shadow: none;
++  filter: none;
++  transition: background 0.12s, transform 0.08s;
++}
++
++.ctx-btn:hover,
++.spectate-btn:hover,
++.menu button.primary:not(:disabled):hover {
++  background: var(--cw-orange-hi);
++  filter: none;
++  transform: none;
++  box-shadow: none;
++}
++
++.ctx-btn:active,
++.spectate-btn:active,
++.menu button.primary:not(:disabled):active {
++  transform: translateY(1px);
++}
++
++.ctrl-btn,
++.lb-tbtn,
++.fleet-btn,
++.donate-tab,
++.spectate-btn.ghost,
++.menu button.secondary {
++  background: transparent;
++  border: 1px solid var(--cw-line-2);
++  color: var(--cw-ink);
++  box-shadow: none;
++  transition: border-color 0.12s, background 0.12s;
++}
++
++.ctrl-btn:hover,
++.lb-tbtn:hover:not(:disabled),
++.fleet-btn:not(:disabled):hover,
++.donate-tab:hover,
++.spectate-btn.ghost:hover,
++.menu button.secondary:not(:disabled):hover {
++  border-color: var(--cw-ink);
++  background: rgba(235, 232, 223, 0.05);
++  color: var(--cw-ink);
++}
++
++/* ------------------------------ меню ------------------------------ */
++
++.overlay {
++  background: var(--cw-bg);
++}
++
++.overlay::before,
++.overlay::after {
++  content: none;
++}
++
++/* полярная проекция за бланком */
++.cw-polar {
++  position: fixed;
++  left: 50%;
++  top: 50%;
++  width: min(140vmin, 1200px);
++  height: min(140vmin, 1200px);
++  transform: translate(-50%, -50%);
++  pointer-events: none;
++  z-index: 0;
++}
++
++.cw-polar-ring {
++  fill: none;
++  stroke: rgba(235, 232, 223, 0.07);
++  stroke-width: 0.25;
++}
++
++.cw-polar-arc {
++  fill: none;
++  stroke: var(--cw-orange);
++  stroke-width: 0.45;
++  stroke-dasharray: 2 1.6;
++  opacity: 0.55;
++}
++
++.cw-polar-target circle {
++  fill: none;
++  stroke: var(--cw-orange);
++  stroke-width: 0.45;
++  opacity: 0.7;
++}
++
++.menu {
++  width: min(440px, calc(100vw - 32px));
++  padding: 26px 28px;
++  gap: 16px;
++  background: var(--cw-panel-solid);
++  border: 1px solid var(--cw-line-2);
++  box-shadow: 0 40px 90px rgba(0, 0, 0, 0.7);
++}
++
++.menu::before,
++.menu::after {
++  content: none;
++}
++
++.menu .title {
++  font-family: 'Tektur', sans-serif;
++  font-weight: 900;
++  font-size: 40px;
++  letter-spacing: 0.04em;
++  text-shadow: none;
++  color: var(--cw-ink);
++}
++
++.menu-eyebrow {
++  font-family: var(--mono);
++  font-weight: 500;
++  letter-spacing: 0.22em;
++  color: var(--cw-orange);
++}
++
++.frontline {
++  height: 1px;
++  width: 100%;
++  background: var(--cw-line-2);
++}
++
++.frontline::after {
++  content: none;
++}
++
++.menu-tagline,
++.hint,
++.lobby-meta {
++  color: var(--cw-dim);
++}
++
++.menu input {
++  background: var(--cw-bg);
++  border: 1px solid var(--cw-line-2);
++  color: var(--cw-ink);
++  font-family: 'Onest', sans-serif;
++  font-weight: 500;
++}
++
++.menu input::placeholder {
++  color: var(--cw-faint);
++}
++
++.menu input:focus {
++  border-color: var(--cw-orange);
++  box-shadow: inset 0 -2px 0 var(--cw-orange);
++}
++
++.code-input {
++  font-family: var(--mono) !important;
++  font-weight: 700 !important;
++  letter-spacing: 0.7em;
++  padding-left: calc(14px + 0.7em) !important;
++}
++
++.menu button.primary {
++  padding: 15px;
++  font-family: 'Tektur', sans-serif;
++  font-weight: 700;
++  font-size: 15px;
++  letter-spacing: 0.16em;
++}
++
++.menu button.secondary {
++  padding: 12px 10px;
++  font-weight: 500;
++  font-size: 13.5px;
++}
++
++.menu button:disabled {
++  opacity: 0.35;
++}
++
++.menu button.link {
++  font-family: var(--mono);
++  font-size: 11px;
++  letter-spacing: 0.16em;
++  text-transform: uppercase;
++  color: var(--cw-dim);
++}
++
++.menu button.link:hover {
++  color: var(--cw-orange);
++}
++
++.dead-msg {
++  color: var(--cw-orange);
++}
++
++.error {
++  color: var(--defcon-2);
++  border: 1px solid var(--defcon-2);
++  background: rgba(224, 54, 44, 0.1);
++}
++
++/* --- бланк сводки (главное меню) --- */
++.menu.cw-sheet {
++  width: min(460px, calc(100vw - 32px));
++  padding: 0;
++  gap: 18px;
++}
++
++.menu.cw-sheet > * {
++  margin-inline: 28px;
++}
++
++.menu.cw-sheet > .cw-sheet-top,
++.menu.cw-sheet > .cw-status {
++  margin-inline: 0;
++}
++
++.cw-sheet-top,
++.cw-status {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  padding: 10px 28px;
++  font-family: var(--mono);
++  font-size: 10px;
++  letter-spacing: 0.16em;
++  text-transform: uppercase;
++  color: var(--cw-dim);
++}
++
++.cw-sheet-top {
++  border-bottom: 1px solid var(--cw-line);
++}
++
++.cw-sheet-top span:first-child {
++  color: var(--cw-orange);
++}
++
++.cw-head {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  margin-top: 6px;
++}
++
++.cw-head .title {
++  text-align: left;
++  font-size: 54px;
++  line-height: 0.95;
++  text-transform: uppercase;
++}
++
++.cw-head .menu-tagline {
++  text-align: left;
++  font-size: 13.5px;
++  line-height: 1.5;
++}
++
++/* зачёркнутое цензором название операции */
++.cw-redact {
++  color: transparent;
++  background: var(--cw-ink);
++  letter-spacing: -0.12em;
++  padding: 0 3px;
++  user-select: none;
++}
++
++.cw-status {
++  border-top: 1px solid var(--cw-line);
++}
++
++.cw-status span:first-child {
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.cw-status span:first-child::before {
++  content: '';
++  width: 7px;
++  height: 7px;
++  border: 1px solid var(--cw-dim);
++}
++
++.cw-status.on span:first-child {
++  color: var(--cw-ink);
++}
++
++.cw-status.on span:first-child::before {
++  background: var(--cw-ok);
++  border-color: var(--cw-ok);
++}
++
++/* --- шкала DEFCON --- */
++.cw-defcon {
++  display: grid;
++  grid-template-columns: repeat(4, 1fr);
++  gap: 6px;
++}
++
++.cw-def {
++  --lvl: var(--cw-ink);
++  position: relative;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 2px;
++  padding: 10px 4px 8px;
++  border: 1px solid var(--cw-line-2);
++  border-top: 3px solid var(--lvl);
++  cursor: pointer;
++  transition: background 0.12s;
++}
++
++.cw-def-4 { --lvl: var(--defcon-4); }
++.cw-def-3 { --lvl: var(--defcon-3); }
++.cw-def-2 { --lvl: var(--defcon-2); }
++.cw-def-1 { --lvl: var(--defcon-1); }
++
++.cw-def:hover {
++  background: rgba(235, 232, 223, 0.05);
++}
++
++/* радио скрыто визуально, но доступно с клавиатуры */
++.cw-def input {
++  position: absolute;
++  opacity: 0;
++  pointer-events: none;
++}
++
++.cw-def:has(input:focus-visible) {
++  outline: 2px solid var(--cw-orange);
++  outline-offset: 2px;
++}
++
++.cw-def-label {
++  font-family: var(--mono);
++  font-size: 8.5px;
++  letter-spacing: 0.18em;
++  color: var(--cw-dim);
++}
++
++.cw-def-num {
++  font-family: 'Tektur', sans-serif;
++  font-weight: 900;
++  font-size: 30px;
++  line-height: 1;
++  color: var(--lvl);
++}
++
++.cw-def.active {
++  background: var(--lvl);
++  border-color: var(--lvl);
++}
++
++.cw-def.active .cw-def-label,
++.cw-def.active .cw-def-num {
++  color: var(--cw-bg);
++}
++
++.cw-def-desc {
++  font-size: 13px;
++  color: var(--cw-dim);
++}
++
++.cw-def-desc b {
++  color: var(--cw-ink);
++  font-weight: 700;
++}
++
++/* --- лобби и экраны конца --- */
++.lobby-player {
++  background: transparent;
++  border: 1px solid var(--cw-line);
++  border-left: 2px solid var(--cw-orange);
++}
++
++.lobby-host {
++  background: var(--cw-orange);
++  color: var(--cw-bg);
++}
++
++.invite-btn {
++  background: transparent;
++  border: 1px dashed var(--cw-line-2);
++}
++
++.invite-btn:hover {
++  background: rgba(235, 232, 223, 0.04);
++  border-color: var(--cw-ink);
++}
++
++.invite-btn.copied {
++  border-style: solid;
++  border-color: var(--cw-ok);
++  background: rgba(95, 191, 110, 0.08);
++}
++
++.invite-mark,
++.invite-sub,
++.lobby-rank {
++  font-family: var(--mono);
++}
++
++.setting-row {
++  background: transparent;
++  border: 1px solid var(--cw-line-2);
++}
++
++.setting-row.on {
++  border-color: var(--cw-ink);
++  background: rgba(235, 232, 223, 0.05);
++}
++
++.setting-row input {
++  accent-color: var(--cw-orange);
++}
++
++/* ------------------------------- HUD ------------------------------- */
++
++.fps {
++  font-family: var(--mono);
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-line-2);
++}
++
++.minimap {
++  border: 1px solid var(--cw-line-2);
++  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
++}
++
++/* Лидерборд — «доска сил» */
++.leaderboard .eyebrow {
++  padding-left: 9px;
++  border-left: 2px solid var(--cw-orange);
++  color: var(--cw-ink);
++}
++
++.room-code {
++  color: var(--cw-orange);
++  font-family: var(--mono);
++}
++
++.lb-head {
++  border-bottom: 1px solid var(--cw-line-2);
++}
++
++.lb-head .lb-name,
++.lb-head .lb-val,
++.lb-head .lb-stat,
++.lb-head .lb-rank,
++.lb-rank,
++.lb-val,
++.lb-stat,
++.lb-count {
++  font-family: var(--mono);
++}
++
++.lb-brow {
++  border-bottom: 1px solid var(--cw-line);
++}
++
++.lb-brow:hover {
++  background: rgba(235, 232, 223, 0.05);
++  border-radius: 0;
++}
++
++.lb-row.me {
++  background: rgba(255, 90, 31, 0.12);
++  box-shadow: inset 2px 0 0 var(--cw-orange);
++}
++
++.lb-row.me .lb-name {
++  color: var(--cw-ink);
++  font-weight: 700;
++}
++
++.lb-val,
++.lb-stat {
++  color: var(--cw-ink);
++  font-variant-numeric: tabular-nums;
++}
++
++.lb-gold,
++.opp-gold,
++.tool-cost {
++  color: var(--cw-amber);
++}
++
++.lb-bot {
++  margin-left: 6px;
++  padding: 0 3px;
++  border: 1px solid var(--cw-line-2);
++  font-family: var(--mono);
++  font-size: 8.5px;
++  letter-spacing: 0.08em;
++  text-transform: uppercase;
++  color: var(--cw-dim);
++  vertical-align: 1px;
++}
++
++.lb-toggle {
++  border-top: 1px solid var(--cw-line-2);
++}
++
++/* Основная панель */
++.growth-chip,
++.gold-chip,
++.troop-nums,
++.ratio-val {
++  font-family: var(--mono);
++  font-variant-numeric: tabular-nums;
++}
++
++.growth-chip {
++  background: transparent;
++  color: var(--cw-ok);
++  border: 1px solid rgba(95, 191, 110, 0.45);
++}
++
++.gold-chip {
++  background: transparent;
++  color: var(--cw-amber);
++  border: 1px solid rgba(240, 178, 62, 0.5);
++}
++
++.growth-chip small,
++.troop-nums small {
++  font-size: 11px;
++  font-weight: 500;
++  color: var(--cw-dim);
++}
++
++/* армия — сегментная шкала, как на приборной панели */
++.troop-wrap {
++  background: var(--cw-bg);
++  border: 1px solid var(--cw-line-2);
++}
++
++.troop-fill {
++  opacity: 0.9;
++  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 7px, transparent 7px 9px);
++  mask-image: repeating-linear-gradient(90deg, #000 0 7px, transparent 7px 9px);
++}
++
++.troop-nums {
++  color: var(--cw-ink);
++  text-shadow: 0 0 3px #000, 0 1px 2px #000;
++}
++
++.committed {
++  color: var(--cw-orange);
++}
++
++.ratio-val {
++  color: var(--cw-ink);
++}
++
++/* ползунок: шкала с делениями и оранжевая риска */
++.ratio input[type='range'] {
++  -webkit-appearance: none;
++  appearance: none;
++  height: 20px;
++  background: transparent;
++  cursor: pointer;
++}
++
++.ratio input[type='range']::-webkit-slider-runnable-track {
++  height: 12px;
++  background:
++    linear-gradient(var(--cw-line-2), var(--cw-line-2)) center / 100% 1px no-repeat,
++    repeating-linear-gradient(90deg, var(--cw-line-2) 0 1px, transparent 1px 10%);
++}
++
++.ratio input[type='range']::-webkit-slider-thumb {
++  -webkit-appearance: none;
++  width: 4px;
++  height: 20px;
++  margin-top: -4px;
++  background: var(--cw-orange);
++  border: none;
++}
++
++.ratio input[type='range']::-moz-range-track {
++  height: 12px;
++  background:
++    linear-gradient(var(--cw-line-2), var(--cw-line-2)) center / 100% 1px no-repeat,
++    repeating-linear-gradient(90deg, var(--cw-line-2) 0 1px, transparent 1px 10%);
++}
++
++.ratio input[type='range']::-moz-range-thumb {
++  width: 4px;
++  height: 20px;
++  background: var(--cw-orange);
++  border: none;
++  border-radius: 0;
++}
++
++/* Слоты — клавиши пульта */
++.tool {
++  background: var(--cw-bg);
++  border: 1px solid var(--cw-line-2);
++  transition: border-color 0.1s, background 0.1s;
++}
++
++.tool:not(.disabled):hover {
++  border-color: var(--cw-ink);
++}
++
++.tool.selected,
++.tool.selected:not(.disabled):hover {
++  background: var(--cw-orange);
++  border-color: var(--cw-orange);
++}
++
++.tool.selected .tool-icon-svg {
++  filter: brightness(0);
++}
++
++.tool.selected .tool-key,
++.tool.selected .tool-count,
++.tool.selected .tool-cost {
++  color: var(--cw-bg);
++}
++
++.tool.disabled {
++  opacity: 1;
++  filter: none;
++  border-color: var(--cw-line);
++}
++
++.tool.disabled .tool-icon-svg,
++.tool.disabled .tool-icon {
++  opacity: 0.3;
++}
++
++.tool.disabled .tool-cost,
++.tool.disabled .tool-count {
++  opacity: 0.75;
++}
++
++.tool-icon-svg {
++  filter: brightness(0) invert(0.92);
++}
++
++.tool-key,
++.tool-count,
++.tool-cost,
++.tool-batch {
++  font-family: var(--mono);
++}
++
++.tool-key {
++  color: var(--cw-faint);
++}
++
++.tool-batch {
++  left: auto;
++  right: 3px;
++  color: var(--cw-orange);
++  text-shadow: none;
++}
++
++/* подсказки режимов */
++.build-hint {
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-line-2);
++  border-left: 3px solid var(--cw-orange);
++  font-weight: 500;
++  animation: none;
++}
++
++.build-hint.nuke-hint {
++  background: rgba(224, 54, 44, 0.16);
++  border-color: rgba(224, 54, 44, 0.6);
++  border-left-color: var(--defcon-2);
++}
++
++/* входящий десант — красная строка тревоги */
++.incoming-row {
++  background: rgba(224, 54, 44, 0.16);
++  border: 1px solid rgba(224, 54, 44, 0.7);
++  border-left: 3px solid var(--defcon-2);
++  backdrop-filter: none;
++  animation: none;
++}
++
++.incoming-row:hover {
++  background: rgba(224, 54, 44, 0.26);
++  border-color: var(--defcon-2);
++}
++
++.inc-focus {
++  color: var(--defcon-2);
++}
++
++.inc-eta,
++.myboat-eta {
++  font-family: var(--mono);
++}
++
++.myboat {
++  font-family: var(--mono);
++  color: var(--cw-ink);
++}
++
++/* правый верхний угол */
++.ctrl-btn {
++  font-family: var(--mono);
++}
++
++.ctrl-speed.active {
++  background: var(--cw-ink);
++  color: var(--cw-bg);
++}
++
++.ctrl-speed-toggle.active {
++  border-color: var(--cw-orange);
++}
++
++.ctrl-exit:hover {
++  border-color: var(--defcon-2);
++  color: var(--defcon-2);
++}
++
++/* баннеры */
++.spawn-banner {
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-orange);
++  font-weight: 500;
++}
++
++.timer {
++  font-family: var(--mono);
++  color: var(--cw-orange);
++}
++
++.pause-banner {
++  font-family: 'Tektur', sans-serif;
++  font-weight: 700;
++  letter-spacing: 0.08em;
++  background: var(--cw-panel-solid);
++  border: 1px solid var(--cw-orange);
++}
++
++.attack-banner {
++  border-radius: 0;
++  border-left: 3px solid var(--defcon-2);
++}
++
++/* тултипы */
++.opp-head {
++  border-bottom: 1px solid var(--cw-line-2);
++}
++
++.opp-lbl,
++.opp-val,
++.opp-bld {
++  font-family: var(--mono);
++}
++
++.ship-rank {
++  color: var(--cw-amber);
++}
++
++.ship-stripes i {
++  background: var(--cw-amber);
++}
++
++/* лента событий */
++.chat-toggle {
++  font-family: var(--mono);
++}
++
++.chat-toggle:hover {
++  border-color: var(--cw-ink);
++  color: var(--cw-ink);
++}
++
++.chat-badge {
++  background: var(--cw-orange);
++  color: var(--cw-bg);
++}
++
++.chat-toast,
++.chat-line {
++  backdrop-filter: none;
++}
++
++.chat-toast.ok,
++.chat-line.ok {
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-line-2);
++  border-left: 3px solid var(--cw-ok);
++  color: var(--cw-ink);
++}
++
++.chat-toast.no,
++.chat-line.no {
++  background: var(--cw-panel);
++  border: 1px solid var(--cw-line-2);
++  border-left: 3px solid var(--defcon-2);
++  color: var(--cw-ink);
++}
++
++/* круговое меню цели */
++.radial-btn {
++  background: var(--cw-panel-solid);
++  border: 1px solid var(--cw-line-2);
++  backdrop-filter: none;
++}
++
++.radial-btn:hover:not(.disabled) {
++  border-color: var(--cw-orange);
++  background: rgba(255, 90, 31, 0.12);
++}
++
++.radial-center {
++  background: var(--cw-bg);
++  border: 2px solid var(--cw-orange);
++  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
++}
++
++.radial-center:hover:not(.disabled) {
++  border-color: var(--cw-orange-hi);
++  filter: none;
++}
++
++.radial-center-txt,
++.radial-label {
++  font-family: var(--mono);
++  color: var(--cw-orange);
++}
++
++.radial-label {
++  color: var(--cw-ink);
++}
++
++/* донат союзнику */
++.donate-modal {
++  background: var(--cw-panel-solid);
++  border: 1px solid var(--cw-line-2);
++  backdrop-filter: none;
++}
++
++.donate-tab.active {
++  background: var(--cw-ink);
++  border-color: var(--cw-ink);
++  color: var(--cw-bg);
++}
++
++.donate-amount {
++  font-family: var(--mono);
++}
++
++.donate-slider {
++  accent-color: var(--cw-orange);
++}
++
++.proposal-card {
++  border-left: 3px solid #4aa3c7;
++}
++
++.spectate-tag {
++  font-family: var(--mono);
++  color: var(--cw-ink);
++}
++
++@media (max-width: 700px) {
++  .cw-head .title {
++    font-size: 42px;
++  }
++
++  .cw-sheet-top,
++  .cw-status {
++    padding-inline: 20px;
++  }
++
++  .menu.cw-sheet > * {
++    margin-inline: 20px;
++  }
++
++  .menu.cw-sheet > .cw-sheet-top,
++  .menu.cw-sheet > .cw-status {
++    margin-inline: 0;
++  }
++}

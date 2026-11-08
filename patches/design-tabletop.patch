@@ -1,0 +1,1535 @@
+diff --git a/client/App.tsx b/client/App.tsx
+index cba983e..6befdba 100644
+--- a/client/App.tsx
++++ b/client/App.tsx
+@@ -939,10 +939,10 @@ export default function App() {
+                     <span className="dot" style={{ background: playerColorCSS(p.id) }} />
+                     <span className="lb-name">
+                       {p.name}
+-                      {p.bot && !p.strong ? ' 🤖' : ''}
++                      {p.bot && !p.strong && <span className="lb-bot">бот</span>}
+                     </span>
+                     <span className="lb-val">{((p.cells / totalCells) * 100).toFixed(1)}%</span>
+-                    <span className="lb-stat">🪖 {fmtK(stat?.max ?? p.maxTroops)}</span>
++                    <span className="lb-stat">{fmtK(stat?.max ?? p.maxTroops)}</span>
+                     <span className="lb-stat lb-gold">◈ {fmtK(stat?.money ?? p.money)}</span>
+                   </div>
+                 );
+@@ -1293,9 +1293,10 @@ export default function App() {
+           )}
+           <div className="panel hud">
+             <div className="hud-top">
+-              <span className="growth-chip">
+-                🪖 {growthView.rate >= 0 ? '+' : ''}
+-                {growthView.rate}/с
++              <span className="growth-chip" title="Прирост войск в секунду">
++                {growthView.rate >= 0 ? '+' : ''}
++                {fmtK(growthView.rate)}
++                <small>/с</small>
+               </span>
+               <div className="troop-wrap">
+                 <div
+@@ -1306,7 +1307,7 @@ export default function App() {
+                   }}
+                 />
+                 <span className="troop-nums">
+-                  {fmtK(shownTroops)} / {fmtK(self.maxTroops)} 🧍
++                  {fmtK(shownTroops)} <small>из {fmtK(self.maxTroops)}</small>
+                   {committed > 0 && <span className="committed"> ⚔ {fmtK(committed)}</span>}
+                 </span>
+               </div>
+diff --git a/client/index.html b/client/index.html
+index eab8559..763880a 100644
+--- a/client/index.html
++++ b/client/index.html
+@@ -3,12 +3,12 @@
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+-    <meta name="theme-color" content="#05070d" />
++    <meta name="theme-color" content="#1a1712" />
+     <title>Warfront — захвати мир</title>
+     <link rel="preconnect" href="https://fonts.googleapis.com" />
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+     <link
+-      href="https://fonts.googleapis.com/css2?family=Russo+One&family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@500;700&display=swap"
++      href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Golos+Text:wght@400;600;800&family=IBM+Plex+Mono:wght@500;700&display=swap"
+       rel="stylesheet"
+     />
+   </head>
+diff --git a/client/main.tsx b/client/main.tsx
+index 3658304..692ed55 100644
+--- a/client/main.tsx
++++ b/client/main.tsx
+@@ -1,5 +1,6 @@
+ import { createRoot } from 'react-dom/client';
+ import App from './App';
+ import './styles.css';
++import './tabletop.css'; // «настольный варгейм» — поверх базовых стилей
+ 
+ createRoot(document.getElementById('root')!).render(<App />);
+diff --git a/client/screens/MenuScreen.tsx b/client/screens/MenuScreen.tsx
+index 346a6d5..c8796ff 100644
+--- a/client/screens/MenuScreen.tsx
++++ b/client/screens/MenuScreen.tsx
+@@ -21,22 +21,105 @@ interface Props {
+ const DIFFS: Difficulty[] = ['easy', 'normal', 'hard', 'insane'];
+ const THREAT: Record<Difficulty, number> = { easy: 1, normal: 2, hard: 3, insane: 4 };
+ 
+-// Главное меню: быстрая игра, создание операции, вход по коду
++// Какие из 9 клеток грани кубика заняты точками (по номиналу 1–4)
++const PIPS: Record<number, number[]> = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8] };
++
++function Die({ n }: { n: number }) {
++  return (
++    <span className="die" aria-hidden="true">
++      {Array.from({ length: 9 }, (_, i) => (
++        <i key={i} className={PIPS[n].includes(i) ? 'on' : undefined} />
++      ))}
++    </span>
++  );
++}
++
++// Фишка подразделения в духе бумажных варгеймов: размер части сверху,
++// условный знак НАТО в центре, «атака-движение» снизу. Чистая декорация.
++function UnitChit({
++  side,
++  type,
++  size,
++  value,
++  className,
++}: {
++  side: 'red' | 'olive';
++  type: 'inf' | 'arm' | 'art';
++  size: string;
++  value: string;
++  className: string;
++}) {
++  return (
++    <span className={`chit chit-${side} ${className}`}>
++      <span className="chit-size">{size}</span>
++      <svg className="chit-sym" viewBox="0 0 30 20">
++        <rect x="1" y="1" width="28" height="18" fill="none" stroke="currentColor" strokeWidth="2" />
++        {type === 'inf' && <path d="M1 1L29 19M29 1L1 19" stroke="currentColor" strokeWidth="2" />}
++        {type === 'arm' && (
++          <ellipse cx="15" cy="10" rx="9" ry="5" fill="none" stroke="currentColor" strokeWidth="2" />
++        )}
++        {type === 'art' && <circle cx="15" cy="10" r="3.2" fill="currentColor" />}
++      </svg>
++      <span className="chit-val">{value}</span>
++    </span>
++  );
++}
++
++// Главное меню — крышка коробки настольной игры
+ export function MenuScreen(p: Props) {
+   return (
+     <div className="overlay">
+-      <div className="menu">
+-        <div className="menu-head">
+-          <span className="menu-eyebrow">Мировой театр военных действий</span>
++      <div className="menu box">
++        <div className="box-band">
++          <span>Стратегия захвата мира</span>
++          <span>изд. 0.1</span>
++        </div>
++
++        <div className="box-art" aria-hidden="true">
++          <svg className="box-arrow" viewBox="0 0 460 150" preserveAspectRatio="xMidYMid slice">
++            <defs>
++              <marker id="wf-head" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto">
++                <path d="M0 0L10 5L0 10z" fill="#c4362a" />
++              </marker>
++            </defs>
++            <path
++              d="M70 120 C 150 120, 190 60, 300 58"
++              fill="none"
++              stroke="#c4362a"
++              strokeWidth="7"
++              strokeLinecap="round"
++              markerEnd="url(#wf-head)"
++            />
++          </svg>
++          <UnitChit className="c1" side="red" type="inf" size="XX" value="6–4" />
++          <UnitChit className="c2" side="olive" type="art" size="III" value="5–2" />
++          <UnitChit className="c3" side="olive" type="arm" size="XX" value="8–6" />
++        </div>
++
++        <div className="box-title">
+           <h1 className="title">Warfront</h1>
+-          <div className="frontline" aria-hidden="true" />
+           <span className="menu-tagline">Захвати планету — регион за регионом</span>
+         </div>
+ 
++        <dl className="box-specs">
++          <div>
++            <dt>до 100</dt>
++            <dd>игроков</dd>
++          </div>
++          <div>
++            <dt>Земля</dt>
++            <dd>карта</dd>
++          </div>
++          <div>
++            <dt>1–4</dt>
++            <dd>угроза</dd>
++          </div>
++        </dl>
++
+         <label className="field">
+-          <span className="eyebrow">Позывной командующего</span>
++          <span className="eyebrow">Позывной</span>
+           <input
+-            placeholder="Введите имя"
++            placeholder="Как вас называть"
+             value={p.name}
+             maxLength={16}
+             onChange={(e) => p.setName(e.target.value)}
+@@ -46,48 +129,41 @@ export function MenuScreen(p: Props) {
+         {p.menuView === 'main' && (
+           <>
+             <button className="primary" onClick={p.onQuick} disabled={!p.connected}>
+-              В бой<span className="btn-chev">→</span>
++              В бой
+             </button>
+             <div className="menu-split">
+               <button className="secondary" onClick={() => p.setMenuView('create')} disabled={!p.connected}>
+-                Создать операцию
++                Своя партия
+               </button>
+               <button className="secondary" onClick={() => p.setMenuView('join')} disabled={!p.connected}>
+                 Войти по коду
+               </button>
+             </div>
+-            <p className="hint">
+-              {p.connected ? 'Сервер на связи · карта: Земля' : 'Установка связи с сервером…'}
+-            </p>
+           </>
+         )}
+ 
+         {p.menuView === 'create' && (
+           <>
+             <div className="field">
+-              <span className="eyebrow">Уровень угрозы</span>
++              <span className="eyebrow">Сила противника</span>
+               <div className="opt-list">
+                 {DIFFS.map((d) => (
+                   <label key={d} className={'opt' + (p.difficulty === d ? ' active' : '')}>
+                     <input type="radio" name="diff" checked={p.difficulty === d} onChange={() => p.setDifficulty(d)} />
++                    <Die n={THREAT[d]} />
+                     <span className="opt-body">
+                       <span className="opt-name">{DIFF_LABELS[d].name}</span>
+                       <span className="opt-desc">{DIFF_LABELS[d].desc}</span>
+                     </span>
+-                    <span className="threat" aria-hidden="true">
+-                      {[0, 1, 2, 3].map((i) => (
+-                        <span key={i} className={'threat-dot' + (i < THREAT[d] ? ' on' : '')} />
+-                      ))}
+-                    </span>
+                   </label>
+                 ))}
+               </div>
+             </div>
+             <button className="primary" onClick={p.onCreate} disabled={!p.connected}>
+-              Развернуть лобби<span className="btn-chev">→</span>
++              Разложить карту
+             </button>
+             <button className="link" onClick={() => p.setMenuView('main')}>
+-              ← Назад
++              Назад
+             </button>
+           </>
+         )}
+@@ -95,10 +171,10 @@ export function MenuScreen(p: Props) {
+         {p.menuView === 'join' && (
+           <>
+             <label className="field">
+-              <span className="eyebrow">Шифр доступа</span>
++              <span className="eyebrow">Код партии</span>
+               <input
+                 className="code-input"
+-                placeholder="•••••"
++                placeholder="·····"
+                 value={p.joinCode}
+                 maxLength={5}
+                 onChange={(e) => p.setJoinCode(e.target.value.toUpperCase())}
+@@ -106,14 +182,19 @@ export function MenuScreen(p: Props) {
+               />
+             </label>
+             <button className="primary" onClick={p.onJoin} disabled={!p.connected || p.joinCode.length < 5}>
+-              Войти в лобби<span className="btn-chev">→</span>
++              Сесть за стол
+             </button>
+             <button className="link" onClick={() => p.setMenuView('main')}>
+-              ← Назад
++              Назад
+             </button>
+           </>
+         )}
++
+         {p.error && <p className="error">{p.error}</p>}
++
++        <p className={'box-status' + (p.connected ? ' on' : '')}>
++          {p.connected ? 'Сервер на связи' : 'Ищем сервер…'}
++        </p>
+       </div>
+     </div>
+   );
+diff --git a/client/tabletop.css b/client/tabletop.css
+new file mode 100644
+index 0000000..bc786bf
+--- /dev/null
++++ b/client/tabletop.css
+@@ -0,0 +1,1252 @@
++/* ==========================================================================
++   НАСТОЛЬНЫЙ ВАРГЕЙМ
++   Интерфейс — это картон и фишки, разложенные поверх карты:
++   • панели — карточки из плотного картона, печать в два цвета (чёрный + красный);
++   • кнопки и слоты — вырубленные фишки с толщиной (тень без размытия снизу),
++     при нажатии фишка «ложится» на стол;
++   • никаких размытий, свечений и градиентов — только плоская типографская печать.
++   Дисплей: Dela Gothic One. Текст и цифры: Golos Text.
++   Подключается после styles.css и переопределяет «тёмный штаб».
++   ========================================================================== */
++
++:root {
++  --card: #e9dfc7;          /* картон */
++  --card-hi: #f6f0e1;       /* светлая бумага: поля ввода, фишки */
++  --card-lo: #d8caa6;       /* торец коробки, «лежащая» фишка */
++  --print: #1f1b16;         /* типографская чёрная */
++  --print-2: #5b5244;
++  --print-3: #8a7f6b;
++  --red: #c4362a;           /* вторая краска печати */
++  --olive: #56623a;
++  --mustard: #e3b23c;
++  --gold-ink: #8a5d00;      /* «золото», читаемое на картоне */
++  --table: #1a1712;         /* стол, на котором всё лежит */
++  --chit: 0 3px 0 var(--print);
++  --lift: 0 3px 0 var(--print), 0 10px 22px rgba(0, 0, 0, 0.35);
++  --paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .12 0 0 0 0 .1 0 0 0 0 .08 .11 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
++  --hexes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='24.249' viewBox='0 0 42 24.249'%3E%3Cpath d='M0 12.124L7 0H21L28 12.124L21 24.249H7ZM28 12.124H42' fill='none' stroke='rgba(31,27,22,0.22)' stroke-width='1'/%3E%3C/svg%3E");
++}
++
++html,
++body {
++  font-family: 'Golos Text', 'Segoe UI', sans-serif;
++}
++
++/* Всё, что «лежит на столе», печатается тёмным по картону. Токены
++   переопределяем прямо на этих элементах — потомки подхватят новые цвета. */
++.menu,
++.panel,
++.ctrl-panel,
++.speed-pop,
++.fps,
++.chat-history,
++.chat-toggle,
++.spawn-banner,
++.pause-banner,
++.myboat,
++.ctx-menu,
++.donate-modal,
++.proposal-card,
++.spectate-bar,
++.winner,
++.radial-label {
++  --ink: var(--print);
++  --ink-dim: var(--print-2);
++  --ink-faint: var(--print-3);
++  --edge: rgba(31, 27, 22, 0.28);
++  --khaki: var(--olive);
++  --panel: var(--card);
++  color: var(--print);
++  background: var(--paper), var(--card);
++  border: 2px solid var(--print);
++  border-radius: 4px;
++  backdrop-filter: none;
++  box-shadow: var(--lift);
++}
++
++.eyebrow {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-size: 10px;
++  letter-spacing: 0.16em;
++}
++
++:focus-visible {
++  outline: 3px solid var(--mustard);
++  outline-offset: 2px;
++}
++
++/* Фишка: общий «вырубной» стиль для кнопок поверх картона */
++.ctrl-btn,
++.lb-tbtn,
++.fleet-btn,
++.donate-tab,
++.spectate-btn.ghost,
++.menu button.secondary {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  color: var(--print);
++  box-shadow: 0 2px 0 var(--print);
++  transition: transform 0.08s, box-shadow 0.08s;
++}
++
++.ctrl-btn:hover,
++.lb-tbtn:hover:not(:disabled),
++.fleet-btn:not(:disabled):hover,
++.donate-tab:hover,
++.spectate-btn.ghost:hover,
++.menu button.secondary:not(:disabled):hover {
++  border-color: var(--print);
++  background: #fffaf0;
++  color: var(--print);
++  transform: translateY(-1px);
++  box-shadow: 0 3px 0 var(--print);
++}
++
++.ctrl-btn:active,
++.lb-tbtn:active:not(:disabled),
++.fleet-btn:active:not(:disabled),
++.menu button.secondary:active:not(:disabled) {
++  transform: translateY(2px);
++  box-shadow: 0 0 0 var(--print);
++}
++
++/* Красная фишка — главное действие */
++.ctx-btn,
++.spectate-btn,
++.menu button.primary {
++  background: var(--red);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  color: #fff6e6;
++  box-shadow: 0 4px 0 var(--print);
++  filter: none;
++  transition: transform 0.08s, box-shadow 0.08s;
++}
++
++.ctx-btn:hover,
++.spectate-btn:hover,
++.menu button.primary:not(:disabled):hover {
++  filter: none;
++  background: #d33d30;
++  transform: translateY(-1px);
++  box-shadow: 0 5px 0 var(--print);
++}
++
++.ctx-btn:active,
++.spectate-btn:active,
++.menu button.primary:not(:disabled):active {
++  transform: translateY(3px);
++  box-shadow: 0 1px 0 var(--print);
++}
++
++.ctx-btn:disabled {
++  filter: none;
++  opacity: 0.45;
++}
++
++/* ---------------------------- меню: стол ---------------------------- */
++
++.overlay {
++  background:
++    radial-gradient(ellipse 70% 60% at 50% 45%, rgba(255, 236, 200, 0.06), transparent 70%),
++    var(--table);
++}
++
++.overlay::before,
++.overlay::after {
++  content: none;
++}
++
++/* Карточка меню (и лобби, и экраны конца) */
++.menu {
++  width: min(440px, calc(100vw - 32px));
++  padding: 22px 26px;
++  gap: 14px;
++  border-radius: 6px;
++  /* картонная коробка: торец + чёрная кромка + тень на столе */
++  box-shadow:
++    0 8px 0 -2px var(--card-lo),
++    0 10px 0 0 var(--print),
++    0 34px 60px rgba(0, 0, 0, 0.6);
++}
++
++.menu::before,
++.menu::after {
++  content: none;
++}
++
++.menu .title {
++  font-family: 'Dela Gothic One', sans-serif;
++  font-size: 40px;
++  letter-spacing: 0.01em;
++  color: var(--print);
++  /* сбитая приводка: красная краска легла на 3px мимо */
++  text-shadow: 3px 3px 0 var(--red);
++  padding-left: 0;
++}
++
++.menu-eyebrow {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  letter-spacing: 0.2em;
++  color: var(--red);
++}
++
++.frontline {
++  height: 2px;
++  width: 100%;
++  background: var(--print);
++}
++
++.frontline::after {
++  width: 9px;
++  height: 9px;
++  background: var(--red);
++  border: 2px solid var(--print);
++  box-shadow: none;
++}
++
++.menu-tagline {
++  font-size: 13px;
++  color: var(--print-2);
++}
++
++.menu input {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  color: var(--print);
++  font-weight: 600;
++}
++
++.menu input::placeholder {
++  color: var(--print-3);
++  font-weight: 400;
++}
++
++.menu input:focus {
++  border-color: var(--print);
++  box-shadow: 0 0 0 3px var(--mustard);
++}
++
++.code-input {
++  font-family: 'Dela Gothic One', sans-serif;
++  letter-spacing: 0.6em;
++  padding-left: calc(14px + 0.6em) !important;
++}
++
++.menu button.primary {
++  padding: 15px;
++  font-family: 'Dela Gothic One', sans-serif;
++  font-size: 17px;
++  letter-spacing: 0.06em;
++}
++
++.menu button.secondary {
++  padding: 11px 10px;
++  font-weight: 800;
++  font-size: 13px;
++}
++
++.menu button:disabled {
++  opacity: 0.45;
++  box-shadow: none;
++  transform: translateY(2px);
++}
++
++.menu button.link {
++  color: var(--print-2);
++  text-decoration: underline;
++  text-underline-offset: 3px;
++  font-weight: 600;
++}
++
++.menu button.link:hover {
++  color: var(--red);
++}
++
++.hint,
++.lobby-meta {
++  color: var(--print-2);
++}
++
++.dead-msg {
++  color: var(--red);
++  font-weight: 600;
++}
++
++.error {
++  color: var(--red);
++  font-weight: 600;
++  border: 2px solid var(--red);
++  border-radius: 3px;
++  background: rgba(196, 54, 42, 0.08);
++}
++
++/* -------------------- главное меню: крышка коробки -------------------- */
++
++.menu.box {
++  width: min(460px, calc(100vw - 32px));
++  padding: 0 0 18px;
++  overflow: hidden;
++}
++
++.menu.box > * {
++  margin-inline: 24px;
++}
++
++.menu.box > .box-band,
++.menu.box > .box-art,
++.menu.box > .box-specs {
++  margin-inline: 0;
++}
++
++.box-band {
++  display: flex;
++  justify-content: space-between;
++  padding: 7px 14px;
++  background: var(--red);
++  border-bottom: 2px solid var(--print);
++  color: #fff6e6;
++  font-size: 10px;
++  font-weight: 800;
++  letter-spacing: 0.18em;
++  text-transform: uppercase;
++}
++
++/* «Обложка»: кусок гексовой карты с сушей, фишками и стрелой наступления */
++.box-art {
++  position: relative;
++  height: 150px;
++  margin-top: -14px; /* гасим gap: обложка вплотную к ленте */
++  border-bottom: 2px solid var(--print);
++  background:
++    var(--hexes),
++    radial-gradient(ellipse 150px 90px at 18% 78%, #b9bf8a 0 98%, transparent 100%),
++    radial-gradient(ellipse 190px 110px at 82% 26%, #b9bf8a 0 98%, transparent 100%),
++    radial-gradient(ellipse 60px 40px at 55% 95%, #b9bf8a 0 98%, transparent 100%),
++    #a9c3c4;
++  overflow: hidden;
++}
++
++.box-arrow {
++  position: absolute;
++  inset: 0;
++  width: 100%;
++  height: 100%;
++}
++
++.chit {
++  position: absolute;
++  width: 54px;
++  height: 54px;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: space-between;
++  padding: 3px 0 2px;
++  border: 2px solid var(--print);
++  border-radius: 4px;
++  box-shadow: 0 3px 0 var(--print);
++  font-weight: 800;
++  line-height: 1;
++}
++
++.chit-red {
++  background: var(--red);
++  color: #fff6e6;
++}
++
++.chit-olive {
++  background: #7d8a52;
++  color: #f6f0e1;
++}
++
++.chit-size {
++  font-size: 8px;
++  letter-spacing: 0.1em;
++}
++
++.chit-sym {
++  width: 30px;
++  height: 20px;
++}
++
++.chit-val {
++  font-size: 11px;
++  font-variant-numeric: tabular-nums;
++}
++
++.chit.c1 {
++  left: 12%;
++  top: 74px;
++  transform: rotate(-5deg);
++}
++
++/* стопка из двух фишек — как в настоящем варгейме */
++.chit.c2 {
++  right: 17%;
++  top: 22px;
++  transform: rotate(4deg);
++}
++
++.chit.c3 {
++  right: calc(17% + 6px);
++  top: 16px;
++  transform: rotate(-2deg);
++}
++
++.box-title {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin-top: 2px;
++}
++
++.box-title .title {
++  text-align: left;
++  font-size: 46px;
++  text-transform: uppercase;
++}
++
++.box-title .menu-tagline {
++  text-align: left;
++}
++
++/* Характеристики на коробке: игроки · карта · угроза */
++.box-specs {
++  display: grid;
++  grid-template-columns: repeat(3, 1fr);
++  border-block: 2px solid var(--print);
++}
++
++.box-specs > div {
++  padding: 8px 6px;
++  text-align: center;
++}
++
++.box-specs > div + div {
++  border-left: 2px solid var(--print);
++}
++
++.box-specs dt {
++  font-family: 'Dela Gothic One', sans-serif;
++  font-size: 16px;
++}
++
++.box-specs dd {
++  font-size: 10px;
++  font-weight: 800;
++  letter-spacing: 0.16em;
++  text-transform: uppercase;
++  color: var(--print-2);
++}
++
++.box-status {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 8px;
++  font-size: 11px;
++  font-weight: 800;
++  letter-spacing: 0.14em;
++  text-transform: uppercase;
++  color: var(--print-3);
++}
++
++.box-status::before {
++  content: '';
++  width: 8px;
++  height: 8px;
++  border: 2px solid var(--print);
++  border-radius: 50%;
++}
++
++.box-status.on {
++  color: var(--olive);
++}
++
++.box-status.on::before {
++  background: #6f9a3a;
++}
++
++/* Выбор сложности: грань кубика вместо полосок угрозы */
++.opt {
++  position: relative;
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  padding: 9px 12px;
++}
++
++.opt:hover {
++  border-color: var(--print);
++  background: #fffaf0;
++}
++
++.opt.active {
++  border-color: var(--print);
++  background: #f3d98e;
++}
++
++/* радио скрыто визуально, но остаётся для клавиатуры и скринридеров */
++.opt input {
++  position: absolute;
++  opacity: 0;
++  pointer-events: none;
++}
++
++.opt:has(input:focus-visible) {
++  outline: 3px solid var(--mustard);
++  outline-offset: 2px;
++}
++
++.opt-name {
++  font-weight: 800;
++}
++
++.die {
++  flex: none;
++  display: grid;
++  grid-template-columns: repeat(3, 1fr);
++  grid-template-rows: repeat(3, 1fr);
++  width: 30px;
++  height: 30px;
++  padding: 4px;
++  gap: 1px;
++  background: #fffaf0;
++  border: 2px solid var(--print);
++  border-radius: 6px;
++  box-shadow: 0 2px 0 var(--print);
++}
++
++.die i {
++  border-radius: 50%;
++}
++
++.die i.on {
++  background: var(--print);
++}
++
++.opt.active .die {
++  background: var(--red);
++}
++
++.opt.active .die i.on {
++  background: #fff6e6;
++}
++
++/* Лобби и экраны конца живут в той же карточке */
++.lobby-player {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-left-width: 6px;
++  border-left-color: var(--red);
++  border-radius: 3px;
++}
++
++.lobby-host {
++  background: var(--print);
++  color: var(--card);
++  border-radius: 2px;
++}
++
++.invite-btn {
++  background: var(--card-hi);
++  border: 2px dashed var(--print);
++  border-radius: 3px;
++  color: var(--print);
++}
++
++.invite-btn:hover {
++  background: #fffaf0;
++}
++
++.invite-btn.copied {
++  border-color: var(--olive);
++  background: #dfe5c3;
++}
++
++.invite-btn.copied .invite-mark {
++  color: var(--olive);
++}
++
++.setting-row {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++}
++
++.setting-row.on {
++  border-color: var(--print);
++  background: #dfe5c3;
++}
++
++.setting-row input {
++  accent-color: var(--red);
++}
++
++.setting-note {
++  color: var(--red);
++  font-weight: 600;
++}
++
++/* ------------------------------- HUD ------------------------------- */
++
++.fps {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-size: 10px;
++  letter-spacing: 0.08em;
++  box-shadow: var(--chit);
++}
++
++/* мини-карта вклеена в картонную рамку */
++.minimap {
++  left: 22px;
++  bottom: 26px;
++  border: 2px solid var(--print);
++  border-radius: 2px;
++  box-shadow:
++    0 0 0 5px var(--card),
++    0 0 0 7px var(--print),
++    0 3px 0 7px var(--print),
++    0 14px 24px rgba(0, 0, 0, 0.45);
++}
++
++/* Лидерборд — карточка счёта с чёрной шапкой */
++.leaderboard {
++  top: 56px;
++  min-width: 330px;
++  padding: 0 14px 10px;
++  overflow: hidden;
++}
++
++.leaderboard .eyebrow {
++  margin: 0 -14px 8px;
++  padding: 7px 14px;
++  background: var(--print);
++  color: var(--card);
++}
++
++.room-code {
++  color: var(--mustard);
++}
++
++.lb-head {
++  border-bottom: 2px solid var(--print);
++}
++
++.lb-head .lb-name,
++.lb-head .lb-val,
++.lb-head .lb-stat,
++.lb-head .lb-rank {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  color: var(--print-2);
++}
++
++.lb-brow {
++  border-bottom: 1px dotted rgba(31, 27, 22, 0.35);
++}
++
++.lb-brow:hover {
++  background: rgba(31, 27, 22, 0.07);
++  border-radius: 0;
++}
++
++/* я — отмечен маркером, как в бланке счёта */
++.lb-row.me {
++  background: linear-gradient(transparent 18%, rgba(227, 178, 60, 0.55) 18% 86%, transparent 86%);
++}
++
++.lb-row.me .lb-name {
++  color: var(--print);
++  font-weight: 800;
++}
++
++.lb-rank {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  color: var(--print-2);
++}
++
++.lb-val,
++.lb-stat {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 600;
++  color: var(--print);
++  font-variant-numeric: tabular-nums;
++}
++
++.lb-gold,
++.opp-gold,
++.tool-cost {
++  color: var(--gold-ink);
++}
++
++.lb-bot {
++  margin-left: 5px;
++  padding: 0 3px;
++  border: 1px solid var(--print-3);
++  border-radius: 2px;
++  font-size: 9px;
++  font-weight: 800;
++  letter-spacing: 0.06em;
++  text-transform: uppercase;
++  color: var(--print-3);
++  vertical-align: 1px;
++}
++
++.dot {
++  border: 1.5px solid var(--print);
++  border-radius: 1px;
++}
++
++.lb-toggle {
++  border-top: 2px solid var(--print);
++}
++
++.lb-count {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  color: var(--print-2);
++}
++
++.lb-tbtn:disabled {
++  box-shadow: none;
++}
++
++/* Основная панель снизу */
++.hud {
++  padding: 10px 12px 12px;
++  gap: 10px;
++}
++
++.growth-chip,
++.gold-chip {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-size: 14px;
++  font-variant-numeric: tabular-nums;
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  padding: 5px 9px;
++  box-shadow: var(--chit);
++}
++
++.growth-chip {
++  background: var(--olive);
++  color: #f6f0e1;
++}
++
++.growth-chip small,
++.troop-nums small {
++  font-size: 11px;
++  font-weight: 600;
++  opacity: 0.8;
++}
++
++/* золото — монета */
++.gold-chip {
++  background: var(--mustard);
++  color: var(--print);
++  border-radius: 999px;
++}
++
++/* полоса армии — печатная шкала с делениями по 10% */
++.troop-wrap {
++  height: 32px;
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  background:
++    repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(31, 27, 22, 0.3) calc(10% - 1px) 10%),
++    var(--card-hi);
++}
++
++.troop-fill {
++  border-radius: 0;
++  opacity: 0.9;
++  border-right: 2px solid var(--print);
++}
++
++/* штриховка поверх цвета игрока (inline background перетирает background-image,
++   поэтому — псевдоэлементом) */
++.troop-fill::after {
++  content: '';
++  position: absolute;
++  inset: 0;
++  background: repeating-linear-gradient(-45deg, rgba(31, 27, 22, 0.16) 0 2px, transparent 2px 7px);
++}
++
++.troop-nums {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-size: 15px;
++  font-variant-numeric: tabular-nums;
++  color: var(--print);
++  /* светлая обводка: число читается поверх любого цвета игрока */
++  text-shadow:
++    0 0 3px var(--card-hi),
++    0 0 3px var(--card-hi),
++    0 0 1px var(--card-hi);
++}
++
++.committed {
++  color: var(--red);
++}
++
++/* ползунок доли войск: шкала с красной риской-фишкой */
++.ratio-val {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-variant-numeric: tabular-nums;
++  color: var(--print);
++}
++
++.ratio input[type='range'] {
++  -webkit-appearance: none;
++  appearance: none;
++  height: 22px;
++  background: transparent;
++  cursor: pointer;
++}
++
++.ratio input[type='range']::-webkit-slider-runnable-track {
++  height: 10px;
++  border: 2px solid var(--print);
++  border-radius: 2px;
++  background:
++    repeating-linear-gradient(90deg, transparent 0 calc(5% - 1px), rgba(31, 27, 22, 0.35) calc(5% - 1px) 5%),
++    var(--card-hi);
++}
++
++.ratio input[type='range']::-webkit-slider-thumb {
++  -webkit-appearance: none;
++  width: 16px;
++  height: 22px;
++  margin-top: -8px;
++  background: var(--red);
++  border: 2px solid var(--print);
++  border-radius: 2px;
++  box-shadow: 0 2px 0 var(--print);
++}
++
++.ratio input[type='range']::-moz-range-track {
++  height: 6px;
++  border: 2px solid var(--print);
++  border-radius: 2px;
++  background:
++    repeating-linear-gradient(90deg, transparent 0 calc(5% - 1px), rgba(31, 27, 22, 0.35) calc(5% - 1px) 5%),
++    var(--card-hi);
++}
++
++.ratio input[type='range']::-moz-range-thumb {
++  width: 12px;
++  height: 18px;
++  background: var(--red);
++  border: 2px solid var(--print);
++  border-radius: 2px;
++  box-shadow: 0 2px 0 var(--print);
++}
++
++/* Слоты построек — вырубленные фишки. Доступная стоит «на ребре»,
++   выбранная приподнята и перевёрнута красной стороной, недоступная лежит. */
++.toolbar {
++  gap: 6px;
++  padding-top: 2px;
++}
++
++.tool {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  box-shadow: 0 3px 0 var(--print);
++  overflow: hidden;
++  transition: transform 0.08s, box-shadow 0.08s, background 0.08s;
++}
++
++.tool:not(.disabled):hover {
++  border-color: var(--print);
++  background: #fffaf0;
++  transform: translateY(-2px);
++  box-shadow: 0 5px 0 var(--print);
++}
++
++.tool.selected,
++.tool.selected:not(.disabled):hover {
++  border-color: var(--print);
++  background: var(--red);
++  transform: translateY(-3px);
++  box-shadow: 0 6px 0 var(--print);
++}
++
++.tool.disabled {
++  opacity: 1;
++  filter: none;
++  background: var(--card-lo);
++  transform: translateY(2px);
++  box-shadow: 0 1px 0 var(--print);
++}
++
++.tool.disabled > .tool-icon-svg,
++.tool.disabled > .tool-icon {
++  opacity: 0.35;
++}
++
++/* цена у недоступной фишки должна читаться: видно, сколько ещё копить */
++.tool.disabled > .tool-cost,
++.tool.disabled > .tool-count {
++  opacity: 0.85;
++}
++
++.tool-icon-svg {
++  width: 52%;
++  height: 52%;
++  filter: brightness(0);
++  opacity: 0.88;
++}
++
++.tool.selected .tool-icon-svg {
++  filter: brightness(0) invert(0.96);
++  opacity: 1;
++}
++
++.tool-key {
++  top: 0;
++  left: 0;
++  padding: 1px 4px 1px 3px;
++  background: var(--print);
++  color: var(--card);
++  border-bottom-right-radius: 3px;
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-size: 9px;
++}
++
++.tool-count,
++.tool-cost {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  font-variant-numeric: tabular-nums;
++}
++
++.tool-count {
++  color: var(--print);
++}
++
++.tool-cost {
++  font-size: 8.5px;
++}
++
++.tool.selected .tool-count,
++.tool.selected .tool-cost {
++  color: #fff6e6;
++}
++
++.tool.selected .tool-key {
++  background: #fff6e6;
++  color: var(--print);
++}
++
++/* множитель пакета — в правый верхний угол, чтобы не налезал на номер клавиши */
++.tool-batch {
++  left: auto;
++  right: 3px;
++  color: var(--red);
++  text-shadow: none;
++}
++
++/* подсказки режимов — жёлтая карточка-памятка */
++.build-hint {
++  background: var(--mustard);
++  color: var(--print);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  box-shadow: var(--chit);
++  animation: none;
++}
++
++.build-hint.nuke-hint {
++  background: var(--red);
++  border-color: var(--print);
++  color: #fff6e6;
++}
++
++/* входящий десант — красная тревожная фишка */
++.incoming-row {
++  background: var(--red);
++  border: 2px solid var(--print);
++  border-radius: 3px;
++  color: #fff6e6;
++  box-shadow: var(--chit);
++  backdrop-filter: none;
++  animation: none;
++}
++
++.incoming-row:hover {
++  background: #d33d30;
++  border-color: var(--print);
++}
++
++.inc-focus {
++  color: #fff6e6;
++}
++
++.inc-dot {
++  border: 1.5px solid var(--print);
++}
++
++.inc-eta {
++  background: rgba(31, 27, 22, 0.35);
++}
++
++.myboat {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 600;
++  padding: 4px 5px 4px 9px;
++  border-radius: 3px;
++  box-shadow: var(--chit);
++}
++
++.myboat-eta {
++  background: rgba(31, 27, 22, 0.12);
++}
++
++.myboat-recall {
++  background: var(--red);
++  color: #fff6e6;
++  border: 1.5px solid var(--print);
++}
++
++/* правый верхний угол */
++.ctrl-panel {
++  padding: 4px;
++  gap: 5px;
++}
++
++.ctrl-btn {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++}
++
++.ctrl-speed.active {
++  background: var(--print);
++  color: var(--card);
++}
++
++.ctrl-exit:hover {
++  background: var(--red);
++  color: #fff6e6;
++  border-color: var(--print);
++}
++
++.ctrl-speed-toggle.active {
++  border-color: var(--print);
++  background: var(--mustard);
++}
++
++/* баннеры */
++.spawn-banner {
++  font-weight: 800;
++  animation: none;
++}
++
++.timer {
++  font-family: 'Dela Gothic One', sans-serif;
++  color: var(--red);
++}
++
++.pause-banner {
++  font-family: 'Dela Gothic One', sans-serif;
++  font-weight: 400;
++}
++
++/* тултипы противника и корабля */
++.opp-tip,
++.ship-tip {
++  border-radius: 3px;
++}
++
++.opp-head {
++  border-bottom: 2px solid var(--print);
++}
++
++.opp-lbl {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++}
++
++.opp-val,
++.opp-bld {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 600;
++  font-variant-numeric: tabular-nums;
++}
++
++.opp-bld-icon {
++  filter: brightness(0);
++}
++
++.ship-rank {
++  color: var(--gold-ink);
++}
++
++.ship-stripes i {
++  background: var(--gold-ink);
++}
++
++.ship-hp-wrap {
++  border: 2px solid var(--print);
++  background: var(--card-hi);
++}
++
++.ship-hp-nums {
++  color: var(--print);
++  text-shadow: 0 0 3px var(--card-hi), 0 0 3px var(--card-hi);
++}
++
++/* лента событий */
++.chat-toggle {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  border-radius: 3px;
++  box-shadow: var(--chit);
++}
++
++.chat-toggle:hover {
++  border-color: var(--print);
++  color: var(--print);
++  background: #fffaf0;
++}
++
++.chat-badge {
++  background: var(--red);
++  color: #fff6e6;
++  border-radius: 2px;
++}
++
++.chat-toast,
++.chat-line {
++  border-radius: 3px;
++  border-width: 2px;
++  backdrop-filter: none;
++}
++
++.chat-toast.ok,
++.chat-line.ok {
++  background: #dfe5c3;
++  border-color: var(--print);
++  color: var(--print);
++}
++
++.chat-toast.no,
++.chat-line.no {
++  background: #f1c9bf;
++  border-color: var(--print);
++  color: var(--print);
++}
++
++.chat-toast {
++  box-shadow: var(--chit);
++}
++
++/* круговое меню цели — круглые фишки */
++.radial-btn {
++  background: var(--card-hi);
++  border: 2px solid var(--print);
++  color: var(--print);
++  backdrop-filter: none;
++  box-shadow: 0 3px 0 var(--print);
++}
++
++.radial-btn:hover:not(.disabled) {
++  border-color: var(--print);
++  background: #fffaf0;
++}
++
++.radial-txt {
++  color: var(--print-2);
++  font-weight: 800;
++}
++
++.radial-center {
++  background: var(--mustard);
++  border: 2px solid var(--print);
++  color: var(--print);
++  box-shadow: 0 3px 0 var(--print), 0 10px 22px rgba(0, 0, 0, 0.4);
++}
++
++.radial-center:hover:not(.disabled) {
++  border-color: var(--print);
++  filter: none;
++  background: #ecc157;
++}
++
++.radial-center-txt {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  color: var(--print);
++}
++
++.radial-label {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++}
++
++.donate-tab.active {
++  background: var(--print);
++  border-color: var(--print);
++  color: var(--card);
++}
++
++.donate-amount {
++  font-family: 'Dela Gothic One', sans-serif;
++}
++
++.donate-slider {
++  accent-color: var(--red);
++}
++
++.proposal-card {
++  border-left: 6px solid #2f7f86;
++}
++
++.spectate-tag {
++  font-family: 'Golos Text', sans-serif;
++  font-weight: 800;
++  color: var(--print);
++}
++
++@media (max-width: 700px) {
++  .leaderboard {
++    min-width: 210px;
++  }
++
++  .minimap {
++    left: 18px;
++  }
++
++  .box-title .title {
++    font-size: 36px;
++  }
++
++  .box-art {
++    height: 120px;
++  }
++
++  .chit.c1 {
++    top: 56px;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .tool,
++  .ctrl-btn,
++  .menu button.primary,
++  .menu button.secondary {
++    transition: none;
++  }
++}
